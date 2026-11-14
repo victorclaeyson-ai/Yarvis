@@ -4,8 +4,9 @@
 
 Your own Jarvis — except it lives on your machine, like a yeti lives off the grid.
 
-> **Status: early development (Phase 0 of 5).** The foundations are in place; the voice loop
-> arrives in Phase 1. Star or watch the repo to follow along.
+> **Status: early development (Phase 1 of 5).** You can already talk to Yarvis in its own
+> app window: press Space, speak, and it answers out loud. Wake word and interruptions are next. Star or watch the
+> repo to follow along.
 
 ## Why Yarvis
 
@@ -27,23 +28,34 @@ Read the full [design document](docs/DESIGN.md).
 | Phase | Scope | Status |
 |---|---|---|
 | 0 | Foundations: tooling, CI, config, secrets, event bus, `yarvis doctor` | ✅ done |
-| 1 | Voice loop: wake word, streaming STT, Claude, streaming TTS, barge-in | 🚧 next |
+| 1 | Voice loop: wake word, streaming STT, Claude, streaming TTS, barge-in | 🚧 in progress |
 | 2 | Tools and the security core: permission gate, MCP | planned |
 | 3 | Memory and fully offline mode | planned |
 | 4 | ESP32 desk satellite | planned |
 | 5 | v1.0 launch | planned |
 
-## Try the foundations
+## Try it
 
-Requires macOS (Apple Silicon) or Linux, and [uv](https://docs.astral.sh/uv/).
+Requires macOS 14+ on Apple Silicon, or Linux, plus [uv](https://docs.astral.sh/uv/) and an
+[Anthropic API key](https://console.anthropic.com).
 
 ```bash
-git clone <this repo> && cd yarvis
+git clone https://github.com/victorclaeyson-ai/Yarvis.git && cd Yarvis
 uv sync
-uv run yarvis doctor          # checks Python, audio devices, keychain, config
-uv run yarvis config init     # writes a commented config file
 uv run yarvis key set anthropic   # stores your API key in the OS keychain
+uv run yarvis doctor              # checks audio devices, keychain, models
+uv run yarvis app                 # opens the Yarvis window: press Space and talk
 ```
+
+The first run downloads the speech models (~500 MB, verified by SHA-256). After that, speech
+recognition and the voice run fully on your machine; only the text of the conversation goes
+to Claude.
+
+Prefer the terminal? `yarvis run` does the same in your shell. Both accept `--text` (type
+instead of speaking) and `--mute` (no voice output). `yarvis config init` writes a commented
+config file (voice, speed, model, vocabulary for names, end-of-turn timing).
+
+On Linux, the app window needs a GUI backend: `uv pip install 'pywebview[qt]'`.
 
 ## Development
 

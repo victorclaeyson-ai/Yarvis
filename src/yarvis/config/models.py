@@ -6,9 +6,9 @@ instead of a silently ignored setting.
 
 from __future__ import annotations
 
-from typing import Literal
+from typing import Annotated, Literal
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, StringConstraints
 
 LogLevel = Literal["DEBUG", "INFO", "WARNING", "ERROR"]
 
@@ -37,12 +37,34 @@ class LLMConfig(_Section):
     ollama_url: str = Field(default="http://127.0.0.1:11434", pattern=r"^https?://")
 
 
-class VoiceConfig(_Section):
-    """Audio devices and speech backends."""
+SttModel = Literal["tiny.en", "base.en", "small.en"]
+VocabularyWord = Annotated[
+    str, StringConstraints(strip_whitespace=True, min_length=1, max_length=40)
+]
 
-    stt: Literal["auto", "mlx-whisper", "faster-whisper"] = "auto"
-    tts: Literal["kokoro", "piper"] = "kokoro"
-    voice: str | None = None
+
+class VoiceConfig(_Section):
+    """Audio devices and speech backends.
+
+    Only implemented backends are accepted; more (MLX Whisper, Piper) arrive in later phases.
+    """
+
+    stt: Literal["auto", "faster-whisper"] = "auto"
+    stt_model: SttModel = "base.en"
+    vocabulary: tuple[VocabularyWord, ...] = Field(
+        default=("Yarvis",),
+        max_length=50,
+        description="Names and places speech recognition should spell correctly.",
+    )
+    tts: Literal["kokoro"] = "kokoro"
+    voice: str = Field(default="bm_george", pattern=r"^[a-z]{2}_[a-z]+$")
+    speech_rate: float = Field(default=1.0, ge=0.5, le=2.0)
+    end_of_turn_ms: int = Field(
+        default=700,
+        ge=200,
+        le=3000,
+        description="Silence that ends your turn. Lower is faster but may cut you off.",
+    )
     input_device: str | int | None = None
     output_device: str | int | None = None
 

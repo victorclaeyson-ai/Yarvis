@@ -6,6 +6,7 @@ from typing import TYPE_CHECKING
 import pytest
 
 from fakes import MIC, SPEAKER, VALID_KEY, FakeAudioProbe, FakeKeyring
+from test_runtime_and_run import install_models
 from yarvis.config import Config, parse_config, write_default_config
 from yarvis.doctor import (
     CheckResult,
@@ -16,6 +17,7 @@ from yarvis.doctor import (
     check_audio_output,
     check_config,
     check_keychain,
+    check_models,
     check_platform,
     check_python,
     check_storage,
@@ -52,8 +54,9 @@ def test_current_context_describes_this_machine(
 
 def test_healthy_machine_passes(ctx: DoctorContext, fake_keyring: FakeKeyring) -> None:
     fake_keyring.store[(KEYRING_SERVICE, "anthropic")] = VALID_KEY
+    install_models(ctx.paths)
     results = run_doctor(ctx)
-    assert [result.status for result in results] == [Status.OK] * 8
+    assert [result.status for result in results] == [Status.OK] * 9
     assert not has_failures(results)
 
 
@@ -194,3 +197,21 @@ def test_has_failures() -> None:
     fail = CheckResult("c", Status.FAIL, "")
     assert not has_failures([ok, warn])
     assert has_failures([ok, fail])
+
+
+def test_missing_models_warn(ctx: DoctorContext) -> None:
+    result = check_models(ctx, Config())
+    assert result.status is Status.WARN
+    assert "Kokoro voice" in result.detail
+    assert "Whisper base.en" in result.detail
+    install_models(ctx.paths)
+    assert check_models(ctx, Config()).status is Status.OK
+
+
+@pytest.mark.parametrize(
+    ("version", "status"), [("14.5", Status.OK), ("26.1", Status.OK), ("13.6.1", Status.FAIL)]
+)
+def test_macos_version(ctx: DoctorContext, version: str, status: Status) -> None:
+    result = check_platform(replace(ctx, mac_version=version))
+    assert result.status is status
+    assert f"macOS {version}" in result.detail

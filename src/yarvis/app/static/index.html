@@ -1,0 +1,440 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<!-- The page talks to Python only through the pywebview bridge: no network, no remote code.
+     'unsafe-eval' is required by pywebview itself, which generates its JS API at runtime;
+     this page never evaluates strings and inserts all text with textContent. -->
+<meta http-equiv="Content-Security-Policy"
+      content="default-src 'none'; script-src 'unsafe-inline' 'unsafe-eval'; style-src 'unsafe-inline'; img-src data:; connect-src 'none'; font-src 'none'; base-uri 'none'; form-action 'none'">
+<title>Yarvis</title>
+<style>
+  :root {
+    --bg: #07080c;
+    --panel: rgba(255, 255, 255, 0.04);
+    --line: rgba(255, 255, 255, 0.08);
+    --text: #e9edf6;
+    --muted: #8a93a8;
+    --accent: #5ad8ff;
+    --accent-2: #4361ee;
+    --danger: #ff5c7a;
+    --radius: 14px;
+  }
+  * { box-sizing: border-box; }
+  html, body { height: 100%; margin: 0; }
+  body {
+    background:
+      radial-gradient(120% 70% at 50% 0%, #10183a 0%, rgba(16, 24, 58, 0) 60%),
+      radial-gradient(80% 50% at 50% 100%, #0c1124 0%, rgba(12, 17, 36, 0) 70%),
+      var(--bg);
+    color: var(--text);
+    font: 15px/1.5 -apple-system, BlinkMacSystemFont, "SF Pro Text", "Segoe UI", Inter, Roboto, sans-serif;
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+    user-select: none;
+    -webkit-user-select: none;
+  }
+  header {
+    display: flex; align-items: center; justify-content: space-between;
+    padding: 14px 18px 0;
+  }
+  .brand { font-weight: 600; letter-spacing: 0.32em; font-size: 12px; color: #c9d3ea; }
+  .pill {
+    display: inline-flex; align-items: center; gap: 7px;
+    padding: 4px 10px; border-radius: 999px;
+    background: var(--panel); border: 1px solid var(--line);
+    font-size: 12px; color: var(--muted);
+  }
+  .pill i { width: 7px; height: 7px; border-radius: 50%; background: var(--muted); transition: background .3s; }
+  .pill[data-state="idle"] i { background: #3ddc97; }
+  .pill[data-state="listening"] i { background: var(--accent); box-shadow: 0 0 8px var(--accent); }
+  .pill[data-state="thinking"] i { background: #b388ff; }
+  .pill[data-state="speaking"] i { background: #ffd166; }
+  .pill[data-state="error"] i { background: var(--danger); }
+
+  .stage { display: flex; flex-direction: column; align-items: center; padding: 6px 0 4px; }
+  canvas#orb { width: 230px; height: 230px; }
+  .caption { margin-top: -6px; font-size: 13px; color: var(--muted); min-height: 20px; letter-spacing: .02em; }
+  .timing {
+    margin-top: 6px; font-size: 11px; color: #6f7890; min-height: 16px;
+    font-variant-numeric: tabular-nums; text-align: center; padding: 0 24px; cursor: default;
+  }
+
+  main#log {
+    flex: 1; overflow-y: auto; padding: 8px 18px 12px;
+    display: flex; flex-direction: column; gap: 10px;
+    mask-image: linear-gradient(to bottom, transparent 0, #000 18px);
+    -webkit-mask-image: linear-gradient(to bottom, transparent 0, #000 18px);
+    user-select: text; -webkit-user-select: text;
+  }
+  main#log::-webkit-scrollbar { width: 6px; }
+  main#log::-webkit-scrollbar-thumb { background: rgba(255,255,255,.08); border-radius: 3px; }
+  .msg { max-width: 88%; white-space: pre-wrap; word-wrap: break-word; animation: rise .25s ease-out; }
+  .msg.user {
+    align-self: flex-end; background: rgba(90, 216, 255, 0.10);
+    border: 1px solid rgba(90, 216, 255, 0.18);
+    padding: 8px 12px; border-radius: var(--radius) var(--radius) 4px var(--radius);
+  }
+  .msg.assistant { align-self: flex-start; padding: 2px 2px; }
+  .msg.assistant .who {
+    display: block; font-size: 10px; letter-spacing: .18em; text-transform: uppercase;
+    color: var(--accent); opacity: .8; margin-bottom: 2px;
+  }
+  .note { align-self: center; font-size: 12px; color: var(--muted); animation: rise .25s ease-out; }
+  .note.error { color: var(--danger); text-align: center; max-width: 90%; }
+  .empty { margin: auto; text-align: center; color: #5b6479; font-size: 13px; line-height: 1.7; }
+  @keyframes rise { from { opacity: 0; transform: translateY(4px); } to { opacity: 1; transform: none; } }
+
+  footer { padding: 10px 14px 14px; border-top: 1px solid var(--line); background: rgba(7, 8, 12, .6); }
+  .row { display: flex; gap: 10px; align-items: center; }
+  button#talk {
+    flex: none; width: 48px; height: 48px; border-radius: 50%; border: 0; cursor: pointer;
+    background: radial-gradient(circle at 35% 30%, #7fe3ff, #2f7bff 70%);
+    box-shadow: 0 6px 22px rgba(47, 123, 255, .45), inset 0 1px 0 rgba(255,255,255,.4);
+    display: grid; place-items: center; transition: transform .12s, filter .2s, opacity .2s;
+  }
+  button#talk:hover { transform: scale(1.05); }
+  button#talk:active { transform: scale(.96); }
+  button#talk:disabled { filter: grayscale(.8); opacity: .45; cursor: default; transform: none; }
+  button#talk svg { width: 22px; height: 22px; fill: #fff; }
+  button#talk .icon-stop { display: none; }
+  button#talk.stop { background: radial-gradient(circle at 35% 30%, #ff9aae, #e2385c 70%); box-shadow: 0 6px 22px rgba(226, 56, 92, .45), inset 0 1px 0 rgba(255,255,255,.35); }
+  button#talk.stop .icon-mic { display: none; }
+  button#talk.stop .icon-stop { display: block; }
+  .field {
+    flex: 1; display: flex; align-items: center; gap: 6px;
+    background: var(--panel); border: 1px solid var(--line); border-radius: 999px; padding: 4px 4px 4px 16px;
+  }
+  .field:focus-within { border-color: rgba(90, 216, 255, .45); }
+  input#text {
+    flex: 1; min-width: 0; background: transparent; border: 0; outline: 0;
+    color: var(--text); font: inherit; padding: 8px 0;
+    user-select: text; -webkit-user-select: text;
+  }
+  input#text::placeholder { color: #5f687d; }
+  button#send {
+    border: 0; background: transparent; color: var(--accent); cursor: pointer;
+    width: 36px; height: 36px; border-radius: 50%; display: grid; place-items: center;
+  }
+  button#send:disabled { color: #3c4457; cursor: default; }
+  button#send svg { width: 18px; height: 18px; fill: currentColor; }
+  .hint { margin-top: 8px; text-align: center; font-size: 11px; color: #555e73; }
+  kbd {
+    font: 11px ui-monospace, SFMono-Regular, Menlo, monospace; color: #8a93a8;
+    border: 1px solid var(--line); border-bottom-width: 2px; border-radius: 5px; padding: 0 5px;
+  }
+  @media (prefers-reduced-motion: reduce) { .msg, .note { animation: none; } }
+</style>
+</head>
+<body>
+  <header>
+    <div class="brand" id="brand">YARVIS</div>
+    <div class="pill" id="pill" data-state="loading"><i></i><span id="pill-text">Starting</span></div>
+  </header>
+
+  <section class="stage">
+    <canvas id="orb" width="460" height="460" aria-hidden="true"></canvas>
+    <div class="caption" id="caption">Loading…</div>
+    <div class="timing" id="timing"></div>
+  </section>
+
+  <main id="log" aria-live="polite">
+    <div class="empty" id="empty">Press <kbd>Space</kbd> or the button and start talking.<br>Or type a message below.</div>
+  </main>
+
+  <footer>
+    <div class="row">
+      <button id="talk" title="Talk (Space)" aria-label="Talk" disabled>
+        <svg class="icon-mic" viewBox="0 0 24 24"><path d="M12 15a3.5 3.5 0 0 0 3.5-3.5v-6a3.5 3.5 0 1 0-7 0v6A3.5 3.5 0 0 0 12 15Zm6-3.5a1 1 0 1 1 2 0 8 8 0 0 1-7 7.94V21a1 1 0 1 1-2 0v-1.56a8 8 0 0 1-7-7.94 1 1 0 1 1 2 0 6 6 0 0 0 12 0Z"/></svg>
+        <svg class="icon-stop" viewBox="0 0 24 24"><rect x="6.5" y="6.5" width="11" height="11" rx="2.5"/></svg>
+      </button>
+      <div class="field">
+        <input id="text" type="text" placeholder="Type a message…" autocomplete="off" spellcheck="true" maxlength="2000" disabled>
+        <button id="send" title="Send (Enter)" aria-label="Send" disabled>
+          <svg viewBox="0 0 24 24"><path d="M3.4 20.4 21 12 3.4 3.6l-.02 6.53L15 12 3.38 13.87z"/></svg>
+        </button>
+      </div>
+    </div>
+    <div class="hint" id="hint"><kbd>Space</kbd> to talk or stop · <kbd>Enter</kbd> to send</div>
+  </footer>
+
+<script>
+"use strict";
+(() => {
+  // ------------------------------------------------------------------ state
+  const $ = (id) => document.getElementById(id);
+  const ui = {
+    pill: $("pill"), pillText: $("pill-text"), caption: $("caption"), timing: $("timing"),
+    log: $("log"), empty: $("empty"), talk: $("talk"), text: $("text"), send: $("send"),
+    hint: $("hint"), brand: $("brand"),
+  };
+  const STATES = {
+    loading:   { label: "Starting",  caption: "Loading…",           hue: 205, energy: 0.15, spin: 0.2 },
+    idle:      { label: "Ready",     caption: "",                   hue: 200, energy: 0.20, spin: 0.25 },
+    listening: { label: "Listening", caption: "Listening…",         hue: 190, energy: 0.35, spin: 0.5 },
+    thinking:  { label: "Thinking",  caption: "Thinking…",          hue: 268, energy: 0.45, spin: 1.6 },
+    speaking:  { label: "Speaking",  caption: "",                   hue: 205, energy: 0.6,  spin: 0.8 },
+    error:     { label: "Error",     caption: "",                   hue: 350, energy: 0.3,  spin: 0.3 },
+  };
+  let state = "loading";
+  let voice = true;
+  let busy = true;
+  let current = null;      // the assistant message being streamed
+  let level = 0;           // smoothed mic level, 0..1
+  let levelTarget = 0;
+  let name = "Yarvis";
+
+  // ------------------------------------------------------------------ rendering helpers
+  function scrollToEnd() { ui.log.scrollTop = ui.log.scrollHeight; }
+
+  function clearEmpty() { if (ui.empty) { ui.empty.remove(); ui.empty = null; } }
+
+  function addMessage(role, text) {
+    clearEmpty();
+    const el = document.createElement("div");
+    el.className = "msg " + role;
+    let body = el;
+    if (role === "assistant") {
+      const who = document.createElement("span");
+      who.className = "who";
+      who.textContent = name;
+      el.appendChild(who);
+      body = document.createElement("span");
+      el.appendChild(body);
+    }
+    body.textContent = text;      // text only, never markup: model output is untrusted
+    ui.log.appendChild(el);
+    scrollToEnd();
+    return body;
+  }
+
+  function addNote(text, kind) {
+    clearEmpty();
+    const el = document.createElement("div");
+    el.className = "note" + (kind ? " " + kind : "");
+    el.textContent = text;
+    ui.log.appendChild(el);
+    scrollToEnd();
+  }
+
+  function setState(next) {
+    if (!STATES[next]) return;
+    state = next;
+    busy = next !== "idle";
+    const info = STATES[next];
+    ui.pill.dataset.state = next;
+    ui.pillText.textContent = info.label;
+    if (next !== "error") ui.caption.textContent = info.caption;
+    if (next === "idle") { levelTarget = 0; }
+    if (next === "listening") { ui.timing.textContent = ""; }
+    const canStop = busy && next !== "loading";
+    ui.talk.classList.toggle("stop", canStop);
+    ui.talk.title = canStop ? "Stop (Space or Esc)" : "Talk (Space)";
+    ui.talk.setAttribute("aria-label", canStop ? "Stop" : "Talk");
+    ui.talk.disabled = next === "loading" || (!canStop && !voice);
+    ui.text.disabled = next === "loading";
+    ui.send.disabled = busy || !ui.text.value.trim();
+    ui.hint.style.visibility = voice ? "visible" : "hidden";
+  }
+
+  // ------------------------------------------------------------------ events from Python
+  const handlers = {
+    state(e) { if (typeof e.voice === "boolean") voice = e.voice; confirmed(); setState(e.state); },
+    stopped() { current = null; addNote("Stopped."); },
+    notice(e) { if (state === "loading") ui.caption.textContent = e.text; else addNote(e.text); },
+    speech() { ui.caption.textContent = "Listening…"; },
+    level(e) { levelTarget = Math.min(1, Math.sqrt(Math.max(0, e.value)) * 3.2); },
+    user(e) { addMessage("user", e.text); current = null; },
+    delta(e) { if (!current) current = addMessage("assistant", ""); current.textContent += e.text; scrollToEnd(); },
+    done(e) {
+      current = null;
+      const ms = typeof e.ms === "number" ? e.ms : null;
+      ui.timing.textContent = ms === null ? "" : "⏱ " + (ms / 1000).toFixed(2) + " s to first word";
+      ui.timing.title = e.timing || "";  // full breakdown on hover
+    },
+    error(e) { current = null; addNote(e.text, "error"); flash = 1; },
+  };
+
+  window.yarvis = {
+    receive(events) {
+      if (!Array.isArray(events)) return;
+      for (const e of events) {
+        const handler = e && handlers[e.type];
+        if (handler) handler(e);
+      }
+    },
+  };
+
+  // ------------------------------------------------------------------ input
+  // Calls into Python. If the bridge is missing or a call fails, say so and recover
+  // instead of leaving the UI stuck in a state Python never entered.
+  let watchdog = null;
+  function confirmed() { if (watchdog) { clearTimeout(watchdog); watchdog = null; } }
+  function fail(message) {
+    confirmed();
+    addNote(message, "error");
+    flash = 1;
+    setState("idle");
+  }
+  function call(method, ...args) {
+    const bridge = window.pywebview && window.pywebview.api;
+    if (!bridge || typeof bridge[method] !== "function") {
+      fail("The window lost its connection to Yarvis. Close it and run yarvis app again.");
+      return false;
+    }
+    try {
+      Promise.resolve(bridge[method](...args)).catch((err) => {
+        fail("Yarvis did not respond: " + ((err && err.message) || err));
+      });
+    } catch (err) {
+      fail("Yarvis did not respond: " + ((err && err.message) || err));
+      return false;
+    }
+    return true;
+  }
+  function expectReply() {
+    confirmed();
+    watchdog = setTimeout(() => fail("Yarvis did not respond. Check the terminal for errors."), 5000);
+  }
+
+  function talk() {
+    if (busy || !voice) return;
+    setState("listening");
+    if (call("talk")) expectReply();
+  }
+
+  function stop() {
+    if (!busy || state === "loading") return;
+    call("stop");
+  }
+
+  function toggle() { if (busy) stop(); else talk(); }
+
+  function send() {
+    const text = ui.text.value.trim();
+    if (!text || busy) return;
+    ui.text.value = "";
+    ui.send.disabled = true;
+    setState("thinking");
+    if (call("send", text)) expectReply();
+  }
+
+  ui.talk.addEventListener("click", toggle);
+  ui.send.addEventListener("click", send);
+  ui.text.addEventListener("input", () => { ui.send.disabled = busy || !ui.text.value.trim(); });
+  ui.text.addEventListener("keydown", (e) => {
+    if (e.key === "Enter") { e.preventDefault(); send(); }
+    if (e.key === "Escape") ui.text.blur();
+  });
+  document.addEventListener("keydown", (e) => {
+    if (e.code === "Space" && document.activeElement !== ui.text && !e.repeat) {
+      e.preventDefault();
+      toggle();
+    } else if (e.key === "Escape" && document.activeElement !== ui.text) {
+      stop();
+    }
+  });
+
+  window.addEventListener("pywebviewready", async () => {
+    try {
+      const info = await window.pywebview.api.hello();
+      if (info && typeof info.name === "string") {
+        name = info.name;
+        ui.brand.textContent = info.name.toUpperCase();
+        document.title = info.name;
+      }
+      if (info && typeof info.voice === "boolean") voice = info.voice;
+    } catch (_) { /* the defaults are fine */ }
+  });
+
+  // ------------------------------------------------------------------ the orb
+  const canvas = $("orb");
+  const ctx = canvas.getContext("2d");
+  const reduceMotion = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+  const W = canvas.width, H = canvas.height, CX = W / 2, CY = H / 2, R = W * 0.25;
+  let t = 0, hue = 200, energy = 0.2, spin = 0.25, flash = 0, last = performance.now();
+  const lerp = (a, b, k) => a + (b - a) * k;
+
+  function blobPath(radius, wobble, phase) {
+    ctx.beginPath();
+    const steps = 96;
+    for (let i = 0; i <= steps; i++) {
+      const a = (i / steps) * Math.PI * 2;
+      const r = radius * (1
+        + wobble * 0.55 * Math.sin(3 * a + phase * 1.3)
+        + wobble * 0.30 * Math.sin(5 * a - phase * 1.7)
+        + wobble * 0.15 * Math.sin(8 * a + phase * 2.3));
+      const x = CX + r * Math.cos(a), y = CY + r * Math.sin(a);
+      if (i === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
+    }
+    ctx.closePath();
+  }
+
+  function frame(now) {
+    const dt = Math.min(0.05, (now - last) / 1000);
+    last = now;
+    const target = STATES[state] || STATES.idle;
+    hue = lerp(hue, target.hue, 0.06);
+    spin = lerp(spin, target.spin, 0.05);
+    level = lerp(level, state === "listening" ? levelTarget : 0, 0.25);
+    let targetEnergy = target.energy + level * 0.9;
+    if (state === "speaking") targetEnergy += 0.18 * (0.5 + 0.5 * Math.sin(t * 9)) * (0.6 + 0.4 * Math.sin(t * 2.3));
+    energy = lerp(energy, targetEnergy, 0.12);
+    flash = Math.max(0, flash - dt * 1.5);
+    t += dt * (reduceMotion ? 0.2 : 1) * (0.6 + spin);
+
+    ctx.clearRect(0, 0, W, H);
+    ctx.globalCompositeOperation = "lighter";
+
+    // outer glow
+    const glow = ctx.createRadialGradient(CX, CY, R * 0.2, CX, CY, R * 2.1);
+    glow.addColorStop(0, `hsla(${hue}, 100%, 60%, ${0.22 + energy * 0.25})`);
+    glow.addColorStop(1, `hsla(${hue}, 100%, 50%, 0)`);
+    ctx.fillStyle = glow;
+    ctx.fillRect(0, 0, W, H);
+
+    // layered blobs
+    const layers = [
+      { dh: -18, scale: 1.08, alpha: 0.35, w: 0.10, p: 0.0 },
+      { dh: 22,  scale: 1.00, alpha: 0.45, w: 0.08, p: 2.1 },
+      { dh: 0,   scale: 0.92, alpha: 0.65, w: 0.06, p: 4.2 },
+    ];
+    for (const L of layers) {
+      const radius = R * L.scale * (1 + energy * 0.22);
+      blobPath(radius, L.w * (0.4 + energy * 1.6), t * (1 + L.p * 0.1) + L.p);
+      const g = ctx.createRadialGradient(CX - radius * 0.3, CY - radius * 0.35, radius * 0.1, CX, CY, radius * 1.05);
+      g.addColorStop(0, `hsla(${hue + L.dh}, 100%, 82%, ${L.alpha})`);
+      g.addColorStop(0.55, `hsla(${hue + L.dh}, 95%, 58%, ${L.alpha * 0.8})`);
+      g.addColorStop(1, `hsla(${hue + L.dh + 30}, 90%, 40%, 0)`);
+      ctx.fillStyle = g;
+      ctx.fill();
+    }
+
+    // thin ring
+    ctx.globalCompositeOperation = "source-over";
+    blobPath(R * 1.32 * (1 + energy * 0.12), 0.03 + energy * 0.05, -t * 0.8);
+    ctx.strokeStyle = `hsla(${hue}, 100%, 75%, ${0.18 + energy * 0.25})`;
+    ctx.lineWidth = 2;
+    ctx.stroke();
+
+    // specular highlight
+    const hl = ctx.createRadialGradient(CX - R * 0.32, CY - R * 0.38, 0, CX - R * 0.32, CY - R * 0.38, R * 0.55);
+    hl.addColorStop(0, "rgba(255,255,255,0.35)");
+    hl.addColorStop(1, "rgba(255,255,255,0)");
+    ctx.fillStyle = hl;
+    ctx.beginPath(); ctx.arc(CX, CY, R * 0.95, 0, Math.PI * 2); ctx.fill();
+
+    if (flash > 0) {
+      ctx.fillStyle = `rgba(255, 70, 100, ${flash * 0.25})`;
+      ctx.beginPath(); ctx.arc(CX, CY, R * 1.4, 0, Math.PI * 2); ctx.fill();
+    }
+    requestAnimationFrame(frame);
+  }
+  requestAnimationFrame(frame);
+  setState("loading");
+})();
+</script>
+</body>
+</html>

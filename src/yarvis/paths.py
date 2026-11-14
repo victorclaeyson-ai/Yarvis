@@ -66,6 +66,15 @@ class AppPaths:
         """Every directory, in a stable order."""
         return (self.config_dir, self.data_dir, self.log_dir, self.cache_dir)
 
+    def ensure_all(self) -> None:
+        """Create every directory with private permissions.
+
+        Call this before writing anything below these directories: ``Path.mkdir`` creates
+        missing *parents* with default (often world-readable) permissions.
+        """
+        for directory in self.all_dirs():
+            ensure_private_dir(directory)
+
 
 def ensure_private_dir(path: Path) -> Path:
     """Create ``path`` (and parents) if needed and restrict it to the current user."""

@@ -2,19 +2,43 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
-from typing import Annotated
+import asyncio
+import contextlib
+from dataclasses import dataclass, field
+from typing import TYPE_CHECKING, Annotated, NoReturn
 
+import httpx2
 import typer
 from rich.console import Console
+from rich.markup import escape
+from rich.progress import BarColumn, DownloadColumn, Progress, TextColumn, TransferSpeedColumn
 from rich.table import Table
 
 from yarvis import __version__
 from yarvis.audio.devices import AudioProbe, SoundDeviceProbe
-from yarvis.config import ConfigError, load_config, write_default_config
+from yarvis.cli.ui import ConsoleUi, stdin_lines
+from yarvis.config import Config, ConfigError, load_config, write_default_config
 from yarvis.doctor import CheckResult, DoctorContext, Status, has_failures, run_doctor
+from yarvis.log import configure_logging
+from yarvis.models import (
+    KOKORO_FILES,
+    WHISPER_APPROX_MB,
+    ModelFile,
+    ModelIntegrityError,
+    download,
+    kokoro_dir,
+    missing,
+    whisper_present,
+)
 from yarvis.paths import AppPaths
-from yarvis.security.secrets import InvalidSecretError, SecretName, SecretStore
+from yarvis.runtime import Backends, run_assistant
+from yarvis.security.secrets import InvalidSecretError, ResolvedSecret, SecretName, SecretStore
+
+if TYPE_CHECKING:
+    from collections.abc import AsyncIterator, Callable
+    from pathlib import Path
+
+    from pydantic import SecretStr
 
 
 @dataclass(slots=True)
@@ -26,6 +50,12 @@ class Services:
     audio: AudioProbe
     console: Console
     err_console: Console
+    backends: Callable[[], Backends] = Backends.real
+    lines: Callable[[], AsyncIterator[str]] = stdin_lines
+    downloader: Callable[[ModelFile, Path, Callable[[int], None]], Path] = field(
+        default=lambda model, directory, progress: download(model, directory, progress=progress)
+    )
+    app_runner: Callable[..., None] = field(default_factory=lambda: _run_app)
 
     @classmethod
     def default(cls) -> Services:
@@ -49,8 +79,10 @@ app = typer.Typer(
 )
 config_app = typer.Typer(help="Manage the configuration file.", no_args_is_help=True)
 key_app = typer.Typer(help="Manage API keys in the OS keychain.", no_args_is_help=True)
+models_app = typer.Typer(help="Download and inspect speech models.", no_args_is_help=True)
 app.add_typer(config_app, name="config")
 app.add_typer(key_app, name="key")
+app.add_typer(models_app, name="models")
 
 
 def _services(ctx: typer.Context) -> Services:
@@ -141,7 +173,9 @@ def config_init(
     try:
         write_default_config(path, overwrite=force)
     except FileExistsError:
-        services.err_console.print(f"[red]{path} already exists.[/] Use --force to overwrite it.")
+        services.err_console.print(
+            f"[red]{escape(str(path))} already exists.[/] Use --force to overwrite it."
+        )
         raise typer.Exit(code=1) from None
     services.console.print(f"Wrote {path}", highlight=False)
 
@@ -153,7 +187,7 @@ def config_show(ctx: typer.Context) -> None:
     try:
         config = load_config(services.paths.config_file)
     except ConfigError as exc:
-        services.err_console.print(f"[red]{exc}[/]", highlight=False)
+        services.err_console.print(f"[red]{escape(str(exc))}[/]", highlight=False)
         raise typer.Exit(code=1) from None
     services.console.print_json(config.model_dump_json())
 
@@ -172,7 +206,7 @@ def key_set(
     try:
         services.secrets.set(name, value)
     except (InvalidSecretError, RuntimeError) as exc:
-        services.err_console.print(f"[red]Not saved:[/] {exc}")
+        services.err_console.print(f"[red]Not saved:[/] {escape(str(exc))}")
         raise typer.Exit(code=1) from None
     services.console.print(f"Saved the {name.value} key to the keychain.")
 
@@ -198,6 +232,186 @@ def key_status(ctx: typer.Context) -> None:
         resolved = services.secrets.get(name)
         where = "not set" if resolved is None else f"set ({resolved.source.value})"
         services.console.print(f"{name.value}: {where}", highlight=False)
+
+
+# --------------------------------------------------------------------------- run
+
+
+@app.command()
+def run(
+    ctx: typer.Context,
+    text: Annotated[
+        bool, typer.Option("--text", help="Type instead of speaking (microphone stays off).")
+    ] = False,
+    mute: Annotated[
+        bool, typer.Option("--mute", help="Show replies without speaking them.")
+    ] = False,
+    yes: Annotated[
+        bool, typer.Option("--yes", "-y", help="Download missing models without asking.")
+    ] = False,
+) -> None:
+    """Start a conversation with Yarvis in the terminal."""
+    services = _services(ctx)
+    config, key = _prepare(services, voice_input=not text, voice_output=not mute, assume_yes=yes)
+    cache_dir = services.paths.cache_dir
+    ui = ConsoleUi(services.console, name=config.assistant.name)
+    services.console.print(f"[bold]{config.assistant.name}[/] is ready. Say hello!")
+    with contextlib.suppress(KeyboardInterrupt):
+        asyncio.run(
+            run_assistant(
+                config,
+                api_key=key.value,
+                cache_dir=cache_dir,
+                lines=services.lines(),
+                ui=ui,
+                backends=services.backends(),
+                voice_input=not text,
+                voice_output=not mute,
+                on_loading=ui.notice,
+            )
+        )
+    services.console.print("\n[dim]Bye.[/]")
+
+
+@app.command("app")
+def app_command(
+    ctx: typer.Context,
+    text: Annotated[
+        bool, typer.Option("--text", help="Type instead of speaking (microphone stays off).")
+    ] = False,
+    mute: Annotated[
+        bool, typer.Option("--mute", help="Show replies without speaking them.")
+    ] = False,
+    yes: Annotated[
+        bool, typer.Option("--yes", "-y", help="Download missing models without asking.")
+    ] = False,
+) -> None:
+    """Open the Yarvis app window."""
+    services = _services(ctx)
+    config, key = _prepare(services, voice_input=not text, voice_output=not mute, assume_yes=yes)
+    services.console.print(f"Opening [bold]{config.assistant.name}[/]… (close the window to quit)")
+    try:
+        services.app_runner(
+            config,
+            api_key=key.value,
+            cache_dir=services.paths.cache_dir,
+            backends=services.backends(),
+            voice_input=not text,
+            voice_output=not mute,
+        )
+    except RuntimeError as exc:
+        _fail(
+            services,
+            f"{exc}. On Linux, install a GUI backend first: uv pip install 'pywebview[qt]'. "
+            "The terminal version still works: yarvis run",
+        )
+
+
+def _prepare(
+    services: Services, *, voice_input: bool, voice_output: bool, assume_yes: bool
+) -> tuple[Config, ResolvedSecret]:
+    """Checks shared by ``run`` and ``app``: config, logging, API key, models."""
+    config = _load_config_or_exit(services)
+    services.paths.ensure_all()
+    configure_logging(
+        level=config.logging.level,
+        log_dir=services.paths.log_dir if config.logging.file else None,
+        console=services.err_console,
+    )
+    if config.llm.provider != "anthropic":
+        _fail(services, 'The Ollama provider arrives in Phase 3. Set llm.provider = "anthropic".')
+    key = services.secrets.get(SecretName.ANTHROPIC)
+    if key is None:
+        _fail(services, "No Anthropic API key found. Run: yarvis key set anthropic")
+    if voice_output and not _ensure_kokoro(services, assume_yes=assume_yes):
+        _fail(services, "Yarvis cannot speak without its voice model. Use --mute to skip it.")
+    if voice_input and not whisper_present(services.paths.cache_dir, config.voice.stt_model):
+        size = WHISPER_APPROX_MB[config.voice.stt_model]
+        services.console.print(
+            f"[dim]First run: downloading the speech recognition model (~{size} MB)…[/]"
+        )
+    return config, key
+
+
+def _run_app(
+    config: Config,
+    *,
+    api_key: SecretStr,
+    cache_dir: Path,
+    backends: Backends,
+    voice_input: bool,
+    voice_output: bool,
+) -> None:  # pragma: no cover - opens a real window
+    from yarvis.app.window import run_app  # noqa: PLC0415 - GUI imports only when needed
+
+    run_app(
+        config,
+        api_key=api_key,
+        cache_dir=cache_dir,
+        backends=backends,
+        voice_input=voice_input,
+        voice_output=voice_output,
+    )
+
+
+# --------------------------------------------------------------------------- models
+
+
+@models_app.command("download")
+def models_download(
+    ctx: typer.Context,
+    yes: Annotated[bool, typer.Option("--yes", "-y", help="Do not ask for confirmation.")] = False,
+) -> None:
+    """Download the voice and speech recognition models ahead of time."""
+    services = _services(ctx)
+    config = _load_config_or_exit(services)
+    services.paths.ensure_all()
+    if not _ensure_kokoro(services, assume_yes=yes):
+        raise typer.Exit(code=1)
+    if not whisper_present(services.paths.cache_dir, config.voice.stt_model):
+        services.console.print(f"Downloading Whisper {config.voice.stt_model}…")
+        stt = services.backends().stt(config, services.paths.cache_dir)
+        stt.load()
+    services.console.print("[green]All speech models are ready.[/]")
+
+
+def _ensure_kokoro(services: Services, *, assume_yes: bool) -> bool:
+    directory = kokoro_dir(services.paths.cache_dir)
+    todo = missing(KOKORO_FILES, directory)
+    if not todo:
+        return True
+    megabytes = sum(model.size for model in todo) / 1_000_000
+    services.console.print(f"Yarvis needs its voice model (Kokoro, {megabytes:.0f} MB, one time).")
+    if not assume_yes and not typer.confirm("Download it now?", default=True):
+        return False
+    try:
+        with Progress(
+            TextColumn("{task.description}"),
+            BarColumn(),
+            DownloadColumn(),
+            TransferSpeedColumn(),
+            console=services.console,
+        ) as progress:
+            for model in todo:
+                task = progress.add_task(model.name, total=model.size)
+                services.downloader(model, directory, lambda n, t=task: progress.advance(t, n))
+    except (ModelIntegrityError, httpx2.HTTPError) as exc:
+        services.err_console.print(f"[red]Download failed:[/] {escape(str(exc))}")
+        return False
+    return True
+
+
+def _load_config_or_exit(services: Services) -> Config:
+    try:
+        return load_config(services.paths.config_file)
+    except ConfigError as exc:
+        services.err_console.print(f"[red]{escape(str(exc))}[/]", highlight=False)
+        raise typer.Exit(code=1) from None
+
+
+def _fail(services: Services, message: str) -> NoReturn:
+    services.err_console.print(f"[red]✗ {escape(message)}[/]", highlight=False)
+    raise typer.Exit(code=1)
 
 
 def main() -> None:

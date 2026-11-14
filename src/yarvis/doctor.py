@@ -14,6 +14,7 @@ from typing import TYPE_CHECKING
 
 from yarvis.audio.devices import AudioBackendError, AudioDevice
 from yarvis.config import Config, ConfigError, load_config
+from yarvis.models import KOKORO_FILES, WHISPER_APPROX_MB, kokoro_dir, missing, whisper_present
 from yarvis.paths import is_private
 from yarvis.security.secrets import SecretName, SecretSource
 
@@ -25,6 +26,7 @@ if TYPE_CHECKING:
     from yarvis.security.secrets import SecretStore
 
 MIN_PYTHON = (3, 12)
+MIN_MACOS = (14, 0)
 
 
 class Status(StrEnum):
@@ -55,6 +57,7 @@ class DoctorContext:
     python_version: tuple[int, int, int]
     system: str
     machine: str
+    mac_version: str = ""
 
     @classmethod
     def current(cls, *, paths: AppPaths, secrets: SecretStore, audio: AudioProbe) -> DoctorContext:
@@ -67,6 +70,7 @@ class DoctorContext:
             python_version=(major, minor, micro),
             system=platform.system(),
             machine=platform.machine(),
+            mac_version=platform.mac_ver()[0],
         )
 
 
@@ -82,6 +86,7 @@ def run_doctor(ctx: DoctorContext) -> list[CheckResult]:
         check_api_key(ctx, config),
         check_audio_input(ctx, config),
         check_audio_output(ctx, config),
+        check_models(ctx, config),
     ]
 
 
@@ -111,6 +116,15 @@ def check_platform(ctx: DoctorContext) -> CheckResult:
     """MacOS on Apple Silicon and Linux are supported."""
     label = f"{ctx.system} {ctx.machine}"
     if ctx.system == "Darwin":
+        if ctx.mac_version:
+            label = f"macOS {ctx.mac_version} {ctx.machine}"
+            if _version_tuple(ctx.mac_version) < MIN_MACOS:
+                return CheckResult(
+                    "Platform",
+                    Status.FAIL,
+                    label,
+                    hint="Yarvis needs macOS 14 (Sonoma) or newer for its audio libraries.",
+                )
         if ctx.machine == "arm64":
             return CheckResult("Platform", Status.OK, label)
         return CheckResult(
@@ -237,6 +251,31 @@ def _check_audio(ctx: DoctorContext, wanted: str | int | None, *, kind: str) -> 
     if device is None:
         return CheckResult(label, Status.FAIL, f"no default {kind} device")
     return CheckResult(label, Status.OK, device.name)
+
+
+def check_models(ctx: DoctorContext, config: Config) -> CheckResult:
+    """Speech models should be downloaded before the first conversation."""
+    cache = ctx.paths.cache_dir
+    todo: list[str] = []
+    megabytes = 0
+    if pending := missing(KOKORO_FILES, kokoro_dir(cache)):
+        todo.append("Kokoro voice")
+        megabytes += sum(model.size for model in pending) // 1_000_000
+    if not whisper_present(cache, config.voice.stt_model):
+        todo.append(f"Whisper {config.voice.stt_model}")
+        megabytes += WHISPER_APPROX_MB[config.voice.stt_model]
+    if not todo:
+        return CheckResult("Speech models", Status.OK, "downloaded")
+    return CheckResult(
+        "Speech models",
+        Status.WARN,
+        f"not downloaded yet: {', '.join(todo)} (~{megabytes} MB)",
+        hint="Run: yarvis models download (or let yarvis run do it)",
+    )
+
+
+def _version_tuple(version: str) -> tuple[int, ...]:
+    return tuple(int(part) for part in version.split(".") if part.isdigit())
 
 
 def find_device(

@@ -1,45 +1,15 @@
 from __future__ import annotations
 
 import json
-from typing import TYPE_CHECKING, Protocol
+from typing import TYPE_CHECKING
 
-import pytest
-from rich.console import Console
-from typer.testing import CliRunner, Result
-
-from fakes import VALID_KEY, FakeAudioProbe, FakeKeyring
+from fakes import VALID_KEY, FakeKeyring, Invoke
 from yarvis import __version__
-from yarvis.cli.app import Services, app
+from yarvis.cli.app import Services
 from yarvis.security.secrets import KEYRING_SERVICE
 
 if TYPE_CHECKING:
     from yarvis.paths import AppPaths
-    from yarvis.security.secrets import SecretStore
-
-
-class Invoke(Protocol):
-    def __call__(self, *args: str, stdin: str | None = None) -> Result: ...
-
-
-@pytest.fixture
-def services(paths: AppPaths, secrets: SecretStore, audio: FakeAudioProbe) -> Services:
-    return Services(
-        paths=paths,
-        secrets=secrets,
-        audio=audio,
-        console=Console(width=200, color_system=None),
-        err_console=Console(width=200, color_system=None, stderr=True),
-    )
-
-
-@pytest.fixture
-def invoke(services: Services) -> Invoke:
-    runner = CliRunner()
-
-    def run(*args: str, stdin: str | None = None) -> Result:
-        return runner.invoke(app, list(args), input=stdin, obj=services)
-
-    return run
 
 
 def test_version(invoke: Invoke) -> None:
@@ -124,3 +94,11 @@ def test_key_delete(invoke: Invoke, fake_keyring: FakeKeyring) -> None:
 def test_default_services_are_real_implementations() -> None:
     services = Services.default()
     assert services.paths.config_file.name == "config.toml"
+
+
+def test_error_text_is_not_interpreted_as_markup(invoke: Invoke, paths: AppPaths) -> None:
+    invoke("config", "init")
+    paths.config_file.write_text("[voice]\nvocabulary = ['[bold]', '']\n")
+    result = invoke("config", "show")
+    assert result.exit_code == 1
+    assert "vocabulary" in result.output

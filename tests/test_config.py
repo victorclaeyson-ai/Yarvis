@@ -109,3 +109,13 @@ def test_security_relaxations_are_reported(toml: str, expected: str) -> None:
 def test_local_or_encrypted_ollama_is_fine(url: str) -> None:
     config = parse_config(f'[llm]\nprovider = "ollama"\nollama_url = "{url}"\n')
     assert config.security_relaxations() == []
+
+
+def test_vocabulary() -> None:
+    assert Config().voice.vocabulary == ("Yarvis",)
+    config = parse_config('[voice]\nvocabulary = [" Zedelgem ", "Leuven"]\n')
+    assert config.voice.vocabulary == ("Zedelgem", "Leuven")
+    with pytest.raises(ConfigError, match="vocabulary"):
+        parse_config('[voice]\nvocabulary = [""]\n')
+    with pytest.raises(ConfigError, match="vocabulary"):
+        parse_config(f"[voice]\nvocabulary = [{', '.join(['"x"'] * 51)}]\n")

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import io
+import logging
 import stat
 from typing import TYPE_CHECKING
 
@@ -24,7 +25,7 @@ def test_logs_are_redacted_everywhere(tmp_path: Path, redactor: Redactor) -> Non
         redactor=redactor,
     )
     logger.getChild("llm").warning("request with %s failed", "my-very-secret-key")
-    for handler in logger.handlers:
+    for handler in ours():
         handler.flush()
 
     log_file = tmp_path / "logs" / LOG_FILE_NAME
@@ -34,9 +35,43 @@ def test_logs_are_redacted_everywhere(tmp_path: Path, redactor: Redactor) -> Non
     assert stat.S_IMODE(log_file.stat().st_mode) == 0o600
 
 
-def test_reconfiguring_replaces_handlers(redactor: Redactor) -> None:
+def ours() -> list[logging.Handler]:
+    return [h for h in logging.getLogger().handlers if getattr(h, "_yarvis_handler", False)]
+
+
+def test_reconfiguring_replaces_only_our_handlers(redactor: Redactor) -> None:
+    foreign = logging.NullHandler()
+    logging.getLogger().addHandler(foreign)
     console = Console(file=io.StringIO())
     configure_logging(console=console, redactor=redactor)
-    logger = configure_logging(console=console, redactor=redactor)
-    assert len(logger.handlers) == 1
-    assert not logger.propagate
+    configure_logging(console=console, redactor=redactor)
+    assert len(ours()) == 1
+    assert foreign in logging.getLogger().handlers
+    logging.getLogger().removeHandler(foreign)
+
+
+def test_third_party_logs_are_redacted_and_kept_off_the_console(
+    tmp_path: Path, redactor: Redactor
+) -> None:
+    redactor.register("third-party-secret-value")
+    screen = io.StringIO()
+    configure_logging(
+        level="DEBUG",
+        log_dir=tmp_path,
+        console=Console(file=screen, width=200),
+        redactor=redactor,
+    )
+    logging.getLogger("httpx2").info("info noise")
+    logging.getLogger("phonemizer").warning("words count mismatch")
+    logging.getLogger("httpx2").error("token third-party-secret-value leaked")
+    logging.getLogger("yarvis.test").debug("our debug line")
+    for handler in ours():
+        handler.flush()
+    console = screen.getvalue()
+    log_file = (tmp_path / LOG_FILE_NAME).read_text()
+    assert "info noise" not in console + log_file
+    assert "words count mismatch" not in console
+    assert "words count mismatch" in log_file
+    assert "third-party-secret-value" not in console + log_file
+    assert "[REDACTED]" in console
+    assert "our debug line" in console

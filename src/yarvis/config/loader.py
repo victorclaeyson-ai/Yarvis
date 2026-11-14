@@ -27,13 +27,18 @@ name = "Yarvis"
 language = "en"
 
 [llm]
-provider = "anthropic"      # "anthropic" or "ollama" (fully offline)
-# model = "..."             # leave unset to use the recommended default
+provider = "anthropic"      # "anthropic" ("ollama" for fully offline arrives in Phase 3)
+# model = "claude-sonnet-5-5"  # default: claude-haiku-5-5, the fastest
 max_tokens = 1024
 
 [voice]
 stt = "auto"                # picks the fastest local engine for your platform
+stt_model = "base.en"       # "tiny.en" (fastest), "base.en", "small.en" (most accurate)
+vocabulary = ["Yarvis"]     # names and places to recognise, e.g. ["Yarvis", "Zedelgem", "Leuven"]
 tts = "kokoro"
+voice = "bm_george"         # British male. Try "af_heart", "am_michael", "bf_emma"
+speech_rate = 1.0
+end_of_turn_ms = 700        # silence that ends your turn; lower = faster, may cut you off
 # input_device = "MacBook Air Microphone"
 # output_device = "MacBook Air Speakers"
 

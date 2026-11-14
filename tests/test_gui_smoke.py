@@ -1,0 +1,142 @@
+"""End-to-end smoke test of the real app window (opt-in: it opens a window).
+
+Run on Linux with:  YARVIS_GUI_TESTS=1 xvfb-run -a uv run pytest tests/test_gui_smoke.py
+(needs the GTK WebKit bindings: apt install python3-gi gir1.2-webkit2-4.1, and a venv
+created with --system-site-packages so PyGObject is importable).
+
+This test exists because a too-strict Content-Security-Policy once silently broke the
+talk button: every unit test passed, but the real window could not call into Python.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import os
+import threading
+import time
+from typing import TYPE_CHECKING, Any
+
+import numpy as np
+import pytest
+from pydantic import SecretStr
+
+from fakes import FakeLLM
+from test_runtime_and_run import FakeBackends, FakeMic
+from yarvis.config import Config
+
+if TYPE_CHECKING:
+    from collections.abc import AsyncIterator, Callable
+    from pathlib import Path
+
+    from yarvis.speech.base import AudioArray
+
+pytestmark = pytest.mark.skipif(
+    os.environ.get("YARVIS_GUI_TESTS") != "1", reason="opens a real window; set YARVIS_GUI_TESTS=1"
+)
+
+
+def test_real_window_end_to_end(tmp_path: Path) -> None:  # pragma: no cover - opt-in
+    webview = pytest.importorskip("webview")
+    import yarvis.app.window as appwin
+
+    captured: dict[str, Any] = {}
+    real_create = webview.create_window
+
+    def capture(*args: Any, **kwargs: Any) -> Any:
+        window = real_create(*args, **kwargs)
+        captured["window"] = window
+        return window
+
+    webview.create_window = capture  # restored below
+
+    class SlowNoiseMic(FakeMic):
+        """Real-time paced background noise: never contains speech."""
+
+        def __aiter__(self) -> AsyncIterator[AudioArray]:
+            async def gen() -> AsyncIterator[AudioArray]:
+                while True:
+                    await asyncio.sleep(0.032)
+                    yield np.random.default_rng().normal(0, 0.002, 512).astype(np.float32)
+
+            return gen()
+
+    results: list[str] = []
+
+    def driver() -> None:
+        while "window" not in captured:
+            time.sleep(0.05)
+        w = captured["window"]
+        w.events.loaded.wait(15)
+
+        def js(code: str) -> Any:
+            return w.evaluate_js(code)
+
+        def pill() -> str:
+            return str(js("document.getElementById('pill-text').textContent"))
+
+        def log() -> str:
+            return js(
+                "Array.from(document.querySelectorAll('#log .msg, #log .note')).map(e => e.textContent).join(' | ')"
+            )
+
+        def wait_for(predicate: Callable[[], bool], timeout: float, label: str) -> bool:
+            end = time.time() + timeout
+            while time.time() < end:
+                if predicate():
+                    results.append(f"OK   {label}")
+                    return True
+                time.sleep(0.1)
+            results.append(f"FAIL {label}  (pill={pill()!r}, log={log()!r})")
+            return False
+
+        wait_for(lambda: pill() == "Ready", 20, "app becomes Ready")
+        api_ok = js(
+            "typeof window.pywebview.api.talk === 'function' && typeof window.pywebview.api.stop === 'function'"
+        )
+        results.append(
+            ("OK   " if api_ok else "FAIL ") + "pywebview API functions exist in the page"
+        )
+
+        # 1. Click talk: full voice turn.
+        js("document.getElementById('talk').click()")
+        wait_for(
+            lambda: "hey yarvis what time is it" in log(), 10, "voice turn: transcript appears"
+        )
+        wait_for(lambda: "It is half past two." in log(), 10, "voice turn: reply appears")
+        wait_for(lambda: pill() == "Ready", 10, "voice turn: back to Ready")
+        timing = js("document.getElementById('timing').textContent")
+        results.append(
+            ("OK   " if "to first word" in timing else "FAIL ") + f"timing shown: {timing!r}"
+        )
+
+        # 2. Space key, then stop with Space while listening.
+        fakes.mic = SlowNoiseMic()
+        js("document.dispatchEvent(new KeyboardEvent('keydown', {code: 'Space', key: ' '}))")
+        wait_for(lambda: pill() == "Listening", 5, "Space starts listening")
+        is_stop = js("document.getElementById('talk').classList.contains('stop')")
+        results.append(("OK   " if is_stop else "FAIL ") + "button turns into a stop button")
+        time.sleep(1.0)
+        js("document.dispatchEvent(new KeyboardEvent('keydown', {code: 'Space', key: ' '}))")
+        wait_for(lambda: "Stopped." in log(), 5, "Space stops listening")
+        wait_for(lambda: pill() == "Ready", 5, "back to Ready after stop")
+
+        # 3. Typed message.
+        js(
+            "const t = document.getElementById('text'); t.value = 'hello'; t.dispatchEvent(new Event('input'));"
+        )
+        js(
+            "document.getElementById('text').dispatchEvent(new KeyboardEvent('keydown', {key: 'Enter'}))"
+        )
+        wait_for(lambda: "Good to hear from you." in log(), 10, "typed message gets a reply")
+        wait_for(lambda: pill() == "Ready", 10, "back to Ready after typed message")
+        w.destroy()
+
+    fakes = FakeBackends(FakeLLM(["It is half past two."], ["Good to hear ", "from you."]))
+    threading.Thread(target=driver, daemon=True).start()
+    try:
+        appwin.run_app(Config(), api_key=SecretStr("k"), cache_dir=tmp_path, backends=fakes.build())
+    finally:
+        webview.create_window = real_create
+    failures = [r for r in results if r.startswith("FAIL")]
+    assert results, "the driver never ran"
+    assert not failures, "\n".join(results)

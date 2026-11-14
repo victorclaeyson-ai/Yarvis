@@ -23,7 +23,8 @@
 - Windows support (planned after launch).
 - Training our own speech or language models.
 - Multi-user / server deployment. Yarvis is a single-user, single-machine assistant.
-- A GUI app. v1 ships as a CLI with a terminal UI; the satellite is the "physical UI".
+- A full settings GUI or a packaged installer before launch. v1 ships a minimal app window
+  (pywebview, see ADR 0004) plus the terminal mode; the satellite is the "physical UI".
 
 ---
 
@@ -113,7 +114,8 @@ Defaults are chosen on paper; **every row marked ⚖ is benchmarked in Phase 1**
 | Tools | Built-ins + official `mcp` Python SDK | — | Standard protocol, huge existing ecosystem |
 | Config | `pydantic` v2 models loaded from TOML | — | Validated, typed, good error messages |
 | Storage | SQLite (`aiosqlite`), `sqlite-vec` for recall | — | Zero-ops, single file, easy to back up and delete |
-| CLI / TUI | `typer` + `rich` | `textual` | Simple, looks good in a demo video |
+| CLI / TUI | `typer` + `rich` | `textual` | Simple, scriptable |
+| App window | `pywebview` (native WebKit / GTK / Qt) | local web server | No network port; see ADR 0004 |
 
 **Why not build on an existing voice framework (e.g. Pipecat)?** We borrow ideas and models (like Smart Turn), but own the pipeline: it keeps the dependency tree and attack surface small, gives full control over cancellation and latency, and the real-time pipeline is the most interesting part of the project.
 

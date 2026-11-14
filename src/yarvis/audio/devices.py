@@ -60,6 +60,15 @@ def _import_sounddevice() -> ModuleType:
     return importlib.import_module("sounddevice")
 
 
+def load_sounddevice() -> ModuleType:
+    """Import ``sounddevice``, turning a missing PortAudio library into ``AudioBackendError``."""
+    try:
+        return _import_sounddevice()
+    except OSError as exc:
+        msg = "the PortAudio library is not installed"
+        raise AudioBackendError(msg) from exc
+
+
 class SoundDeviceProbe:
     """``AudioProbe`` implemented with the ``sounddevice`` package."""
 

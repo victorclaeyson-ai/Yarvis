@@ -2,15 +2,22 @@
 
 from __future__ import annotations
 
+import asyncio
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Protocol
 
 import keyring.errors
+import numpy as np
 
 from yarvis.audio.devices import AudioBackendError, AudioDevice
 
 if TYPE_CHECKING:
-    from collections.abc import Sequence
+    from collections.abc import AsyncIterator, Sequence
+
+    from typer.testing import Result
+
+    from yarvis.llm.base import Message
+    from yarvis.speech.base import AudioArray
 
 VALID_KEY = "sk-ant-test-0123456789abcdefghij"  # gitleaks:allow
 
@@ -84,3 +91,97 @@ class FakeAudioProbe:
     def _check(self) -> None:
         if self.broken:
             raise AudioBackendError("the PortAudio library is not installed")
+
+
+# --------------------------------------------------------------------------- speech + LLM fakes
+
+
+class FakeLLM:
+    """Streams scripted replies; records what it was asked."""
+
+    def __init__(self, *replies: list[str], error: Exception | None = None) -> None:
+        self.replies = list(replies)
+        self.error = error
+        self.calls: list[tuple[list[Message], str, int]] = []
+
+    async def stream(
+        self, messages: Sequence[Message], *, system: str, max_tokens: int
+    ) -> AsyncIterator[str]:
+        self.calls.append((list(messages), system, max_tokens))
+        deltas = self.replies.pop(0) if self.replies else []
+        for delta in deltas:
+            await asyncio.sleep(0)
+            yield delta
+        if self.error is not None:
+            raise self.error
+
+
+class FakeSTT:
+    def __init__(self, text: str = "hello there") -> None:
+        self.text = text
+        self.received: list[int] = []
+
+    async def transcribe(self, audio: AudioArray) -> str:
+        self.received.append(len(audio))
+        return self.text
+
+
+class FakeTTS:
+    sample_rate = 24_000
+
+    def __init__(self) -> None:
+        self.spoken: list[str] = []
+
+    async def synthesize(self, text: str) -> AudioArray:
+        self.spoken.append(text)
+        return np.zeros(len(text), dtype=np.float32)
+
+
+class FakeSpeaker:
+    def __init__(self) -> None:
+        self.played: list[int] = []
+        self.drained = 0
+        self.stopped = 0
+
+    def stop(self) -> None:
+        self.stopped += 1
+
+    async def play(self, audio: AudioArray) -> None:
+        self.played.append(len(audio))
+
+    async def drain(self) -> None:
+        self.drained += 1
+
+
+class RecordingObserver:
+    def __init__(self) -> None:
+        self.audio_started = 0
+        self.transcripts: list[str] = []
+        self.deltas: list[str] = []
+
+    def on_transcript(self, text: str) -> None:
+        self.transcripts.append(text)
+
+    def on_reply_delta(self, text: str) -> None:
+        self.deltas.append(text)
+
+    def on_audio_started(self) -> None:
+        self.audio_started += 1
+
+
+class TickingClock:
+    """Deterministic clock: every call advances by ``step`` seconds."""
+
+    def __init__(self, start: float = 100.0, step: float = 0.01) -> None:
+        self.now = start
+        self.step = step
+
+    def __call__(self) -> float:
+        self.now += self.step
+        return self.now
+
+
+class Invoke(Protocol):
+    """Runs the CLI in-process with test services."""
+
+    def __call__(self, *args: str, stdin: str | None = None) -> Result: ...

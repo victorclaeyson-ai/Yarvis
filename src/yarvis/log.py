@@ -1,10 +1,16 @@
-"""Logging setup. Every handler redacts secrets; log files are private and rotated."""
+"""Logging setup. Every handler redacts secrets; log files are private and rotated.
+
+Handlers are attached to the *root* logger, so messages from third-party libraries
+(HTTP clients, model loaders) are redacted too. Yarvis logs at the configured level;
+everything else only at WARNING and above. On the console, third-party warnings are
+hidden (they would interrupt the conversation); they still go to the log file.
+"""
 
 from __future__ import annotations
 
 import logging
 from logging.handlers import RotatingFileHandler
-from typing import TYPE_CHECKING, Final
+from typing import TYPE_CHECKING, Final, override
 
 from rich.logging import RichHandler
 
@@ -22,6 +28,7 @@ ROOT_LOGGER: Final = "yarvis"
 LOG_FILE_NAME: Final = "yarvis.log"
 MAX_LOG_BYTES: Final = 5 * 1024 * 1024
 LOG_BACKUPS: Final = 3
+_MARKER: Final = "_yarvis_handler"
 
 
 def configure_logging(
@@ -31,13 +38,17 @@ def configure_logging(
     console: Console | None = None,
     redactor: Redactor = default_redactor,
 ) -> logging.Logger:
-    """Configure the ``yarvis`` logger hierarchy. Safe to call more than once."""
+    """Configure logging. Safe to call more than once; only replaces its own handlers."""
+    root = logging.getLogger()
+    root.setLevel(logging.WARNING)
+    for handler in tuple(root.handlers):
+        if getattr(handler, _MARKER, False):
+            root.removeHandler(handler)
+            handler.close()
+
     logger = logging.getLogger(ROOT_LOGGER)
     logger.setLevel(level)
-    logger.propagate = False
-    for handler in tuple(logger.handlers):
-        logger.removeHandler(handler)
-        handler.close()
+    logger.propagate = True
 
     redacting = RedactingFilter(redactor)
 
@@ -49,8 +60,8 @@ def configure_logging(
         markup=False,
         rich_tracebacks=False,
     )
-    console_handler.addFilter(redacting)
-    logger.addHandler(console_handler)
+    console_handler.addFilter(_ConsoleFilter())
+    _install(root, console_handler, redacting)
 
     if log_dir is not None:
         ensure_private_dir(log_dir)
@@ -65,7 +76,21 @@ def configure_logging(
         file_handler.setFormatter(
             logging.Formatter("%(asctime)s %(levelname)-8s %(name)s: %(message)s"),
         )
-        file_handler.addFilter(redacting)
-        logger.addHandler(file_handler)
+        _install(root, file_handler, redacting)
 
     return logger
+
+
+class _ConsoleFilter(logging.Filter):
+    """Show Yarvis's own messages, and only errors from other libraries."""
+
+    @override
+    def filter(self, record: logging.LogRecord) -> bool:
+        own = record.name == ROOT_LOGGER or record.name.startswith(f"{ROOT_LOGGER}.")
+        return own or record.levelno >= logging.ERROR
+
+
+def _install(root: logging.Logger, handler: logging.Handler, redacting: RedactingFilter) -> None:
+    handler.addFilter(redacting)
+    setattr(handler, _MARKER, True)
+    root.addHandler(handler)

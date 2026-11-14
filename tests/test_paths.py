@@ -72,3 +72,9 @@ def test_write_private_file_does_not_follow_symlinks(tmp_path: Path) -> None:
     with pytest.raises(OSError, match=r"symbolic links|Too many levels"):
         write_private_file(link, "attacker", overwrite=True)
     assert victim.read_text() == "original"
+
+
+def test_ensure_all_creates_private_directories(tmp_path: Path) -> None:
+    paths = AppPaths.under(tmp_path / "deep" / "home")
+    paths.ensure_all()
+    assert all(is_private(directory) for directory in paths.all_dirs())

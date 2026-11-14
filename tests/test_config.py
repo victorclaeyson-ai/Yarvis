@@ -1,0 +1,111 @@
+from __future__ import annotations
+
+import stat
+from typing import TYPE_CHECKING
+
+import pytest
+
+from yarvis.config import (
+    DEFAULT_CONFIG_TOML,
+    Config,
+    ConfigError,
+    load_config,
+    parse_config,
+    write_default_config,
+)
+
+if TYPE_CHECKING:
+    from pathlib import Path
+
+
+def test_defaults_are_secure() -> None:
+    config = Config()
+    assert not config.security.allow_tier3
+    assert config.security.confirm_tier2
+    assert config.security_relaxations() == []
+
+
+def test_default_template_matches_model_defaults() -> None:
+    assert parse_config(DEFAULT_CONFIG_TOML) == Config()
+
+
+def test_missing_file_gives_defaults(tmp_path: Path) -> None:
+    assert load_config(tmp_path / "absent.toml") == Config()
+
+
+def test_values_are_loaded(tmp_path: Path) -> None:
+    path = tmp_path / "config.toml"
+    path.write_text('[assistant]\nname = "Yeti"\nlanguage = "nl-BE"\n[llm]\nprovider = "ollama"\n')
+    config = load_config(path)
+    assert config.assistant.name == "Yeti"
+    assert config.assistant.language == "nl-BE"
+    assert config.llm.provider == "ollama"
+
+
+def test_unknown_keys_are_rejected_with_location() -> None:
+    with pytest.raises(ConfigError, match=r"llm\.modle: Extra inputs are not permitted"):
+        parse_config('[llm]\nmodle = "typo"\n', source="config.toml")
+
+
+def test_invalid_values_list_every_problem() -> None:
+    with pytest.raises(ConfigError) as info:
+        parse_config('[llm]\nprovider = "skynet"\nmax_tokens = 0\n')
+    message = str(info.value)
+    assert "2 invalid setting(s)" in message
+    assert "llm.provider" in message
+    assert "llm.max_tokens" in message
+
+
+def test_invalid_toml_is_reported() -> None:
+    with pytest.raises(ConfigError, match="not valid TOML"):
+        parse_config("[llm\n")
+
+
+def test_secrets_in_config_are_refused() -> None:
+    with pytest.raises(ConfigError, match="OS keychain"):
+        parse_config('[llm]\nmodel = "sk-ant-api03-abcdefghijklmnop"\n')  # gitleaks:allow
+
+
+def test_unreadable_file_is_reported(tmp_path: Path) -> None:
+    directory = tmp_path / "config.toml"
+    directory.mkdir()
+    with pytest.raises(ConfigError, match="cannot read"):
+        load_config(directory)
+
+
+def test_config_is_immutable() -> None:
+    config = Config()
+    with pytest.raises(ValueError, match="frozen"):
+        config.assistant.name = "Changed"
+
+
+def test_write_default_config_is_private(tmp_path: Path) -> None:
+    path = tmp_path / "cfg" / "config.toml"
+    write_default_config(path)
+    assert stat.S_IMODE(path.stat().st_mode) == 0o600
+    assert load_config(path) == Config()
+    with pytest.raises(FileExistsError):
+        write_default_config(path)
+
+
+@pytest.mark.parametrize(
+    ("toml", "expected"),
+    [
+        ("[security]\nallow_tier3 = true\n", "allow_tier3"),
+        ("[security]\nconfirm_tier2 = false\n", "confirm_tier2"),
+        ('[llm]\nprovider = "ollama"\nollama_url = "http://192.168.1.20:11434"\n', "unencrypted"),
+    ],
+)
+def test_security_relaxations_are_reported(toml: str, expected: str) -> None:
+    relaxations = parse_config(toml).security_relaxations()
+    assert len(relaxations) == 1
+    assert expected in relaxations[0]
+
+
+@pytest.mark.parametrize(
+    "url",
+    ["http://localhost:11434", "http://127.0.0.1:11434/", "http://[::1]:11434", "https://gpu.lan"],
+)
+def test_local_or_encrypted_ollama_is_fine(url: str) -> None:
+    config = parse_config(f'[llm]\nprovider = "ollama"\nollama_url = "{url}"\n')
+    assert config.security_relaxations() == []

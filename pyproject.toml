@@ -1,0 +1,137 @@
+[project]
+name = "yarvis"
+version = "0.1.0.dev0"
+description = "A local-first, low-latency voice assistant you can trust with your computer."
+readme = "README.md"
+license = "Apache-2.0"
+license-files = ["LICENSE"]
+authors = [{ name = "Victor Claeys" }]
+requires-python = ">=3.12"
+keywords = ["voice-assistant", "jarvis", "local-first", "mcp", "speech", "llm", "privacy"]
+classifiers = [
+    "Development Status :: 2 - Pre-Alpha",
+    "Environment :: Console",
+    "Intended Audience :: End Users/Desktop",
+    "Operating System :: MacOS",
+    "Operating System :: POSIX :: Linux",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Multimedia :: Sound/Audio :: Speech",
+    "Typing :: Typed",
+]
+dependencies = [
+    "keyring>=25.7",
+    "numpy>=2.1",
+    "platformdirs>=4.3",
+    "pydantic>=2.11",
+    "rich>=14",
+    "sounddevice>=0.5",
+    "typer>=0.16",
+]
+
+[project.scripts]
+yarvis = "yarvis.cli.app:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[dependency-groups]
+dev = [
+    "hypothesis>=6.170",
+    "pip-audit>=2.10",
+    "pre-commit>=4.7",
+    "pyright>=1.1.414",
+    "pytest>=9.2",
+    "pytest-asyncio>=1.5",
+    "pytest-cov>=7.1",
+    "ruff>=0.17",
+]
+
+# --------------------------------------------------------------------------- ruff
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+select = [
+    "F",     # pyflakes
+    "E", "W",  # pycodestyle
+    "I",     # isort
+    "N",     # pep8-naming
+    "UP",    # pyupgrade
+    "B",     # bugbear
+    "S",     # bandit (security)
+    "A",     # builtins shadowing
+    "C4",    # comprehensions
+    "DTZ",   # timezone-aware datetimes
+    "T20",   # no print()
+    "RET",   # return hygiene
+    "SIM",   # simplifications
+    "TID",   # tidy imports
+    "TC",    # type-checking imports
+    "PTH",   # pathlib over os.path
+    "ASYNC", # async pitfalls
+    "BLE",   # no blind except
+    "FBT",   # no boolean positional traps
+    "PL",    # pylint
+    "RUF",   # ruff-specific
+    "D",     # docstrings
+    "ANN",   # annotations
+]
+ignore = [
+    "D105",    # magic-method docstrings
+    "D107",    # __init__ docstrings (documented on the class)
+    "PLR0913", # too many arguments: keyword-only args are fine
+]
+
+[tool.ruff.lint.pydocstyle]
+convention = "google"
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**" = ["S101", "D", "ANN", "PLR2004", "FBT", "SLF001"]
+"src/yarvis/cli/**" = ["FBT001", "FBT002"]  # Typer flags are boolean parameters by design
+
+[tool.ruff.lint.flake8-tidy-imports]
+ban-relative-imports = "all"
+
+# --------------------------------------------------------------------------- pyright
+[tool.pyright]
+include = ["src", "tests"]
+pythonVersion = "3.12"
+typeCheckingMode = "strict"
+extraPaths = ["tests"]
+reportMissingTypeStubs = false
+reportUnnecessaryTypeIgnoreComment = "error"
+
+# --------------------------------------------------------------------------- pytest
+[tool.pytest.ini_options]
+minversion = "9.0"
+testpaths = ["tests"]
+pythonpath = ["tests"]
+addopts = [
+    "--strict-markers",
+    "--strict-config",
+    "-ra",
+    "--cov=yarvis",
+    "--cov-report=term-missing",
+]
+asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "function"
+filterwarnings = ["error"]
+
+[tool.coverage.run]
+branch = true
+source = ["yarvis"]
+
+[tool.coverage.report]
+fail_under = 90
+show_missing = true
+exclude_also = [
+    "if TYPE_CHECKING:",
+    "raise NotImplementedError",
+    "@overload",
+    "\\.\\.\\.",
+]

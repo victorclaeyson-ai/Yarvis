@@ -9,9 +9,15 @@ import pytest
 from fakes import FakeLLM, FakeSpeaker, FakeSTT, FakeTTS, TickingClock
 from test_speech_engines import frames, speech_clip
 from yarvis.agent.conversation import Conversation
-from yarvis.assistant import Assistant, AssistantControls
+from yarvis.assistant import Assistant, AssistantControls, TurnTaking
 from yarvis.audio.devices import AudioBackendError
-from yarvis.listen import MicrophoneSilentError, MicrophoneStalledError, Utterance, listen
+from yarvis.listen import (
+    MicrophoneSilentError,
+    MicrophoneStalledError,
+    PauseHooks,
+    Utterance,
+    listen,
+)
 from yarvis.llm.base import LLMError
 from yarvis.pipeline import Turn, TurnResult
 from yarvis.speech.endpointing import EndpointerSettings
@@ -70,6 +76,14 @@ async def test_listen_returns_none_when_the_stream_ends() -> None:
 # --------------------------------------------------------------------------- assistant loop
 
 
+class FakeControl:
+    def __init__(self) -> None:
+        self.required: list[int] = []
+
+    def require_silence_ms(self, milliseconds: int) -> None:
+        self.required.append(milliseconds)
+
+
 class RecordingUi:
     def __init__(self) -> None:
         self.events: list[str] = []
@@ -115,14 +129,13 @@ async def lines(*items: str) -> AsyncIterator[str]:
 
 
 def make_turn(llm: FakeLLM, stt_text: str = "what time is it") -> Turn:
-    conversation = Conversation(llm, system_prompt=lambda: "S", max_tokens=32)
+    conversation = Conversation(llm, system_prompt=lambda: "S", max_tokens=32, clock=TickingClock())
     return Turn(
         conversation,
         stt=FakeSTT(stt_text),
         tts=FakeTTS(),
         speaker=FakeSpeaker(),
         observer=RecordingUi(),
-        clock=TickingClock(),
     )
 
 
@@ -134,9 +147,9 @@ async def test_enter_listens_and_text_is_sent_directly() -> None:
     ui = RecordingUi()
     heard: list[bool] = []
 
-    async def fake_listen() -> Utterance | None:
-        heard.append(True)
-        return utterance()
+    async def fake_listen(hooks: PauseHooks, *, follow_up: bool = False) -> Utterance | None:
+        heard.append(follow_up)
+        return None if follow_up else utterance()
 
     llm = FakeLLM(["It is noon."], ["Hi Victor."])
     assistant = Assistant(
@@ -146,11 +159,12 @@ async def test_enter_listens_and_text_is_sent_directly() -> None:
         listen=fake_listen,
     )
     await assistant.run()
-    assert heard == [True]
+    assert heard == [False, True]  # the key press, then the automatic follow-up
     assert ui.events == [
         "ready:True",
         "listening",
         "reply:It is noon.",
+        "listening",
         "ready:True",
         "reply:Hi Victor.",
         "ready:True",
@@ -161,8 +175,8 @@ async def test_nothing_heard_cases() -> None:
     ui = RecordingUi()
     results: list[Utterance | None] = [None, utterance()]
 
-    async def fake_listen() -> Utterance | None:
-        return results.pop(0)
+    async def fake_listen(hooks: PauseHooks, *, follow_up: bool = False) -> Utterance | None:
+        return None if follow_up else results.pop(0)
 
     turn = make_turn(FakeLLM(), stt_text="  ")
     await Assistant(turn=turn, lines=lines("", ""), ui=ui, listen=fake_listen).run()
@@ -172,7 +186,7 @@ async def test_nothing_heard_cases() -> None:
 async def test_errors_are_shown_and_the_loop_continues() -> None:
     ui = RecordingUi()
 
-    async def broken_listen() -> Utterance | None:
+    async def broken_listen(hooks: PauseHooks, *, follow_up: bool = False) -> Utterance | None:
         raise AudioBackendError("mic unplugged")
 
     llm = FakeLLM([], error=LLMError("out of credits"))
@@ -206,7 +220,7 @@ async def test_stop_cancels_listening_and_the_loop_continues() -> None:
     ui = RecordingUi()
     started = asyncio.Event()
 
-    async def endless_listen() -> Utterance | None:
+    async def endless_listen(hooks: PauseHooks, *, follow_up: bool = False) -> Utterance | None:
         started.set()
         await asyncio.sleep(60)
         return None  # pragma: no cover
@@ -247,7 +261,7 @@ async def test_unexpected_errors_are_reported_and_the_loop_continues(
 ) -> None:
     ui = RecordingUi()
 
-    async def buggy_listen() -> Utterance | None:
+    async def buggy_listen(hooks: PauseHooks, *, follow_up: bool = False) -> Utterance | None:
         raise ZeroDivisionError
 
     llm = FakeLLM(["Still here."])
@@ -260,7 +274,7 @@ async def test_unexpected_errors_are_reported_and_the_loop_continues(
 async def test_cancelling_the_whole_loop_cancels_the_command() -> None:
     started = asyncio.Event()
 
-    async def endless_listen() -> Utterance | None:
+    async def endless_listen(hooks: PauseHooks, *, follow_up: bool = False) -> Utterance | None:
         started.set()
         await asyncio.sleep(60)
         return None  # pragma: no cover
@@ -273,3 +287,158 @@ async def test_cancelling_the_whole_loop_cancels_the_command() -> None:
     runner.cancel()
     with pytest.raises(asyncio.CancelledError):
         await runner
+
+
+async def test_assistant_speculates_on_pauses_and_discards_on_resume() -> None:
+    ui = RecordingUi()
+    first, second = np.zeros(8_000, np.float32), np.zeros(12_000, np.float32)
+
+    async def talker(hooks: PauseHooks, *, follow_up: bool = False) -> Utterance | None:
+        if follow_up:
+            return None
+        hooks.on_pause(first, FakeControl())  # a thinking pause...
+        await asyncio.sleep(0.01)
+        hooks.on_resume()  # ...then more words
+        hooks.on_pause(second, FakeControl())
+        await asyncio.sleep(0.01)
+        return Utterance(audio=second, speech_end=1.0, turn_detected=1.7)
+
+    llm = FakeLLM(["discarded draft"], ["The real answer."])
+    turn = make_turn(llm, stt_text="the full question")
+    await Assistant(turn=turn, lines=lines(""), ui=ui, listen=talker).run()
+    stt = turn._stt  # pyright: ignore[reportPrivateUsage]
+    assert isinstance(stt, FakeSTT)
+    assert stt.received == [8_000, 12_000]  # one speculation per pause, none after
+    assert "reply:The real answer." in ui.events
+    history = [m.text for m in turn._conversation.history]  # pyright: ignore[reportPrivateUsage]
+    assert history == ["the full question", "The real answer."]
+
+
+async def test_speculation_can_be_disabled() -> None:
+    ui = RecordingUi()
+
+    async def talker(hooks: PauseHooks, *, follow_up: bool = False) -> Utterance | None:
+        if follow_up:
+            return None
+        hooks.on_pause(np.zeros(100, np.float32), FakeControl())
+        return Utterance(audio=np.zeros(200, np.float32), speech_end=1.0, turn_detected=1.7)
+
+    turn = make_turn(FakeLLM(["ok"]))
+    await Assistant(
+        turn=turn, lines=lines(""), ui=ui, listen=talker, turn_taking=TurnTaking(speculate=False)
+    ).run()
+    stt = turn._stt  # pyright: ignore[reportPrivateUsage]
+    assert isinstance(stt, FakeSTT)
+    assert stt.received == [200]  # transcribed only after the turn ended
+
+
+async def test_real_speech_triggers_a_pause_before_the_end_of_turn() -> None:
+    events: list[str] = []
+    hooks = PauseHooks(
+        on_pause=lambda audio, control: events.append(f"pause:{len(audio) > 30_000}"),
+        on_resume=lambda: events.append("resume"),
+    )
+    utterance = await listen(
+        stream(frames(speech_clip())), SileroVAD(), EndpointerSettings(), hooks=hooks
+    )
+    assert utterance is not None
+    assert events[-1] == "pause:True"  # the last pause holds the whole sentence
+
+
+# --------------------------------------------------------------------------- turn-taking
+
+
+def pausing_talker(controls: list[FakeControl]):
+    async def talker(hooks: PauseHooks, *, follow_up: bool = False) -> Utterance | None:
+        if follow_up:
+            return None
+        control = FakeControl()
+        controls.append(control)
+        hooks.on_pause(np.zeros(8_000, np.float32), control)
+        await asyncio.sleep(0.02)  # the speculative transcript arrives during the pause
+        return Utterance(audio=np.zeros(8_000, np.float32), speech_end=1.0, turn_detected=1.9)
+
+    return talker
+
+
+async def test_unfinished_sentences_get_more_time() -> None:
+    controls: list[FakeControl] = []
+    turn = make_turn(FakeLLM(["Go on."]), stt_text="So I was thinking about the")
+    await Assistant(
+        turn=turn, lines=lines(""), ui=RecordingUi(), listen=pausing_talker(controls)
+    ).run()
+    assert controls[0].required == [2_000]
+
+
+async def test_finished_sentences_get_the_normal_wait() -> None:
+    controls: list[FakeControl] = []
+    turn = make_turn(FakeLLM(["Noon."]), stt_text="What time is it?")
+    await Assistant(
+        turn=turn, lines=lines(""), ui=RecordingUi(), listen=pausing_talker(controls)
+    ).run()
+    assert controls[0].required == []
+
+
+async def test_adaptive_waiting_can_be_disabled() -> None:
+    controls: list[FakeControl] = []
+    turn = make_turn(FakeLLM(["Go on."]), stt_text="So I was thinking about the")
+    assistant = Assistant(
+        turn=turn,
+        lines=lines(""),
+        ui=RecordingUi(),
+        listen=pausing_talker(controls),
+        turn_taking=TurnTaking(thinking_pause_ms=None),
+    )
+    await assistant.run()
+    assert controls[0].required == []
+
+
+async def test_follow_up_continues_the_conversation_without_a_key_press() -> None:
+    ui = RecordingUi()
+    calls: list[bool] = []
+    answers = [utterance(), utterance(), None]  # question, follow-up question, then silence
+
+    async def talker(hooks: PauseHooks, *, follow_up: bool = False) -> Utterance | None:
+        calls.append(follow_up)
+        return answers.pop(0)
+
+    llm = FakeLLM(["First answer."], ["Second answer."])
+    await Assistant(turn=make_turn(llm), lines=lines(""), ui=ui, listen=talker).run()
+    assert calls == [False, True, True]
+    assert ui.events.count("listening") == 3
+    assert "reply:First answer." in ui.events
+    assert "reply:Second answer." in ui.events
+    assert "nothing" not in ui.events  # silence after a reply is not an error
+    assert ui.events.count("ready:True") == 2  # before the first question, and at the end
+
+
+async def test_follow_up_can_be_disabled() -> None:
+    calls: list[bool] = []
+
+    async def talker(hooks: PauseHooks, *, follow_up: bool = False) -> Utterance | None:
+        calls.append(follow_up)
+        return utterance()
+
+    turn = make_turn(FakeLLM(["Answer."]))
+    assistant = Assistant(
+        turn=turn,
+        lines=lines(""),
+        ui=RecordingUi(),
+        listen=talker,
+        turn_taking=TurnTaking(follow_up=False),
+    )
+    await assistant.run()
+    assert calls == [False]
+
+
+async def test_typed_messages_do_not_trigger_follow_up() -> None:
+    calls: list[bool] = []
+
+    async def talker(hooks: PauseHooks, *, follow_up: bool = False) -> Utterance | None:
+        calls.append(follow_up)
+        return None  # pragma: no cover
+
+    await Assistant(
+        turn=make_turn(FakeLLM(["Hi."])), lines=lines("hello"), ui=RecordingUi(), listen=talker
+    ).run()
+    assert calls == []

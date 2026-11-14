@@ -119,3 +119,10 @@ def test_vocabulary() -> None:
         parse_config('[voice]\nvocabulary = [""]\n')
     with pytest.raises(ConfigError, match="vocabulary"):
         parse_config(f"[voice]\nvocabulary = [{', '.join(['"x"'] * 51)}]\n")
+
+
+def test_thinking_pause_must_not_be_shorter_than_end_of_turn() -> None:
+    with pytest.raises(ConfigError, match="thinking_pause_ms"):
+        parse_config("[voice]\nend_of_turn_ms = 1500\nthinking_pause_ms = 1000\n")
+    config = parse_config("[voice]\nfollow_up_s = 0\n")
+    assert config.voice.follow_up_s == 0

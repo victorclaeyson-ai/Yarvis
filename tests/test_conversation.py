@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from datetime import UTC, datetime
 
 import pytest
@@ -75,3 +76,41 @@ def test_system_prompt_mentions_name_time_and_voice_rules() -> None:
 
 def test_system_prompt_defaults_to_now() -> None:
     assert str(datetime.now().year) in system_prompt("Yarvis")  # noqa: DTZ005
+
+
+async def test_draft_starts_generating_before_it_is_consumed() -> None:
+    llm = FakeLLM(["early"])
+    conversation = make(llm)
+    draft = conversation.draft("Hi")
+    await asyncio.sleep(0.01)
+    assert len(llm.calls) == 1  # already asked
+    assert draft.first_token_at is not None
+    assert conversation.history == ()  # but not remembered yet
+    assert "".join([d async for d in draft.deltas()]) == "early"
+    assert conversation.history == (Message("user", "Hi"), Message("assistant", "early"))
+
+
+async def test_discarded_draft_is_never_remembered() -> None:
+    conversation = make(FakeLLM(["x"]))
+    draft = conversation.draft("Hi")
+    await asyncio.sleep(0.01)
+    draft.discard()
+    draft.discard()  # idempotent
+    assert conversation.history == ()
+
+
+async def test_a_draft_can_only_be_consumed_once() -> None:
+    draft = make(FakeLLM(["x"])).draft("Hi")
+    assert [d async for d in draft.deltas()] == ["x"]
+    with pytest.raises(RuntimeError, match="once"):
+        async for _ in draft.deltas():
+            pass  # pragma: no cover
+
+
+async def test_stopping_mid_reply_remembers_what_was_heard() -> None:
+    llm = FakeLLM(["One. ", "Two. ", "Three."])
+    conversation = make(llm)
+    stream = conversation.respond("count")
+    assert await anext(stream) == "One. "
+    await stream.aclose()
+    assert conversation.history[-1] == Message("assistant", "One.")

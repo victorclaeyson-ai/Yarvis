@@ -67,8 +67,12 @@ class FakeMic:
         pass
 
     def __aiter__(self) -> AsyncIterator[AudioArray]:
+        # The user asks one question; after that the microphone hears nothing (the stream
+        # ends), so a follow-up listen returns without speech.
+        speech = frames(speech_clip()) if self.opened == 1 else []
+
         async def gen() -> AsyncIterator[AudioArray]:
-            for frame in frames(speech_clip()):
+            for frame in speech:
                 yield frame
 
         return gen()
@@ -138,14 +142,18 @@ async def test_full_voice_turn_through_the_real_wiring(tmp_path: Path) -> None:
         on_loading=loading.append,
     )
     assert fakes.stt.loaded and fakes.tts.loaded
-    assert loading == ["Loading speech models…"]
-    assert fakes.mic.opened == 1
-    assert fakes.stt.received and fakes.stt.received[0] > 2 * 16_000
+    assert loading == ["Loading speech models…", "Warming up…"]
+    assert fakes.mic.opened == 2  # the question, then the follow-up window (silence)
+    warm_up, *real = fakes.stt.received
+    assert warm_up == 8_000  # half a second of silence at startup
+    assert len(real) == 1  # the speculation during the final pause, reused at end of turn
+    assert real[0] > 2 * 16_000
     assert ui.events[:4] == ["ready:True", "listening", "speech", "you:hey yarvis what time is it"]
     assert "reply:It is half past one." in ui.events
-    assert fakes.tts.spoken == ["It is half past one."]
+    assert fakes.tts.spoken == ["Ready.", "It is half past one."]
     assert fakes.sink.played == 1 and fakes.sink.closed
     assert fakes.keys == ["k"]
+    assert fakes.llm.warm_ups == 2  # at startup, and again when speech started
 
 
 async def test_text_and_mute_mode_load_nothing(tmp_path: Path) -> None:
@@ -293,15 +301,15 @@ def test_models_download_invalid_config(invoke: Invoke, paths: AppPaths) -> None
 
 def test_format_timings() -> None:
     timings = TurnTimings(
-        speech_end=10.0, turn_detected=10.7, transcribed=10.85, first_token=11.2,
-        first_sentence=11.3, first_audio=11.4,
+        speech_end=10.0, turn_detected=10.7, stt_started=10.7, transcribed=10.85,
+        llm_started=10.85, first_token=11.2, first_sentence=11.3, first_audio=11.4,
     )  # fmt: skip
     line = format_timings(timings)
     assert line == (
         "1.40 s to first word  (end of turn 0.70 · speech-to-text 0.15 · Claude 0.35 · voice 0.10)"
     )
     assert format_timings(TurnTimings()) is None
-    assert format_timings(TurnTimings(transcribed=1.0, first_token=1.5)) == "timings  (Claude 0.50)"
+    assert format_timings(TurnTimings(llm_started=1.0, first_token=1.5)) == "timings  (Claude 0.50)"
 
 
 def test_console_ui_streams_and_escapes_markup() -> None:
@@ -315,7 +323,7 @@ def test_console_ui_streams_and_escapes_markup() -> None:
     ui.on_reply_delta("Hello ")
     ui.on_reply_delta("[there]")
     ui.reply_finished(
-        TurnResult("x", "Hello [there]", TurnTimings(transcribed=1.0, first_token=1.2))
+        TurnResult("x", "Hello [there]", TurnTimings(llm_started=1.0, first_token=1.2))
     )
     ui.ready(voice=False)
     ui.nothing_heard()

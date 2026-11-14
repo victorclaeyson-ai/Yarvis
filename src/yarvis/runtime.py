@@ -8,13 +8,15 @@ from __future__ import annotations
 
 import asyncio
 from contextlib import AsyncExitStack
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING, Protocol, Self
+
+import numpy as np
 
 from yarvis.agent.conversation import Conversation
 from yarvis.agent.prompts import system_prompt
-from yarvis.assistant import Assistant, AssistantControls
-from yarvis.listen import listen
+from yarvis.assistant import Assistant, AssistantControls, Listener, TurnTaking
+from yarvis.listen import PauseHooks, listen
 from yarvis.pipeline import Turn
 from yarvis.speech.base import AudioSink, SpeechToText, TextToSpeech
 from yarvis.speech.endpointing import EndpointerSettings
@@ -96,7 +98,10 @@ class Backends:
         return cls(
             llm=lambda config, key: AnthropicProvider(key, model=config.llm.model),
             stt=lambda config, cache: WhisperSTT(
-                config.voice.stt_model, cache_dir=cache, vocabulary=config.voice.vocabulary
+                config.voice.stt_model,
+                cache_dir=cache,
+                vocabulary=config.voice.vocabulary,
+                device=config.voice.stt_device,
             ),
             tts=lambda config, cache: KokoroTTS(
                 cache_dir=cache, voice=config.voice.voice, speed=config.voice.speech_rate
@@ -123,8 +128,9 @@ async def run_assistant(
     controls: AssistantControls | None = None,
 ) -> None:
     """Assemble the pipeline and run the interactive loop until the user quits."""
+    llm = backends.llm(config, api_key)
     conversation = Conversation(
-        backends.llm(config, api_key),
+        llm,
         system_prompt=lambda: system_prompt(config.assistant.name),
         max_tokens=config.llm.max_tokens,
     )
@@ -136,6 +142,9 @@ async def run_assistant(
         if on_loading is not None:
             on_loading("Loading speech models…")
         await asyncio.gather(*(asyncio.to_thread(engine.load) for engine in loading))
+    if on_loading is not None:
+        on_loading("Warming up…")
+    await warm_up(llm, stt, tts)
 
     async with AsyncExitStack() as stack:
         speaker = None
@@ -143,24 +152,66 @@ async def run_assistant(
             speaker = await stack.enter_async_context(backends.speaker(config, tts.sample_rate))
         turn = Turn(conversation, stt=stt, tts=tts, speaker=speaker, observer=ui)
 
-        listener: Callable[[], Awaitable[Utterance | None]] | None = None
+        listener: Listener | None = None
         if stt is not None:
             vad = backends.vad()
             settings = EndpointerSettings(end_of_turn_ms=config.voice.end_of_turn_ms)
 
-            async def listen_once() -> Utterance | None:
+            background: set[asyncio.Task[None]] = set()
+
+            def speech_started() -> None:
+                ui.speech_started()
+                # The user is talking: make sure the connection to Claude is hot by the time
+                # the transcript is ready.
+                task = asyncio.create_task(llm.warm_up())
+                background.add(task)
+                task.add_done_callback(background.discard)
+
+            follow_up_settings = replace(
+                settings, no_speech_timeout_ms=max(1, round(config.voice.follow_up_s * 1000))
+            )
+
+            async def listen_once(hooks: PauseHooks, *, follow_up: bool) -> Utterance | None:
                 async with backends.microphone(config) as microphone:
                     return await listen(
                         aiter(microphone),
                         vad,
-                        settings,
-                        on_speech_start=ui.speech_started,
+                        follow_up_settings if follow_up else settings,
+                        on_speech_start=speech_started,
                         on_level=ui.level,
+                        hooks=hooks,
                     )
 
             listener = listen_once
 
-        assistant = Assistant(turn=turn, lines=lines, ui=ui, listen=listener)
+        assistant = Assistant(
+            turn=turn,
+            lines=lines,
+            ui=ui,
+            listen=listener,
+            turn_taking=TurnTaking(
+                speculate=config.voice.speculative,
+                thinking_pause_ms=config.voice.thinking_pause_ms,
+                follow_up=config.voice.follow_up_s > 0,
+            ),
+        )
         if controls is not None:
             controls.attach(assistant)
         await assistant.run()
+
+
+WARM_UP_AUDIO_SAMPLES = 8_000  # half a second of silence
+
+
+async def warm_up(llm: LLMProvider, stt: LoadableSTT | None, tts: LoadableTTS | None) -> None:
+    """Run every engine once so the first real question is as fast as the rest.
+
+    The first inference of an ONNX/CTranslate2 model and the first HTTPS request are much
+    slower than later ones (memory allocation, kernel selection, TLS handshake).
+    """
+    jobs: list[Awaitable[object]] = [llm.warm_up()]
+    if stt is not None:
+        jobs.append(stt.transcribe(np.zeros(WARM_UP_AUDIO_SAMPLES, dtype=np.float32)))
+    if tts is not None:
+        jobs.append(tts.synthesize("Ready."))
+    await asyncio.gather(*jobs)

@@ -10,17 +10,21 @@ from __future__ import annotations
 import asyncio
 import logging
 import threading
+from dataclasses import dataclass
 from typing import TYPE_CHECKING, Protocol
 
 from yarvis.audio.devices import AudioBackendError
+from yarvis.listen import PauseHooks
 from yarvis.llm.base import LLMError
 from yarvis.pipeline import TurnObserver
+from yarvis.speech.turn_taking import sounds_finished
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator, Awaitable, Callable
+    from collections.abc import AsyncIterator, Awaitable
 
-    from yarvis.listen import Utterance
-    from yarvis.pipeline import Turn, TurnResult
+    from yarvis.listen import PauseControl, Utterance
+    from yarvis.pipeline import Speculation, Turn, TurnResult
+    from yarvis.speech.base import AudioArray
 
 logger = logging.getLogger(__name__)
 
@@ -63,6 +67,26 @@ class AssistantUi(TurnObserver, Protocol):
         ...
 
 
+class Listener(Protocol):
+    """Opens the microphone and captures one utterance."""
+
+    def __call__(self, hooks: PauseHooks, *, follow_up: bool) -> Awaitable[Utterance | None]:
+        """``follow_up`` listens briefly after a reply instead of waiting for the user."""
+        ...
+
+
+@dataclass(frozen=True, slots=True)
+class TurnTaking:
+    """How the assistant decides when you are done and whether to keep listening."""
+
+    speculate: bool = True
+    """Start transcribing and drafting a reply during pauses."""
+    thinking_pause_ms: int | None = 2_000
+    """Silence allowed when the sentence sounds unfinished (None: no adaptive waiting)."""
+    follow_up: bool = True
+    """After a spoken reply, listen again without a key press."""
+
+
 class Assistant:
     """Reads input lines; an empty line means "listen", any text is sent as typed input."""
 
@@ -72,20 +96,26 @@ class Assistant:
         turn: Turn,
         lines: AsyncIterator[str],
         ui: AssistantUi,
-        listen: Callable[[], Awaitable[Utterance | None]] | None,
+        listen: Listener | None,
+        turn_taking: TurnTaking | None = None,
     ) -> None:
         self._turn = turn
         self._lines = lines
         self._ui = ui
         self._listen = listen
+        self._turn_taking = turn_taking or TurnTaking()
         self._loop: asyncio.AbstractEventLoop | None = None
-        self._current: asyncio.Task[None] | None = None
+        self._current: asyncio.Task[bool] | None = None
 
     async def run(self) -> None:
         """Run until the user quits or input ends."""
         self._loop = asyncio.get_running_loop()
         voice = self._listen is not None
+        follow_up = False
         while True:
+            if follow_up:
+                follow_up = await self._run_command("", follow_up=True)
+                continue
             self._ui.ready(voice=voice)
             line = await anext(self._lines, None)
             if line is None:
@@ -93,7 +123,7 @@ class Assistant:
             text = line.strip()
             if text.lower() in QUIT_COMMANDS:
                 return
-            await self._run_command(text)
+            follow_up = await self._run_command(text)
 
     def stop(self) -> None:
         """Stop whatever is happening (listening, thinking, speaking). Thread-safe."""
@@ -106,8 +136,9 @@ class Assistant:
             logger.info("Stopping the current command")
             self._current.cancel()
 
-    async def _run_command(self, text: str) -> None:
-        task = asyncio.create_task(self._handle(text))
+    async def _run_command(self, text: str, *, follow_up: bool = False) -> bool:
+        """Run one command; returns True if the assistant should listen again by itself."""
+        task = asyncio.create_task(self._handle(text, follow_up=follow_up))
         self._current = task
         try:
             await asyncio.wait({task})
@@ -117,10 +148,10 @@ class Assistant:
                 task.cancel()
         if task.cancelled():
             self._ui.stopped()
-            return
+            return False
         error = task.exception()
         if error is None:
-            return
+            return task.result()
         if isinstance(error, LLMError | AudioBackendError):
             logger.warning("%s: %s", type(error).__name__, error)
             self._ui.error(str(error))
@@ -129,28 +160,64 @@ class Assistant:
             self._ui.error(
                 f"Something went wrong ({type(error).__name__}). Details are in the log."
             )
+        return False
 
-    async def _handle(self, text: str) -> None:
+    async def _handle(self, text: str, *, follow_up: bool = False) -> bool:
         if text:
             logger.info("Typed message (%d characters)", len(text))
             self._ui.reply_finished(await self._turn.from_text(text))
-            return
+            return False
         if self._listen is None:
-            return
-        logger.info("Listening")
+            return False
+        logger.info("Listening for a follow-up" if follow_up else "Listening")
         self._ui.listening()
-        utterance = await self._listen()
+        speculation: Speculation | None = None
+        thinking_pause_ms = self._turn_taking.thinking_pause_ms
+
+        def on_pause(audio: AudioArray, control: PauseControl) -> None:
+            nonlocal speculation
+            if speculation is not None:
+                speculation.discard()
+            speculation = None
+            if not self._turn_taking.speculate:
+                return
+            speculation = self._turn.speculate(audio)
+            if thinking_pause_ms is not None:
+                patience = thinking_pause_ms
+
+                def adapt(transcript: str) -> None:
+                    if not sounds_finished(transcript):
+                        control.require_silence_ms(patience)
+
+                speculation.when_transcribed(adapt)
+
+        def on_resume() -> None:
+            nonlocal speculation
+            if speculation is not None:
+                speculation.discard()
+                speculation = None
+
         result = None
-        if utterance is not None:
-            result = await self._turn.from_audio(
-                utterance.audio,
-                speech_end=utterance.speech_end,
-                turn_detected=utterance.turn_detected,
-            )
-        if result is None:
-            self._ui.nothing_heard()
-        else:
+        utterance = None
+        try:
+            hooks = PauseHooks(on_pause=on_pause, on_resume=on_resume)
+            utterance = await self._listen(hooks, follow_up=follow_up)
+            if utterance is not None:
+                result = await self._turn.from_audio(
+                    utterance.audio,
+                    speech_end=utterance.speech_end,
+                    turn_detected=utterance.turn_detected,
+                    speculation=speculation,
+                )
+        finally:
+            if speculation is not None:
+                speculation.discard()  # no-op once used; stops it if we were interrupted
+        if result is not None:
             self._ui.reply_finished(result)
+            return self._turn_taking.follow_up
+        if not follow_up or utterance is not None:
+            self._ui.nothing_heard()  # silence after a reply simply ends the conversation
+        return False
 
 
 class AssistantControls:

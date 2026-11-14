@@ -80,7 +80,7 @@ def test_app_ui_events() -> None:
     ui.on_transcript("hi")
     ui.on_reply_delta("Hello")
     ui.on_audio_started()
-    timings = TurnTimings(speech_end=1.0, transcribed=1.2, first_token=1.5, first_audio=1.9)
+    timings = TurnTimings(speech_end=1.0, llm_started=1.2, first_token=1.5, first_audio=1.9)
     ui.reply_finished(TurnResult("hi", "Hello", timings))
     ui.nothing_heard()
     ui.error("broken")

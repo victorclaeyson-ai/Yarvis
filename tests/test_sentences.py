@@ -7,9 +7,18 @@ from hypothesis import strategies as st
 from yarvis.speech.sentences import SentenceSplitter, SpeechFilter, to_speakable
 
 
-def split(text: str, *, chunk: int = 3, **kwargs: int) -> list[str]:
+def split(
+    text: str,
+    *,
+    chunk: int = 3,
+    min_chars: int = 40,
+    max_chars: int = 220,
+    first_clause_chars: int | None = 24,
+) -> list[str]:
     """Feed ``text`` in small chunks, like a token stream."""
-    splitter = SentenceSplitter(**kwargs)
+    splitter = SentenceSplitter(
+        min_chars=min_chars, max_chars=max_chars, first_clause_chars=first_clause_chars
+    )
     out: list[str] = []
     for start in range(0, len(text), chunk):
         out.extend(splitter.feed(text[start : start + chunk]))
@@ -23,9 +32,36 @@ def test_first_sentence_is_emitted_immediately_even_if_short() -> None:
     assert splitter.feed("Sure. ") == ["Sure."]
 
 
+def test_first_clause_is_emitted_at_a_comma_when_long_enough() -> None:
+    splitter = SentenceSplitter()
+    assert splitter.feed("It's grey and drizzly in Zedelgem") == []
+    assert splitter.feed(", as usual for November. ") == ["It's grey and drizzly in Zedelgem,"]
+    assert splitter.flush() == "as usual for November."
+
+
+def test_short_first_clauses_wait_for_more_text() -> None:
+    splitter = SentenceSplitter()
+    assert splitter.feed("Well, ") == []
+    assert splitter.feed("that depends. ") == ["Well, that depends."]
+
+
+def test_first_clause_split_can_be_disabled() -> None:
+    splitter = SentenceSplitter(first_clause_chars=None)
+    assert splitter.feed("It's grey and drizzly in Zedelgem, as usual. ") == [
+        "It's grey and drizzly in Zedelgem, as usual."
+    ]
+
+
+def test_numbers_with_commas_are_not_split() -> None:
+    splitter = SentenceSplitter()
+    assert splitter.feed("The population is about 24,000 people. ") == [
+        "The population is about 24,000 people."
+    ]
+
+
 def test_later_short_sentences_are_merged() -> None:
     text = "Sure. It is sunny. It is warm. Tomorrow will be rainy and quite a bit colder."
-    assert split(text, min_chars=20) == [
+    assert split(text, min_chars=20, first_clause_chars=None) == [
         "Sure.",
         "It is sunny. It is warm.",
         "Tomorrow will be rainy and quite a bit colder.",
@@ -48,7 +84,7 @@ def test_waits_for_the_character_after_a_terminator() -> None:
     ],
 )
 def test_no_false_boundaries(text: str) -> None:
-    assert split(text) == [text]
+    assert split(text, first_clause_chars=None) == [text]
 
 
 def test_question_and_exclamation_marks_and_quotes() -> None:

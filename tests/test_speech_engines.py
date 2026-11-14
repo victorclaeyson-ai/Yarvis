@@ -97,7 +97,7 @@ async def test_whisper_joins_confident_segments(tmp_path: Path) -> None:
     )
     calls: list[bool] = []
 
-    def loader(name: str, root: Path, *, local_only: bool) -> FakeWhisper:
+    def loader(name: str, root: Path, *, local_only: bool, device: str = "cpu") -> FakeWhisper:
         calls.append(local_only)
         assert name == "base.en"
         assert root.is_relative_to(tmp_path)
@@ -117,7 +117,7 @@ async def test_whisper_joins_confident_segments(tmp_path: Path) -> None:
 def test_whisper_downloads_when_not_cached(tmp_path: Path) -> None:
     calls: list[bool] = []
 
-    def loader(name: str, root: Path, *, local_only: bool) -> FakeWhisper:
+    def loader(name: str, root: Path, *, local_only: bool, device: str = "cpu") -> FakeWhisper:
         calls.append(local_only)
         if local_only:
             raise FileNotFoundError("not cached")
@@ -183,3 +183,31 @@ def test_kokoro_requires_loading_first(tmp_path: Path) -> None:
     tts = KokoroTTS(cache_dir=tmp_path, voice="af_heart")
     with pytest.raises(RuntimeError, match="not loaded"):
         tts._synthesize_blocking("hi")  # pyright: ignore[reportPrivateUsage]
+
+
+def test_whisper_falls_back_to_cpu_when_the_gpu_fails(tmp_path: Path) -> None:
+    attempts: list[tuple[str, bool]] = []
+
+    def loader(name: str, root: Path, *, local_only: bool, device: str = "cpu") -> FakeWhisper:
+        attempts.append((device, local_only))
+        if device == "mps":
+            raise ValueError("unsupported device mps")
+        return FakeWhisper([])
+
+    stt = WhisperSTT("base.en", cache_dir=tmp_path, device="mps", loader=loader)
+    stt.load()
+    assert stt.device == "cpu"
+    assert attempts == [("mps", True), ("mps", False), ("cpu", True)]
+
+
+def test_whisper_uses_the_gpu_when_it_works(tmp_path: Path) -> None:
+    devices: list[str] = []
+
+    def loader(name: str, root: Path, *, local_only: bool, device: str = "cpu") -> FakeWhisper:
+        devices.append(device)
+        return FakeWhisper([])
+
+    stt = WhisperSTT("base.en", cache_dir=tmp_path, device="mps", loader=loader)
+    stt.load()
+    assert stt.device == "mps"
+    assert devices == ["mps"]

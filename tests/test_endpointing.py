@@ -12,6 +12,7 @@ SETTINGS = EndpointerSettings(
     frame_ms=32,
     min_speech_ms=96,  # 3 frames
     end_of_turn_ms=320,  # 10 frames
+    pause_ms=96,  # 3 frames
     pre_roll_ms=160,  # 5 frames
     keep_trailing_ms=64,  # 2 frames
     no_speech_timeout_ms=3_200,  # 100 frames
@@ -35,7 +36,7 @@ def run(endpointer: Endpointer, probabilities: list[float]) -> list[EndpointEven
 def test_full_turn() -> None:
     endpointer = Endpointer(SETTINGS)
     events = run(endpointer, [0.0] * 20 + [0.9] * 30 + [0.0] * 10)
-    assert events == [EndpointEvent.SPEECH_STARTED, EndpointEvent.END_OF_TURN]
+    assert events == [EndpointEvent.SPEECH_STARTED, EndpointEvent.PAUSE, EndpointEvent.END_OF_TURN]
     assert not endpointer.speaking
     assert endpointer.trailing_silence_ms == 320
 
@@ -82,18 +83,68 @@ def test_frames_rounds_up() -> None:
     assert SETTINGS.frames(0) == 1
 
 
+def test_pause_and_resume() -> None:
+    endpointer = Endpointer(SETTINGS)
+    events = run(endpointer, [0.9] * 10 + [0.0] * 5 + [0.9] * 5 + [0.0] * 10)
+    assert events == [
+        EndpointEvent.SPEECH_STARTED,
+        EndpointEvent.PAUSE,
+        EndpointEvent.RESUME,
+        EndpointEvent.PAUSE,
+        EndpointEvent.END_OF_TURN,
+    ]
+
+
+def test_a_pause_shorter_than_the_threshold_is_not_reported() -> None:
+    events = run(Endpointer(SETTINGS), [0.9] * 10 + [0.0] * 2 + [0.9] * 5)
+    assert events == [EndpointEvent.SPEECH_STARTED]
+
+
+TERMINAL = {EndpointEvent.END_OF_TURN, EndpointEvent.MAX_DURATION, EndpointEvent.NO_SPEECH}
+
+
 @given(st.lists(st.floats(0, 1), max_size=400))
 def test_events_are_well_ordered(probabilities: list[float]) -> None:
     events = run(Endpointer(SETTINGS), probabilities)
-    assert len(events) <= 2
-    if len(events) == 2:
-        assert events[0] is EndpointEvent.SPEECH_STARTED
-        assert events[1] in {EndpointEvent.END_OF_TURN, EndpointEvent.MAX_DURATION}
-    if events == [EndpointEvent.NO_SPEECH]:
-        assert EndpointEvent.SPEECH_STARTED not in events
+    if not events:
+        return
+    if events[0] is EndpointEvent.NO_SPEECH:
+        assert events == [EndpointEvent.NO_SPEECH]
+        return
+    assert events[0] is EndpointEvent.SPEECH_STARTED
+    middle = events[1:]
+    if middle and middle[-1] in TERMINAL:
+        assert middle[-1] is not EndpointEvent.NO_SPEECH
+        middle = middle[:-1]
+    # PAUSE and RESUME strictly alternate, starting with PAUSE.
+    assert all(
+        e is (EndpointEvent.PAUSE if i % 2 == 0 else EndpointEvent.RESUME)
+        for i, e in enumerate(middle)
+    )
+    # End of turn is always preceded by a pause.
+    if events[-1] is EndpointEvent.END_OF_TURN:
+        assert events[-2] is EndpointEvent.PAUSE
 
 
 @pytest.mark.parametrize("default", [EndpointerSettings()])
 def test_default_settings_are_sane(default: EndpointerSettings) -> None:
     assert default.negative_threshold < default.threshold
+    assert default.pause_ms < default.end_of_turn_ms
     assert default.frames(default.pre_roll_ms) >= default.frames(default.min_speech_ms)
+
+
+def test_waiting_longer_for_an_unfinished_sentence() -> None:
+    endpointer = Endpointer(SETTINGS)
+    run(endpointer, [0.9] * 10 + [0.0] * 3)  # speech, then a pause is reported
+    endpointer.require_silence_ms(640)  # 20 frames instead of 10
+    events = run(endpointer, [0.0] * 12)
+    assert EndpointEvent.END_OF_TURN not in events  # would have ended at 10 frames
+    assert run(endpointer, [0.0] * 6) == [EndpointEvent.END_OF_TURN]
+
+
+def test_extra_patience_resets_when_speech_resumes() -> None:
+    endpointer = Endpointer(SETTINGS)
+    run(endpointer, [0.9] * 10 + [0.0] * 3)
+    endpointer.require_silence_ms(3_000)
+    run(endpointer, [0.9] * 3)  # the user continues
+    assert run(endpointer, [0.0] * 10) == [EndpointEvent.PAUSE, EndpointEvent.END_OF_TURN]

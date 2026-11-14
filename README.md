@@ -10,8 +10,9 @@ Your own Jarvis — except it lives on your machine, like a yeti lives off the g
 
 ## Why Yarvis
 
-- **Feels instant** — target ≤ 800 ms from the end of your sentence to its first word, and
-  you can interrupt it mid-sentence.
+- **Feels instant** — Yarvis starts transcribing and asking Claude *during your pauses*,
+  speaks from the first comma, and keeps every engine warm
+  ([how it works](docs/adr/0005-speculative-turn-taking.md)). Stop it mid-sentence anytime.
 - **Private by default** — wake word, speech-to-text and text-to-speech run locally. Audio
   never leaves your machine. A fully offline mode is built in.
 - **Actually does things** — tools via the Model Context Protocol (MCP), so anyone can plug
@@ -50,6 +51,9 @@ uv run yarvis app                 # opens the Yarvis window: press Space and tal
 The first run downloads the speech models (~500 MB, verified by SHA-256). After that, speech
 recognition and the voice run fully on your machine; only the text of the conversation goes
 to Claude.
+
+Curious how fast it is on your machine? `yarvis bench` measures each stage (voice, speech
+recognition on CPU and Apple GPU, Claude's first token) and recommends settings.
 
 Prefer the terminal? `yarvis run` does the same in your shell. Both accept `--text` (type
 instead of speaking) and `--mute` (no voice output). `yarvis config init` writes a commented

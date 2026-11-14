@@ -6,6 +6,8 @@ writing the rest. That is the single biggest latency win in the pipeline.
 Rules:
 
 * The **first** sentence is emitted as soon as it ends, however short, so audio starts fast.
+  Better still, its first *clause* is emitted at a comma, colon or dash once it is long
+  enough to sound natural on its own ("Grey skies and drizzle, | as usual for Leuven.").
 * Later sentences are merged until they reach ``min_chars``: very short TTS chunks sound
   choppy, and by then the voice is already busy speaking the first one.
 * A newline always ends a sentence (lists, paragraphs).
@@ -31,12 +33,19 @@ _ABBREVIATIONS: Final = frozenset(
 class SentenceSplitter:
     """Incrementally split streamed text into sentences."""
 
-    def __init__(self, *, min_chars: int = 40, max_chars: int = 220) -> None:
+    def __init__(
+        self,
+        *,
+        min_chars: int = 40,
+        max_chars: int = 220,
+        first_clause_chars: int | None = 24,
+    ) -> None:
         if not 0 < min_chars < max_chars:
             msg = "require 0 < min_chars < max_chars"
             raise ValueError(msg)
         self._min_chars = min_chars
         self._max_chars = max_chars
+        self._first_clause_chars = first_clause_chars
         self._buffer = ""
         self._pending = ""  # complete but too-short sentences waiting to be merged
         self._emitted = 0
@@ -75,6 +84,18 @@ class SentenceSplitter:
 
     def _next_cut(self) -> int | None:
         text = self._buffer
+        sentence = self._sentence_cut(text)
+        if self._emitted == 0 and self._first_clause_chars is not None:
+            clause = _clause_break(text, self._first_clause_chars)
+            if clause is not None and (sentence is None or clause < sentence):
+                return clause
+        if sentence is not None:
+            return sentence
+        if len(text) > self._max_chars:
+            return _soft_break(text, self._max_chars)
+        return None
+
+    def _sentence_cut(self, text: str) -> int | None:
         for index, char in enumerate(text):
             if char == "\n":
                 return index + 1
@@ -86,8 +107,6 @@ class SentenceSplitter:
                     return None  # need the next character to decide
                 if text[end].isspace() and not self._is_abbreviation(text, index):
                     return end
-        if len(text) > self._max_chars:
-            return _soft_break(text, self._max_chars)
         return None
 
     @staticmethod
@@ -101,6 +120,17 @@ class SentenceSplitter:
         if len(word) == 1 and word.isupper():
             return True  # an initial, as in "J. R. Tolkien"
         return word.lower() in _ABBREVIATIONS
+
+
+_CLAUSE_BREAK: Final = re.compile(r"(?:,|;|:| -| —| –)\s")  # noqa: RUF001 - dashes are intended
+
+
+def _clause_break(text: str, min_chars: int) -> int | None:
+    """End of the first clause that is at least ``min_chars`` long, if any."""
+    for match in _CLAUSE_BREAK.finditer(text):
+        if match.start() >= min_chars and not text[: match.start()].rstrip()[-1:].isdigit():
+            return match.end()
+    return None
 
 
 def _soft_break(text: str, limit: int) -> int:

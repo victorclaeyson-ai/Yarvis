@@ -12,7 +12,7 @@ import numpy as np
 from yarvis.audio.devices import AudioBackendError, AudioDevice
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator, Sequence
+    from collections.abc import AsyncGenerator, Sequence
 
     from typer.testing import Result
 
@@ -103,10 +103,14 @@ class FakeLLM:
         self.replies = list(replies)
         self.error = error
         self.calls: list[tuple[list[Message], str, int]] = []
+        self.warm_ups = 0
+
+    async def warm_up(self) -> None:
+        self.warm_ups += 1
 
     async def stream(
         self, messages: Sequence[Message], *, system: str, max_tokens: int
-    ) -> AsyncIterator[str]:
+    ) -> AsyncGenerator[str]:
         self.calls.append((list(messages), system, max_tokens))
         deltas = self.replies.pop(0) if self.replies else []
         for delta in deltas:

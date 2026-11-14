@@ -147,3 +147,28 @@ def test_default_client_uses_the_key() -> None:
 def test_unknown_api_errors_get_a_generic_message() -> None:
     error = anthropic.APIError("weird", request=httpx2.Request("GET", "https://x"), body=None)
     assert "Something went wrong" in explain(error, DEFAULT_MODEL)
+
+
+async def test_warm_up_lists_models_and_never_raises() -> None:
+    requests: list[str] = []
+
+    def handler(request: httpx2.Request) -> httpx2.Response:
+        requests.append(request.url.path)
+        return httpx2.Response(
+            200, json={"data": [], "has_more": False, "first_id": None, "last_id": None}
+        )
+
+    await provider(handler).warm_up()
+    assert requests == ["/v1/models"]
+
+    def failing(request: httpx2.Request) -> httpx2.Response:
+        return httpx2.Response(
+            500, json={"type": "error", "error": {"type": "api_error", "message": "x"}}
+        )
+
+    await provider(failing).warm_up()  # swallowed
+
+    def offline(request: httpx2.Request) -> httpx2.Response:
+        raise httpx2.ConnectError("offline", request=request)
+
+    await provider(offline).warm_up()  # swallowed

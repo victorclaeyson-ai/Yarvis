@@ -6,7 +6,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Literal, Protocol
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator, Sequence
+    from collections.abc import AsyncGenerator, Sequence
 
 Role = Literal["user", "assistant"]
 
@@ -32,10 +32,17 @@ class LLMProvider(Protocol):
         *,
         system: str,
         max_tokens: int,
-    ) -> AsyncIterator[str]:
+    ) -> AsyncGenerator[str]:
         """Yield the reply as text fragments, as soon as they are generated.
 
         Raises:
             LLMError: On any failure, with a user-presentable message.
+        """
+        ...
+
+    async def warm_up(self) -> None:
+        """Open the connection ahead of time so the next request starts faster.
+
+        Must never raise: a failed warm-up only means the next request is slower.
         """
         ...

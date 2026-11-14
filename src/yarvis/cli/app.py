@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import platform
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Annotated, NoReturn
 
@@ -16,6 +17,7 @@ from rich.table import Table
 
 from yarvis import __version__
 from yarvis.audio.devices import AudioProbe, SoundDeviceProbe
+from yarvis.bench import recommendation, run_bench
 from yarvis.cli.ui import ConsoleUi, stdin_lines
 from yarvis.config import Config, ConfigError, load_config, write_default_config
 from yarvis.doctor import CheckResult, DoctorContext, Status, has_failures, run_doctor
@@ -31,7 +33,7 @@ from yarvis.models import (
     whisper_present,
 )
 from yarvis.paths import AppPaths
-from yarvis.runtime import Backends, run_assistant
+from yarvis.runtime import Backends, LoadableSTT, run_assistant
 from yarvis.security.secrets import InvalidSecretError, ResolvedSecret, SecretName, SecretStore
 
 if TYPE_CHECKING:
@@ -39,6 +41,8 @@ if TYPE_CHECKING:
     from pathlib import Path
 
     from pydantic import SecretStr
+
+    from yarvis.speech.whisper import SttDevice
 
 
 @dataclass(slots=True)
@@ -352,6 +356,57 @@ def _run_app(
         voice_input=voice_input,
         voice_output=voice_output,
     )
+
+
+@app.command()
+def bench(
+    ctx: typer.Context,
+    rounds: Annotated[int, typer.Option(min=1, max=20, help="Measurements per component.")] = 3,
+    claude: Annotated[
+        bool, typer.Option("--claude/--no-claude", help="Also measure Claude (a few tokens).")
+    ] = True,
+) -> None:
+    """Measure each stage on this machine and recommend the fastest settings."""
+    services = _services(ctx)
+    config, key = _prepare(services, voice_input=True, voice_output=True, assume_yes=False)
+    backends = services.backends()
+    cache = services.paths.cache_dir
+    devices: list[SttDevice] = ["cpu"]
+    if platform.system() == "Darwin" and platform.machine() == "arm64":
+        devices.append("mps")
+
+    def make_stt(device: SttDevice) -> LoadableSTT:
+        voice = config.voice.model_copy(update={"stt_device": device})
+        return backends.stt(config.model_copy(update={"voice": voice}), cache)
+
+    results = asyncio.run(
+        run_bench(
+            tts=backends.tts(config, cache),
+            make_stt=make_stt,
+            devices=devices,
+            stt_model=config.voice.stt_model,
+            llm=backends.llm(config, key.value) if claude else None,
+            rounds=rounds,
+            on_progress=lambda message: services.console.print(f"[dim]{message}[/]"),
+        )
+    )
+    table = Table(title="Yarvis bench", title_justify="left")
+    table.add_column("Component", style="bold")
+    table.add_column("Setting")
+    table.add_column("Median", justify="right")
+    table.add_column("Runs (ms)")
+    table.add_column("Notes", overflow="fold")
+    for result in results:
+        table.add_row(
+            result.component,
+            escape(result.setting),
+            f"{result.median_ms:.0f} ms",
+            " ".join(f"{run:.0f}" for run in result.runs_ms),
+            escape(result.note),
+        )
+    services.console.print(table)
+    if advice := recommendation(results):
+        services.console.print(f"\n{escape(advice)}")
 
 
 # --------------------------------------------------------------------------- models

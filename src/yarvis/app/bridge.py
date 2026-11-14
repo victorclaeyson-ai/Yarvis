@@ -23,7 +23,7 @@ from typing import TYPE_CHECKING, Any, Final, Protocol
 from yarvis.cli.ui import format_timings
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator, Callable
+    from collections.abc import AsyncIterator, Callable, Mapping
 
     from yarvis.assistant import AssistantControls
     from yarvis.pipeline import TurnResult
@@ -66,15 +66,17 @@ class AppApi:
         *,
         name: str,
         voice: bool,
+        details: Mapping[str, str] | None = None,
     ) -> None:
         self._commands = commands
         self._controls = controls
         self._name = name
         self._voice = voice
+        self._details = dict(details or {})
 
     def hello(self) -> Event:
-        """Initial information for the page."""
-        return {"name": self._name, "voice": self._voice}
+        """Initial information for the page (name, input mode, models in use)."""
+        return {"name": self._name, "voice": self._voice, "details": self._details}
 
     def talk(self) -> None:
         """Start listening (ignored in text-only mode)."""

@@ -10,6 +10,7 @@ from typing import TYPE_CHECKING, Any
 
 from yarvis.app.bridge import AppApi, AppUi, CommandQueue, EventPump
 from yarvis.assistant import AssistantControls
+from yarvis.llm.anthropic import DEFAULT_MODEL
 from yarvis.runtime import run_assistant
 
 if TYPE_CHECKING:
@@ -22,9 +23,9 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-WINDOW_SIZE = (460, 760)
-MIN_SIZE = (380, 560)
-BACKGROUND = "#07080c"
+WINDOW_SIZE = (480, 820)
+MIN_SIZE = (400, 600)
+BACKGROUND = "#07030f"
 
 
 def index_html() -> str:
@@ -61,7 +62,12 @@ def run_app(
     controls = AssistantControls()
     pump = EventPump()
     ui = AppUi(pump.post)
-    api = AppApi(commands, controls, name=config.assistant.name, voice=voice_input)
+    details = {
+        "llm": config.llm.model or DEFAULT_MODEL,
+        "stt": f"whisper {config.voice.stt_model}" if voice_input else "off",
+        "tts": config.voice.voice if voice_output else "muted",
+    }
+    api = AppApi(commands, controls, name=config.assistant.name, voice=voice_input, details=details)
 
     window = gui.create_window(
         config.assistant.name,

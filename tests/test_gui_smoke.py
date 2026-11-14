@@ -72,11 +72,11 @@ def test_real_window_end_to_end(tmp_path: Path) -> None:  # pragma: no cover - o
             return w.evaluate_js(code)
 
         def pill() -> str:
-            return str(js("document.getElementById('pill-text').textContent"))
+            return str(js("document.getElementById('tag').textContent"))
 
         def log() -> str:
             return js(
-                "Array.from(document.querySelectorAll('#log .msg, #log .note')).map(e => e.textContent).join(' | ')"
+                "Array.from(document.querySelectorAll('#log .line .txt')).map(e => e.textContent).join(' | ')"
             )
 
         def wait_for(predicate: Callable[[], bool], timeout: float, label: str) -> bool:
@@ -89,7 +89,10 @@ def test_real_window_end_to_end(tmp_path: Path) -> None:  # pragma: no cover - o
             results.append(f"FAIL {label}  (pill={pill()!r}, log={log()!r})")
             return False
 
-        wait_for(lambda: pill() == "Ready", 20, "app becomes Ready")
+        wait_for(lambda: pill() == "ONLINE", 20, "app becomes Ready")
+        models = js("document.getElementById('models').textContent")
+        ok = "haiku" in models and "base.en" in models
+        results.append(("OK   " if ok else "FAIL ") + f"models shown: {models!r}")
         api_ok = js(
             "typeof window.pywebview.api.talk === 'function' && typeof window.pywebview.api.stop === 'function'"
         )
@@ -103,22 +106,22 @@ def test_real_window_end_to_end(tmp_path: Path) -> None:  # pragma: no cover - o
             lambda: "hey yarvis what time is it" in log(), 10, "voice turn: transcript appears"
         )
         wait_for(lambda: "It is half past two." in log(), 10, "voice turn: reply appears")
-        wait_for(lambda: pill() == "Ready", 10, "voice turn: back to Ready")
-        timing = js("document.getElementById('timing').textContent")
+        wait_for(lambda: pill() == "ONLINE", 10, "voice turn: back to Ready")
+        timing = js("document.getElementById('latency').textContent")
         results.append(
-            ("OK   " if "to first word" in timing else "FAIL ") + f"timing shown: {timing!r}"
+            ("OK   " if "TO FIRST WORD" in timing else "FAIL ") + f"timing shown: {timing!r}"
         )
 
         # 2. Space key, then stop with Space while listening.
         fakes.mic = SlowNoiseMic()
         js("document.dispatchEvent(new KeyboardEvent('keydown', {code: 'Space', key: ' '}))")
-        wait_for(lambda: pill() == "Listening", 5, "Space starts listening")
+        wait_for(lambda: pill() == "LISTENING", 5, "Space starts listening")
         is_stop = js("document.getElementById('talk').classList.contains('stop')")
         results.append(("OK   " if is_stop else "FAIL ") + "button turns into a stop button")
         time.sleep(1.0)
         js("document.dispatchEvent(new KeyboardEvent('keydown', {code: 'Space', key: ' '}))")
-        wait_for(lambda: "Stopped." in log(), 5, "Space stops listening")
-        wait_for(lambda: pill() == "Ready", 5, "back to Ready after stop")
+        wait_for(lambda: "// stopped" in log(), 5, "Space stops listening")
+        wait_for(lambda: pill() == "ONLINE", 5, "back to Ready after stop")
 
         # 3. Typed message.
         js(
@@ -128,7 +131,7 @@ def test_real_window_end_to_end(tmp_path: Path) -> None:  # pragma: no cover - o
             "document.getElementById('text').dispatchEvent(new KeyboardEvent('keydown', {key: 'Enter'}))"
         )
         wait_for(lambda: "Good to hear from you." in log(), 10, "typed message gets a reply")
-        wait_for(lambda: pill() == "Ready", 10, "back to Ready after typed message")
+        wait_for(lambda: pill() == "ONLINE", 10, "back to Ready after typed message")
         w.destroy()
 
     fakes = FakeBackends(FakeLLM(["It is half past two."], ["Good to hear ", "from you."]))

@@ -103,8 +103,14 @@ def test_app_ui_events() -> None:
 
 async def test_api_validates_input_and_queues_commands() -> None:
     commands = CommandQueue()
-    api = AppApi(commands, AssistantControls(), name="Yarvis", voice=True)
-    assert api.hello() == {"name": "Yarvis", "voice": True}
+    api = AppApi(
+        commands,
+        AssistantControls(),
+        name="Yarvis",
+        voice=True,
+        details={"llm": "claude-haiku-5-5"},
+    )
+    assert api.hello() == {"name": "Yarvis", "voice": True, "details": {"llm": "claude-haiku-5-5"}}
     api.talk()
     api.send("  hello \n  there ")
     api.send(42)

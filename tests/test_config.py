@@ -160,6 +160,13 @@ def test_follow_up_window() -> None:
         parse_config("[voice]\nfollow_up_s = 61")
 
 
+def test_staying_open() -> None:
+    assert Config().voice.stay_open_s == 300  # five minutes after the last request
+    assert parse_config("[voice]\nstay_open_s = 0").voice.stay_open_s == 0
+    with pytest.raises(ConfigError, match="stay_open_s"):
+        parse_config("[voice]\nstay_open_s = 3601")
+
+
 def test_tools_are_on_by_default_and_can_be_switched_off() -> None:
     assert Config().tools.timers and Config().tools.computer
     config = parse_config("[tools]\ntimers = false\ncomputer = false")

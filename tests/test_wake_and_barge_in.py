@@ -842,3 +842,157 @@ async def test_after_acting_an_interruption_is_a_new_request() -> None:
     await asyncio.wait({replying})
     assert turn.unanswered is None
     assert history(turn) == ["play some jazz", "[Interrupted. Already done: echo 'jazz'.]"]
+
+
+# --------------------------------------------------------------------------- staying open
+
+STAY_OPEN = TurnTaking(speculate=False, follow_up_s=15, stay_open_s=300)
+
+
+class ManualClock:
+    def __init__(self) -> None:
+        self.now = 0.0
+
+    def __call__(self) -> float:
+        return self.now
+
+
+def heard_in_turn(clock: ManualClock, *gaps: float | None) -> ListenFn:
+    """Each listen: ``gap`` seconds later someone speaks, or (None) a full stretch of quiet."""
+    pending = list(gaps)
+
+    async def listen(hooks: PauseHooks, *, follow_up: bool = False) -> Utterance | None:
+        if not pending:  # quiet for good: the conversation runs out
+            clock.now += 1_000
+            return None
+        gap = pending.pop(0)
+        clock.now += 20.0 if gap is None else gap
+        return None if gap is None else utterance()
+
+    return listen
+
+
+async def test_staying_open_only_answers_what_is_meant_for_yarvis() -> None:
+    """Talking to your brother is ignored; "open Spotify" a minute later is not."""
+    ui = EventUi()
+    llm = FakeLLM(["Noon."], ["Spotify's open."])
+    turn, speaker = make_turn(
+        llm,
+        ScriptedSTT(
+            "what time is it",
+            "So how was school today?",  # to the brother, 30 s later
+            "Do you want to play with me?",
+            "Open Spotify.",
+        ),
+        ui,
+    )
+    speaker.finish.set()
+    clock = ManualClock()
+    ears = FakeEars(heard_in_turn(clock, 0, 30, 10, 20))
+    await Assistant(
+        turn=turn,
+        lines=talk_then_quit(ui.replied),  # "q" is read once the conversation is over
+        ui=ui,
+        ears=ears,
+        turn_taking=STAY_OPEN,
+        clock=clock,
+    ).run()
+    said = [event for event in ui.events if event.startswith(("you:", "reply:"))]
+    assert said == [
+        "you:what time is it",
+        "reply:Noon.",
+        "you:Open Spotify.",
+        "reply:Spotify's open.",
+    ]
+    assert len(llm.calls) == 2  # nothing about school ever reached the model
+    assert ears.timeouts[1:4] == [20, 20, 20]  # listening in stretches
+
+
+async def test_after_a_question_any_answer_counts() -> None:
+    ui = EventUi()
+    llm = FakeLLM(["Which one, the red or the blue?"], ["Blue it is."])
+    turn, speaker = make_turn(llm, ScriptedSTT("pick a colour", "the blue one"), ui)
+    speaker.finish.set()
+    clock = ManualClock()
+    ears = FakeEars(heard_in_turn(clock, 0, 5))
+    await Assistant(
+        turn=turn,
+        lines=talk_then_quit(ui.replied),
+        ui=ui,
+        ears=ears,
+        turn_taking=STAY_OPEN,
+        clock=clock,
+    ).run()
+    assert "you:the blue one" in ui.events  # not a command, but it answers the question
+
+
+async def test_overheard_thanks_ends_it_quietly_and_time_does_too() -> None:
+    ui = EventUi()
+    llm = FakeLLM(["Noon."])
+    turn, speaker = make_turn(llm, ScriptedSTT("what time is it", "Thanks, man."), ui)
+    speaker.finish.set()
+    clock = ManualClock()
+    ears = FakeEars(heard_in_turn(clock, 0, 40))
+    await Assistant(
+        turn=turn, lines=talk_then_quit(ui.replied), ui=ui, ears=ears, turn_taking=STAY_OPEN,
+        clock=clock,
+    ).run()  # fmt: skip
+    assert len(llm.calls) == 1  # no "You're welcome" to someone else's thanks
+    assert "you:Thanks, man." not in ui.events
+
+    ui = EventUi()
+    turn, speaker = make_turn(FakeLLM(["Noon."]), ScriptedSTT("what time is it"), ui)
+    speaker.finish.set()
+    clock = ManualClock()
+    ears = FakeEars(heard_in_turn(clock, 0, *[None] * 15))  # 15 quiet stretches = 300 s
+    await Assistant(
+        turn=turn, lines=talk_then_quit(ui.replied), ui=ui, ears=ears, turn_taking=STAY_OPEN,
+        clock=clock,
+    ).run()  # fmt: skip
+    assert len(ears.timeouts) == 16  # the request, then stretches until five minutes passed
+    assert ui.events.count("listening") == 2  # quiet stretches are not announced again
+
+
+async def test_a_timer_goes_off_while_the_conversation_stays_open() -> None:
+    ui = EventUi()
+    turn, speaker = make_turn(FakeLLM(["Noon."]), ScriptedSTT("what time is it"), ui)
+    speaker.finish.set()
+    clock = ManualClock()
+    announcements: asyncio.Queue[str] = asyncio.Queue()
+    stretches = 0
+
+    async def listen(hooks: PauseHooks, *, follow_up: bool = False) -> Utterance | None:
+        nonlocal stretches
+        if not follow_up:
+            return utterance()
+        stretches += 1
+        if stretches == 2:
+            announcements.put_nowait("Your pasta timer is done.")
+        clock.now += 20 if stretches <= 3 else 1_000  # quiet, then quiet for good
+        return None
+
+    await Assistant(
+        turn=turn,
+        lines=talk_then_quit(ui.replied),
+        ui=ui,
+        ears=FakeEars(listen),
+        turn_taking=STAY_OPEN,
+        announcements=announcements,
+        clock=clock,
+    ).run()
+    assert "alert:Your pasta timer is done." in ui.events
+
+
+async def test_overheard_speech_is_never_drafted_or_shown() -> None:
+    """Speculation starts during pauses: it must not send overheard talk to the model."""
+    ui = EventUi()
+    llm = FakeLLM(["never"])
+    turn, _ = make_turn(llm, ScriptedSTT("So how was school today?", "Open Spotify."), ui)
+    not_for_me = turn.speculate(PREFIX[0], accept=lambda text: "spotify" in text.lower())
+    assert await not_for_me.transcript() == ""
+    assert not_for_me.draft is None and turn.overheard and not turn.dismissed
+    for_me = turn.speculate(PREFIX[0], accept=lambda text: "spotify" in text.lower())
+    assert await for_me.transcript() == "Open Spotify."
+    assert for_me.draft is not None and not turn.overheard
+    for_me.discard()
+    assert not any(event.startswith("you:") for event in ui.events)

@@ -239,7 +239,9 @@ def test_real_window_wake_word(tmp_path: Path) -> None:  # pragma: no cover - op
 
     threading.Thread(target=driver, daemon=True).start()
     try:
-        short = Config.model_validate({"voice": {"follow_up_s": 3}})  # quick back to Ready
+        short = Config.model_validate(
+            {"voice": {"follow_up_s": 3, "stay_open_s": 0}}
+        )  # quick back to Ready
         appwin.run_app(short, api_key=SecretStr("k"), cache_dir=tmp_path, backends=fakes.build())
     finally:
         webview.create_window = real_create

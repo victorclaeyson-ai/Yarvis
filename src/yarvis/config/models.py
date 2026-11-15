@@ -96,8 +96,19 @@ class VoiceConfig(_Section):
         ge=0,
         le=60,
         description=(
-            "After a spoken reply, keep listening this long without the wake word (0 = off). "
-            "Say 'thanks' or 'that's all' to end the conversation sooner."
+            "When Yarvis asks you something, anything you say this long afterwards is your "
+            "answer. Without stay_open_s, this is how long a conversation stays open."
+        ),
+    )
+    stay_open_s: float = Field(
+        default=300.0,
+        ge=0,
+        le=3600,
+        description=(
+            "After your last request, keep listening this long for requests meant for Yarvis "
+            "(its name, or a command such as 'open Spotify'). Everything else, like talking "
+            "to someone else, is ignored on this computer and never sent. 0 = off. Say "
+            "'thanks' or 'that's all' to end it sooner."
         ),
     )
     speculative: bool = Field(

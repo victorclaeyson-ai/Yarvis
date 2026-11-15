@@ -77,6 +77,26 @@ on speakers the microphone hears Yarvis itself.
      or the conversation history. The user's name comes from `assistant.user_name`.
      Talking over the greeting skips it.
 
+7. **Staying open for requests, not for everything.** (Added after the second real use:
+   15 seconds felt too short, but keeping the conversation open for minutes would answer
+   everything said in the room.)
+   - After a reply, Yarvis keeps listening for `stay_open_s` = 5 minutes after the last
+     request. Speech is transcribed on the device as before, but only becomes a request
+     when it is meant for Yarvis: it uses its name, or it is phrased like a command it
+     understands ("open Spotify", "can you play some jazz", "turn it up", "go to
+     YouTube"). The patterns are narrow on purpose ("play with me" or "go to bed" are not
+     for Yarvis). Right after an answer, "and what about tomorrow?" counts too.
+   - When Yarvis asked something ("Should I send it?", "The red one or the blue one?"),
+     any answer counts for `follow_up_s` = 15 s.
+   - Everything else is dropped where it is heard: it never reaches Claude, is never
+     shown, never stored, and does not end the conversation. An overheard "thanks" ends
+     it quietly, without a reply to someone else's thanks.
+   - The waiting happens in 20-second stretches, so a timer that goes off in the middle
+     is announced on time.
+   - `stay_open_s = 0` restores the old behaviour (anything said within `follow_up_s`).
+     A small local language model could tell requests apart better than patterns; that
+     belongs with the offline mode (Phase 3).
+
 ## Consequences
 
 - Privacy: the microphone is open for the whole session when the wake word is on, but

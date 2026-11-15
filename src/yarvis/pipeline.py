@@ -22,7 +22,7 @@ from functools import partial
 from typing import TYPE_CHECKING, Protocol
 
 from yarvis.speech.sentences import SentenceSplitter, SpeechFilter
-from yarvis.speech.turn_taking import DEFAULT_WAKE_NAMES, strip_wake_phrase
+from yarvis.speech.turn_taking import DEFAULT_WAKE_NAMES, ends_conversation, strip_wake_phrase
 
 logger = logging.getLogger(__name__)
 
@@ -183,15 +183,28 @@ class Turn:
         """The request of a reply that was stopped before any of it was spoken."""
         self.only_wake_phrase = False
         """The latest transcript held nothing but "Hey Yarvis" (the user wants attention)."""
+        self.overheard = False
+        """The latest speech was not meant for Yarvis (people talking to each other)."""
+        self.dismissed = False
+        """...and it was a goodbye ("thanks", "that's all"): the conversation can end."""
         self._phrases: dict[str, AudioArray] = {}
         # One time source for every timestamp, shared with the conversation's drafts.
         self._clock = conversation.clock
 
     def speculate(
-        self, audio: AudioArray, *, woken: bool = False, preface: str = ""
+        self,
+        audio: AudioArray,
+        *,
+        woken: bool = False,
+        preface: str = "",
+        accept: Callable[[str], bool] | None = None,
     ) -> Speculation:
-        """Start transcribing and drafting a reply for ``audio`` right now."""
-        clean = self._cleaner(woken=woken, preface=preface)
+        """Start transcribing and drafting a reply for ``audio`` right now.
+
+        ``accept`` decides whether what was said is meant for Yarvis at all; if not, the
+        transcript is dropped and no reply is drafted (nothing reaches the model).
+        """
+        clean = self._cleaner(woken=woken, preface=preface, accept=accept)
         return Speculation(self._require_stt(), self._conversation, audio, self._clock, clean)
 
     async def prepare(self, phrases: Iterable[str]) -> None:
@@ -230,8 +243,9 @@ class Turn:
         speculation: Speculation | None = None,
         woken: bool = False,
         preface: str = "",
+        accept: Callable[[str], bool] | None = None,
     ) -> TurnResult | None:
-        """Reply to ``audio``. Returns None if nothing intelligible was said.
+        """Reply to ``audio``. Returns None if nothing intelligible was said to Yarvis.
 
         If ``speculation`` was started for this same audio during the pause, its transcript
         and draft reply are used instead of starting from scratch. ``woken`` means the audio
@@ -252,7 +266,8 @@ class Turn:
         else:
             stt = self._require_stt()
             timings.stt_started = self._clock()
-            transcript = self._cleaner(woken=woken, preface=preface)(await stt.transcribe(audio))
+            clean = self._cleaner(woken=woken, preface=preface, accept=accept)
+            transcript = clean(await stt.transcribe(audio))
             timings.transcribed = self._clock()
         if not transcript:
             return None
@@ -264,15 +279,35 @@ class Turn:
         now = self._clock()
         return await self._reply(text.strip(), TurnTimings(transcribed=now))
 
+    @property
+    def names(self) -> tuple[str, ...]:
+        """What Yarvis answers to ("Yarvis", "Jarvis")."""
+        return self._names
+
+    @property
+    def awaiting_confirmation(self) -> bool:
+        """Yarvis asked "Should I …?" and waits for the answer."""
+        return self._conversation.pending is not None
+
     def retract(self, text: str) -> None:
         """Forget an exchange the user never heard (see ``Conversation.retract``)."""
         self._conversation.retract(text)
 
-    def _cleaner(self, *, woken: bool, preface: str = "") -> Callable[[str], str]:
-        """Transcript clean-up: drop the wake phrase so only the request reaches Claude."""
+    def _cleaner(
+        self, *, woken: bool, preface: str = "", accept: Callable[[str], bool] | None = None
+    ) -> Callable[[str], str]:
+        """Transcript clean-up, so only the request itself reaches Claude.
+
+        Drops speech that is not meant for Yarvis (see ``accept``), then the wake phrase.
+        """
         strip = partial(strip_wake_phrase, anywhere=woken, names=self._names)
 
         def clean(text: str) -> str:
+            self.overheard = accept is not None and bool(text.strip()) and not accept(text)
+            if self.overheard:
+                self.only_wake_phrase = False
+                self.dismissed = ends_conversation(text, names=self._names)
+                return ""  # dropped here: never sent, shown or kept
             request = strip(text)
             self.only_wake_phrase = bool(text.strip()) and not request
             return f"{preface} {request}".strip() if preface else request

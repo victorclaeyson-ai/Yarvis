@@ -23,7 +23,7 @@ from yarvis.audio.devices import AudioBackendError
 from yarvis.listen import PauseHooks
 from yarvis.llm.base import LLMError
 from yarvis.pipeline import TurnObserver
-from yarvis.speech.turn_taking import ends_conversation, sounds_finished
+from yarvis.speech.turn_taking import ends_conversation, meant_for_assistant, sounds_finished
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Awaitable, Callable, Coroutine, Sequence
@@ -40,6 +40,8 @@ logger = logging.getLogger(__name__)
 
 QUIT_COMMANDS = frozenset({"q", "quit", "exit"})
 GREETING_WAIT_S = 8.0
+LISTEN_STRETCH_S = 20.0  # an open conversation listens in stretches this long
+FULL_STRETCH = 0.9
 """After a greeting, how long to wait for the request (at least)."""
 
 
@@ -145,7 +147,11 @@ class TurnTaking:
     thinking_pause_ms: int | None = 2_000
     """Silence allowed when the sentence sounds unfinished (None: no adaptive waiting)."""
     follow_up_s: float = 15.0
-    """After a reply, keep the conversation open this long without the wake word (0: off)."""
+    """After a reply, anything said within this long counts as the answer (0: off). With
+    ``stay_open_s``, only after Yarvis asked something ("Should I send it?")."""
+    stay_open_s: float = 0.0
+    """After a reply, keep listening this long for requests meant for Yarvis: its name or
+    a command ("open Spotify"). Other speech is ignored and goes nowhere. 0: off."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -162,6 +168,12 @@ class _Listen:
     """The audio starts with the wake word."""
     preface: str = ""
     """A request that was interrupted before it was answered; the new words extend it."""
+    anything_until: float | None = None
+    """Until then, whatever is said is taken as meant for Yarvis (an answer)."""
+    follow_ups_until: float | None = None
+    """Until then, a follow-up question ("and what about tomorrow?") counts too."""
+    quiet: bool = False
+    """Keep listening without announcing it again (nothing happened since)."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -331,7 +343,7 @@ class Assistant:
         outcome = await self._interruptible(self._turn.say(text))
         if isinstance(outcome, _Interrupted):
             return await self._listen_after(outcome.interruption)
-        return self._open_conversation(self._turn_taking.follow_up_s)
+        return self._open_conversation(asked=True)  # "thanks", "five more minutes"
 
     # ------------------------------------------------------------------------- commands
 
@@ -372,13 +384,18 @@ class Assistant:
 
     async def _listen_and_reply(self, ears: Ears, step: _Listen) -> _Listen | None:
         timeout_s = None
+        more_after = False  # a long conversation listens in stretches (timers go in between)
         if step.until is not None:
             timeout_s = step.until - self._clock()
             if timeout_s <= 0:
                 logger.info("The conversation timed out")
                 return None
-        logger.info("Listening for a follow-up" if step.follow_up else "Listening")
-        self._ui.listening()
+            more_after = step.follow_up and timeout_s > LISTEN_STRETCH_S
+            timeout_s = min(timeout_s, LISTEN_STRETCH_S) if more_after else timeout_s
+        if not step.quiet:
+            logger.info("Listening for a follow-up" if step.follow_up else "Listening")
+            self._ui.listening()
+        accept = self._for_yarvis(step)
         speculation: Speculation | None = None
         thinking_pause_ms = self._turn_taking.thinking_pause_ms
 
@@ -389,7 +406,9 @@ class Assistant:
             speculation = None
             if not self._turn_taking.speculate:
                 return
-            speculation = self._turn.speculate(audio, woken=step.woken, preface=step.preface)
+            speculation = self._turn.speculate(
+                audio, woken=step.woken, preface=step.preface, accept=accept
+            )
             if thinking_pause_ms is not None:
                 patience = thinking_pause_ms
 
@@ -407,13 +426,17 @@ class Assistant:
 
         try:
             hooks = PauseHooks(on_pause=on_pause, on_resume=on_resume)
+            started = self._clock() if more_after else 0.0
             utterance = await ears.listen(
                 hooks, follow_up=step.follow_up, prefix=step.prefix, timeout_s=timeout_s
             )
             if utterance is None:
                 if not step.follow_up:  # silence after a reply simply ends the conversation
                     self._ui.nothing_heard()
-                return None
+                # Listen again only after a full stretch of silence: anything else ending
+                # the listening early must not turn into a busy loop.
+                full = more_after and self._clock() - started >= LISTEN_STRETCH_S * FULL_STRETCH
+                return replace(step, quiet=True) if full else None
             outcome = await self._interruptible(
                 self._turn.from_audio(
                     utterance.audio,
@@ -422,6 +445,7 @@ class Assistant:
                     speculation=speculation,
                     woken=step.woken,
                     preface=step.preface,
+                    accept=accept,
                 )
             )
         finally:
@@ -438,25 +462,65 @@ class Assistant:
         if outcome is None:  # nothing intelligible was said
             if step.woken or self._turn.only_wake_phrase:
                 return await self._answer_the_wake_word(step)
-            if step.follow_up:
-                # A cough or background noise does not end the conversation.
-                return step if step.until is not None else None
-            self._ui.nothing_heard()
-            return None
+            return self._nothing_for_yarvis(step)
         self._ui.reply_finished(outcome)
         if ends_conversation(outcome.transcript):
             logger.info("Conversation closed by the user")
         elif self._playback.is_set():
             logger.info("Music or a video started: say 'Hey Yarvis' to talk again")
         else:
-            return self._open_conversation(self._turn_taking.follow_up_s)
+            asked = outcome.reply.rstrip().endswith("?") or self._turn.awaiting_confirmation
+            return self._open_conversation(asked=asked)
         return None
 
-    def _open_conversation(self, seconds: float) -> _Listen | None:
-        """Keep listening without the wake word for ``seconds``."""
-        if seconds <= 0:
+    def _nothing_for_yarvis(self, step: _Listen) -> _Listen | None:
+        """Noise, or people talking to each other: keep an open conversation going."""
+        if not step.follow_up:
+            self._ui.nothing_heard()
             return None
-        return _Listen(follow_up=True, until=self._clock() + seconds)
+        if self._turn.overheard:
+            logger.info("Heard talking that was not for Yarvis: ignored, nothing sent")
+            if self._turn.dismissed:  # "thanks" or "that's all"
+                logger.info("Conversation closed by the user")
+                return None
+        return replace(step, quiet=True) if step.until is not None else None
+
+    def _open_conversation(self, *, asked: bool, at_least: float = 0.0) -> _Listen | None:
+        """Keep listening without the wake word after Yarvis spoke.
+
+        For ``follow_up_s`` anything counts if Yarvis ``asked`` something (or if staying
+        open is off); then, for ``stay_open_s``, only what is meant for Yarvis.
+        """
+        rules = self._turn_taking
+        lenient = max(rules.follow_up_s, at_least) if asked or rules.stay_open_s <= 0 else 0.0
+        total = max(lenient, rules.stay_open_s)
+        if total <= 0:
+            return None
+        now = self._clock()
+        return _Listen(
+            follow_up=True,
+            until=now + total,
+            anything_until=now + lenient,
+            follow_ups_until=now + rules.follow_up_s,
+        )
+
+    def _for_yarvis(self, step: _Listen) -> Callable[[str], bool] | None:
+        """How to tell whether speech in an open conversation is meant for Yarvis.
+
+        None (everything is) when the user woke Yarvis or is still making a request.
+        """
+        if not step.follow_up or step.woken or step.preface or step.anything_until == step.until:
+            return None
+        names = self._turn.names
+
+        def accept(text: str) -> bool:
+            now = self._clock()
+            if step.anything_until is not None and now < step.anything_until:
+                return True
+            recent = step.follow_ups_until is not None and now < step.follow_ups_until
+            return meant_for_assistant(text, names=names, just_answered=recent)
+
+        return accept
 
     async def _answer_the_wake_word(self, step: _Listen) -> _Listen | None:
         """Only "Hey Yarvis" was said: greet back, then listen for the request."""
@@ -469,8 +533,7 @@ class Assistant:
         outcome = await self._interruptible(self._turn.say(greeting))
         if isinstance(outcome, _Interrupted):
             return await self._listen_after(outcome.interruption)
-        seconds = max(GREETING_WAIT_S, self._turn_taking.follow_up_s)
-        listen = self._open_conversation(seconds)
+        listen = self._open_conversation(asked=True, at_least=GREETING_WAIT_S)
         return None if listen is None else replace(listen, preface=step.preface)
 
     async def _interruptible[T](self, reply: Coroutine[Any, Any, T]) -> T | _Interrupted:

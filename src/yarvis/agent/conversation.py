@@ -23,7 +23,7 @@ from typing import TYPE_CHECKING, Final
 
 from yarvis.agent.confirmation import classify_answer
 from yarvis.agent.toolbox import CONFIRMED_AND_DONE
-from yarvis.llm.base import LLMError, Message, ToolCall
+from yarvis.llm.base import LLMError, Message, ToolCall, WebSearch
 
 if TYPE_CHECKING:
     from collections.abc import AsyncGenerator, Callable
@@ -53,6 +53,8 @@ class Draft:
         self._last_char = ""  # of the text emitted so far
         self.done: list[str] = []
         """What this reply has actually done so far ("play … on Spotify")."""
+        self.searches: list[str] = []
+        """Web searches the model made (on the provider's side) for this reply."""
         self._task = asyncio.create_task(self._generate())
 
     async def _generate(self) -> None:
@@ -81,7 +83,8 @@ class Draft:
             if not calls or toolbox is None:
                 return
             await self._live.wait()  # never act on a reply the user may not want
-            outcome = await toolbox.run(calls, tainted=tainted)
+            # Search results read on the provider's side are outside content too.
+            outcome = await toolbox.run(calls, tainted=tainted or bool(self.searches))
             self.done += outcome.done
             tainted = outcome.tainted
             messages += [
@@ -109,6 +112,9 @@ class Draft:
         ):
             if isinstance(event, ToolCall):
                 calls.append(event)
+                continue
+            if isinstance(event, WebSearch):
+                self._searched(event.query)
                 continue
             if self.first_token_at is None:
                 self.first_token_at = conversation.clock()
@@ -138,6 +144,12 @@ class Draft:
             note = f"The user said something else, so you did not {pending.description}."
         return f"{self.user_text}\n\n[Yarvis system note: {note}]"
 
+    def _searched(self, query: str) -> None:
+        self.searches.append(query)
+        toolbox = self._conversation.toolbox
+        if toolbox is not None and self._live.is_set():  # a guess at a pause shows nothing
+            toolbox.report(_search_activity(query))
+
     def _say(self, text: str) -> None:
         self._emit(text, new_round=True)
 
@@ -166,6 +178,9 @@ class Draft:
             raise RuntimeError(msg)
         self._consumed = True
         self._live.set()
+        if (toolbox := self._conversation.toolbox) is not None:
+            for query in self.searches:  # made while it was still a guess
+                toolbox.report(_search_activity(query))
         heard: list[str] = []
         finished = False
         try:
@@ -263,3 +278,8 @@ class Conversation:
         overflow = len(self._history) - self._max_messages
         if overflow > 0:
             del self._history[:overflow]
+
+
+def _search_activity(query: str) -> str:
+    """What the user sees while Claude searches ("search the web for “trains to Ghent”")."""
+    return f"search the web for “{query[:80]}”" if query else "search the web"

@@ -23,7 +23,7 @@ if TYPE_CHECKING:
 
     from fakes import ListenFn
     from yarvis.listen import PauseHooks, Utterance
-    from yarvis.llm.base import Message, ToolCall
+    from yarvis.llm.base import Message, ToolCall, WebSearch
     from yarvis.pipeline import TurnResult
     from yarvis.speech.base import AudioArray
 
@@ -792,7 +792,7 @@ async def test_after_acting_an_interruption_is_a_new_request() -> None:
 
         async def stream(
             self, messages: Sequence[Message], **kwargs: Any
-        ) -> AsyncGenerator[str | ToolCall]:
+        ) -> AsyncGenerator[str | ToolCall | WebSearch]:
             if self.calls:
                 await blocked.wait()
             async for event in super().stream(messages, **kwargs):

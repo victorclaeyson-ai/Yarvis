@@ -1,25 +1,34 @@
-"""Claude via the official Anthropic SDK, streamed."""
+"""Claude via the official Anthropic SDK, streamed.
+
+Web search runs on Anthropic's side (the ``web_search`` server tool): Claude decides when
+to search, and the results stay inside the request. Each search is reported to the caller
+as a ``WebSearch`` so the turn can be treated as holding outside content.
+"""
 
 from __future__ import annotations
 
 import logging
+from collections import OrderedDict
 from typing import TYPE_CHECKING, Final
 
 import anthropic
 import httpx2
 
-from yarvis.llm.base import LLMError, ToolCall
+from yarvis.llm.base import LLMError, ToolCall, WebSearch
 
 if TYPE_CHECKING:
     from collections.abc import AsyncGenerator, Sequence
 
     from anthropic.types import (
+        ContentBlock,
         ContentBlockParam,
         MessageParam,
         TextBlockParam,
         ToolParam,
         ToolResultBlockParam,
+        ToolUnionParam,
         ToolUseBlockParam,
+        WebSearchTool20250305Param,
     )
     from pydantic import SecretStr
 
@@ -34,6 +43,11 @@ KEEPALIVE_SECONDS: Final = 300.0
 """Keep the HTTPS connection open between questions. The HTTP client's default (5 s) meant
 almost every question paid for a fresh TLS handshake (~0.2-0.5 s)."""
 
+WEB_SEARCHES_PER_REQUEST: Final = 3
+"""At most this many searches per answer (each costs about a cent)."""
+_MAX_CONTINUATIONS: Final = 3  # a long search can pause the turn; it is resumed this often
+_KEPT_TURNS: Final = 16
+
 logger = logging.getLogger(__name__)
 
 
@@ -46,8 +60,14 @@ class AnthropicProvider:
         *,
         model: str | None = None,
         client: anthropic.AsyncAnthropic | None = None,
+        web_search: bool = False,
     ) -> None:
         self.model = model or DEFAULT_MODEL
+        self.web_search = web_search
+        """Offer Claude's web search whenever tools are offered."""
+        # Turns that searched and then called our tools: the API needs them back exactly
+        # as sent (search results are encrypted), keyed by their first tool call.
+        self._turns: OrderedDict[str, list[ContentBlock]] = OrderedDict()
         self._client = client or anthropic.AsyncAnthropic(
             api_key=api_key.get_secret_value(),
             max_retries=1,  # a voice user would rather hear an error than wait
@@ -75,30 +95,71 @@ class AnthropicProvider:
         system: str,
         max_tokens: int,
         tools: Sequence[ToolSpec] = (),
-    ) -> AsyncGenerator[str | ToolCall]:
-        """Yield reply text as it is generated, then any tool calls."""
-        params = [_to_param(message) for message in messages]
-        tool_params: list[ToolParam] = [
-            {"name": t.name, "description": t.description, "input_schema": dict(t.input_schema)}
-            for t in tools
+    ) -> AsyncGenerator[str | ToolCall | WebSearch]:
+        """Yield reply text as it is generated, web searches as they happen, then tool calls."""
+        params = [self._to_param(message) for message in messages]
+        tool_params: list[ToolUnionParam] = [
+            _tool_param(t.name, t.description, dict(t.input_schema)) for t in tools
         ]
+        if tools and self.web_search:
+            tool_params.append(_WEB_SEARCH)
+        turn: list[ContentBlock] = []
         try:
-            async with self._client.messages.stream(
-                model=self.model,
-                max_tokens=max_tokens,
-                system=system,
-                messages=params,
-                tools=tool_params or anthropic.omit,
-            ) as stream:
-                async for event in stream:
-                    if event.type == "text":
-                        yield event.text
-                final = await stream.get_final_message()
+            for _ in range(_MAX_CONTINUATIONS + 1):
+                async with self._client.messages.stream(
+                    model=self.model,
+                    max_tokens=max_tokens,
+                    system=system,
+                    messages=params,
+                    tools=tool_params or anthropic.omit,
+                ) as stream:
+                    async for event in stream:
+                        if event.type == "text":
+                            yield event.text
+                        elif (
+                            event.type == "content_block_stop"
+                            and event.content_block.type == "server_tool_use"
+                            and event.content_block.name == "web_search"
+                        ):
+                            logger.info("Claude searched the web")
+                            yield WebSearch(str(event.content_block.input.get("query", "")))
+                    final = await stream.get_final_message()
+                turn += final.content
+                if final.stop_reason != "pause_turn":
+                    break
+                # A long search paused the turn: send it back unchanged to let it go on.
+                paused: MessageParam = {"role": "assistant", "content": list(turn)}
+                params = [*params, paused]
         except anthropic.APIError as exc:
             raise LLMError(_explain(exc, self.model)) from exc
-        for block in final.content:
-            if block.type == "tool_use":
-                yield ToolCall(id=block.id, name=block.name, arguments=dict(block.input))
+        calls = [block for block in turn if block.type == "tool_use"]
+        if calls and any(block.type not in {"text", "tool_use"} for block in turn):
+            self._keep(calls[0].id, turn)
+        for block in calls:
+            yield ToolCall(id=block.id, name=block.name, arguments=dict(block.input))
+
+    def _keep(self, call_id: str, turn: list[ContentBlock]) -> None:
+        self._turns[call_id] = turn
+        while len(self._turns) > _KEPT_TURNS:
+            self._turns.popitem(last=False)
+
+    def _to_param(self, message: Message) -> MessageParam:
+        if message.role == "assistant" and message.tool_calls:
+            kept = self._turns.get(message.tool_calls[0].id)
+            if kept is not None:  # it searched first: send it back exactly as received
+                return {"role": "assistant", "content": kept}
+        return _to_param(message)
+
+
+def _tool_param(name: str, description: str, schema: dict[str, object]) -> ToolParam:
+    return {"name": name, "description": description, "input_schema": schema}
+
+
+_WEB_SEARCH: Final[WebSearchTool20250305Param] = {
+    "type": "web_search_20250305",
+    "name": "web_search",
+    "max_uses": WEB_SEARCHES_PER_REQUEST,
+}
 
 
 def _to_param(message: Message) -> MessageParam:

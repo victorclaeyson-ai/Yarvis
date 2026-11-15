@@ -19,7 +19,7 @@ if TYPE_CHECKING:
 
     from yarvis.ears import Interruption
     from yarvis.listen import PauseHooks, Utterance
-    from yarvis.llm.base import Message, ToolCall, ToolSpec
+    from yarvis.llm.base import Message, ToolCall, ToolSpec, WebSearch
     from yarvis.speech.base import AudioArray
 
 VALID_KEY = "sk-ant-test-0123456789abcdefghij"  # gitleaks:allow
@@ -102,7 +102,9 @@ class FakeAudioProbe:
 class FakeLLM:
     """Streams scripted replies; records what it was asked."""
 
-    def __init__(self, *replies: Sequence[str | ToolCall], error: Exception | None = None) -> None:
+    def __init__(
+        self, *replies: Sequence[str | ToolCall | WebSearch], error: Exception | None = None
+    ) -> None:
         self.replies = [list(reply) for reply in replies]
         self.error = error
         self.calls: list[tuple[list[Message], str, int]] = []
@@ -119,7 +121,7 @@ class FakeLLM:
         system: str,
         max_tokens: int,
         tools: Sequence[ToolSpec] = (),
-    ) -> AsyncGenerator[str | ToolCall]:
+    ) -> AsyncGenerator[str | ToolCall | WebSearch]:
         self.calls.append((list(messages), system, max_tokens))
         self.offered.append([tool.name for tool in tools])
         deltas = self.replies.pop(0) if self.replies else []

@@ -147,7 +147,7 @@ class LLMProvider(Protocol):
 
 ### 4.3 Tools
 
-- **Built-in (v1):** timers and reminders (spoken when due), open/quit app, volume, media control, browser tabs (list, switch, open, close, search, back/forward), Spotify by name (play, volume, shuffle, repeat, position, now playing), typing into apps (Enter = tier 2) (done, ADR 0007); web search (read-only), notes, system info (next).
+- **Built-in (v1):** timers and reminders (spoken when due), open/quit app, volume, media control, browser tabs (list, switch, open, close, search, back/forward), Spotify by name (play, volume, shuffle, repeat, position, now playing), typing into apps (Enter = tier 2) (done, ADR 0007); web search through Anthropic's server tool (tainting, like a page) and the weather from Open-Meteo (done, ADR 0009); notes, system info (next).
 - **MCP:** any MCP server (stdio or remote HTTPS) declared in config. Nothing is auto-installed or auto-enabled.
 - Every tool — built-in or MCP — has a **declared permission tier** (§5.3). MCP tools default to the most restrictive tier until the user assigns one.
 
@@ -300,7 +300,7 @@ yarvis/
 - **pyright strict**, zero errors; no `Any` without a justification comment.
 - **ruff** for lint and format with a broad rule set (including `S` security rules).
 - **pytest** with ≥ 90 % line coverage on `core/`, `agent/`, `security/`; `hypothesis` for the state machine and gate.
-- **Prompt-injection regression suite:** a growing corpus of injection attempts run against the agent with a scripted LLM (deterministic, every PR) and against real models (nightly, non-blocking).
+- **Prompt-injection regression suite:** a growing corpus of injection attempts run against the agent with a scripted LLM (deterministic, every PR; `tests/test_injection.py`, ADR 0009: the same attack planted in a page, tab title, song title, place name and web search) and against real models (nightly, non-blocking; planned).
 - Golden-audio integration tests: recorded utterances through the full pipeline with fake LLM.
 - CI matrix: macOS (arm64) and Ubuntu (x86-64), plus an arm64 Linux job.
 - `pre-commit` hooks mirror CI. Conventional Commits; changelog generated from them.

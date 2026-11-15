@@ -30,6 +30,15 @@ class AssistantConfig(_Section):
         pattern=r"^[^\W\d_][^\W\d_ .'-]*(?:[ .'-][^\W\d_]+)*$",
         description="What Yarvis calls you, e.g. in greetings. Stays on this computer.",
     )
+    location: str | None = Field(
+        default=None,
+        min_length=2,
+        max_length=80,
+        pattern=r"^[^\W\d_][\w .,'()-]*$",
+        description=(
+            "Where you live, e.g. 'Leuven, Belgium': the weather and searches default to it."
+        ),
+    )
     language: str = Field(default="en", pattern=r"^[a-z]{2}(-[A-Z]{2})?$")
 
 
@@ -166,6 +175,16 @@ class ToolsConfig(_Section):
     typing: bool = Field(
         default=True,
         description="Type into apps (pressing Enter always needs your confirmation).",
+    )
+    web_search: bool = Field(
+        default=True,
+        description=(
+            "Let Claude search the web for current information (Anthropic's web search, "
+            "about 1 cent per search)."
+        ),
+    )
+    weather: bool = Field(
+        default=True, description="Weather forecasts from Open-Meteo (free, no account)."
     )
 
 

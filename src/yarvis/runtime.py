@@ -28,6 +28,7 @@ from yarvis.speech.endpointing import EndpointerSettings
 from yarvis.speech.turn_taking import DEFAULT_WAKE_NAMES
 from yarvis.tools.desktop import abilities
 from yarvis.tools.timers import Alarms, timer_tools
+from yarvis.tools.weather import Weather
 
 logger = logging.getLogger(__name__)
 
@@ -118,7 +119,9 @@ class Backends:
         from yarvis.tools.spotify import SpotifyAccount, SpotifyCatalog  # noqa: PLC0415
 
         return cls(
-            llm=lambda config, key: AnthropicProvider(key, model=config.llm.model),
+            llm=lambda config, key: AnthropicProvider(
+                key, model=config.llm.model, web_search=config.tools.web_search
+            ),
             stt=lambda config, cache: make_stt(
                 config.voice, cache, parakeet_ok=parakeet_available()
             ),
@@ -169,7 +172,11 @@ async def run_assistant(
     conversation = Conversation(
         llm,
         system_prompt=lambda: system_prompt(
-            config.assistant.name, user_name=config.assistant.user_name, abilities=abilities
+            config.assistant.name,
+            user_name=config.assistant.user_name,
+            location=config.assistant.location,
+            abilities=abilities,
+            web_search=_web_search(config) and bool(tools),
         ),
         max_tokens=config.llm.max_tokens,
         toolbox=Toolbox(tools, gate, on_activity=ui.activity) if tools else None,
@@ -286,7 +293,20 @@ def _tools(
     if config.tools.computer and (computer := backends.computer(config, spotify)):
         tools += computer
         said += abilities(computer)
+    if config.tools.weather:
+        tools.append(Weather(config.assistant.location))
+        said.append("tell the weather, now and for the coming week")
+    if _web_search(config) and tools:  # it is offered alongside the other tools
+        said.append(
+            "search the web for anything current: news, sports results, prices, opening "
+            "hours, facts you are unsure of"
+        )
     return tools, said
+
+
+def _web_search(config: Config) -> bool:
+    """Claude's own web search: only with Anthropic, and only if switched on."""
+    return config.tools.web_search and config.llm.provider == "anthropic"
 
 
 def _log_failure(task: asyncio.Task[None]) -> None:

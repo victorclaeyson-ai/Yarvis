@@ -85,6 +85,11 @@ class Toolbox:
         self.on_playback = on_playback
         """Called when a call starts music or a video (settable once the listener exists)."""
 
+    def report(self, description: str) -> None:
+        """Show an action that happened outside the toolbox (a web search by the model)."""
+        if self._on_activity is not None:
+            self._on_activity(description)
+
     def specs(self) -> tuple[ToolSpec, ...]:
         """What the model is offered."""
         return tuple(tool.spec() for tool in self._tools.values())

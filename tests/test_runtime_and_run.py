@@ -2,7 +2,8 @@ from __future__ import annotations
 
 import asyncio
 import io
-from typing import TYPE_CHECKING, Self
+from dataclasses import replace
+from typing import TYPE_CHECKING, Any, Self
 
 import numpy as np
 import pytest
@@ -10,12 +11,14 @@ from pydantic import SecretStr
 from rich.console import Console
 
 from fakes import VALID_KEY, FakeKeyring, FakeLLM, FakeSTT, FakeTTS, FakeWakeWord, Invoke
+from test_computer import FakeRunner
 from test_listen_and_assistant import RecordingUi, lines
 from test_speech_engines import frames, speech_clip
 from test_wake_and_barge_in import EventUi
 from yarvis.cli.app import Services
 from yarvis.cli.ui import ConsoleUi, format_timings, stdin_lines
 from yarvis.config import Config
+from yarvis.llm.base import ToolCall
 from yarvis.models import (
     KOKORO_FILES,
     WAKE_WORD_FILES,
@@ -31,6 +34,8 @@ from yarvis.pipeline import TurnResult, TurnTimings
 from yarvis.runtime import Backends, run_assistant
 from yarvis.security.secrets import KEYRING_SERVICE
 from yarvis.speech.silero import SileroVAD
+from yarvis.tools.computer import Apps
+from yarvis.tools.desktop import computer_tools
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Callable
@@ -141,6 +146,7 @@ class FakeBackends:
             microphone=lambda config: self.mic,
             speaker=lambda config, rate: self.sink,
             wake_word=lambda config, cache: self.wake,
+            computer=lambda config, spotify: [],
         )
 
 
@@ -450,12 +456,15 @@ def test_console_ui_streams_and_escapes_markup() -> None:
     ui.on_reply_delta("cut")
     ui.interrupted()
     ui.said("Good [evening].")
+    ui.alert("Your [pasta] timer is done.")
+    ui.activity("set a [10]-minute timer")
     text = out.getvalue()
     for expected in (
         "Loading…", "Enter = talk", "listening", "You: [bold]not markup[/]",
         "Yarvis: Hello [there]", "Claude 0.20", "type a message", "Didn't catch that",
         "partial\n", "✗ broken [pipe]", "Say “Hey Yarvis” · Enter = talk", "cut\n",
-        "↳ interrupted", "Yarvis: Good [evening].",
+        "↳ interrupted", "Yarvis: Good [evening].", "⏰ Your [pasta] timer is done.",
+        "• set a [10]-minute timer",
     ):  # fmt: skip
         assert expected in text
 
@@ -468,3 +477,120 @@ async def test_stdin_lines(monkeypatch: pytest.MonkeyPatch) -> None:
 def test_default_backends_factory_is_lazy() -> None:
     # Services.default() must not import heavy speech libraries.
     assert Services.default().backends == Backends.real
+
+
+async def test_tools_through_the_real_wiring(tmp_path: Path) -> None:
+    llm = FakeLLM([ToolCall("t1", "set_timer", {"minutes": 1})], ["Done."])
+    fakes = FakeBackends(llm)
+    ui = RecordingUi()
+    await run_assistant(
+        Config(),
+        api_key=SecretStr("k"),
+        cache_dir=tmp_path,
+        lines=lines("set a timer for a minute", "q"),
+        ui=ui,
+        backends=fakes.build(),
+        voice_input=False,
+        voice_output=False,
+    )
+    assert "did:set a 1-minute timer" in ui.events
+    assert "reply:Done." in ui.events
+    system = llm.calls[0][1]
+    assert "What you can do: set, list and cancel timers and reminders." in system
+    assert llm.offered[0] == ["set_timer", "set_reminder", "list_timers", "cancel_timer"]
+
+
+async def test_tools_can_be_switched_off(tmp_path: Path) -> None:
+    llm = FakeLLM(["No can do."])
+    fakes = FakeBackends(llm)
+    config = Config.model_validate({"tools": {"timers": False, "computer": False}})
+    await run_assistant(
+        config,
+        api_key=SecretStr("k"),
+        cache_dir=tmp_path,
+        lines=lines("set a timer", "q"),
+        ui=RecordingUi(),
+        backends=fakes.build(),
+        voice_input=False,
+        voice_output=False,
+    )
+    assert llm.offered == [[]]
+    assert "You cannot act on the computer yet" in llm.calls[0][1]
+
+
+async def test_computer_tools_are_described_to_the_model(tmp_path: Path) -> None:
+    llm = FakeLLM(["Sure."])
+
+    def mac(config: Config, spotify: SecretStr | None) -> list[Any]:
+        return computer_tools(FakeRunner(), apps=Apps([tmp_path]), platform="darwin")
+
+    def linux_tools(config: Config, spotify: SecretStr | None) -> list[Any]:
+        return computer_tools(FakeRunner(), platform="linux")
+
+    backends = replace(FakeBackends(llm).build(), computer=mac)
+    await run_assistant(
+        Config(),
+        api_key=SecretStr("k"),
+        cache_dir=tmp_path,
+        lines=lines("hi", "q"),
+        ui=RecordingUi(),
+        backends=backends,
+        voice_input=False,
+        voice_output=False,
+    )
+    assert "open and quit apps, set the volume and play, pause or skip music" in llm.calls[0][1]
+    assert "quit_app" in llm.offered[0]
+    linux = replace(backends, computer=linux_tools)
+    llm.replies.append(["Sure."])
+    await run_assistant(
+        Config(),
+        api_key=SecretStr("k"),
+        cache_dir=tmp_path,
+        lines=lines("hi", "q"),
+        ui=RecordingUi(),
+        backends=linux,
+        voice_input=False,
+        voice_output=False,
+    )
+
+
+async def test_spotify_credentials_reach_the_computer_tools(tmp_path: Path) -> None:
+    seen: list[SecretStr | None] = []
+
+    def computer(config: Config, spotify: SecretStr | None) -> list[Any]:
+        seen.append(spotify)
+        return []
+
+    backends = replace(FakeBackends(FakeLLM(["Hi."])).build(), computer=computer)
+    await run_assistant(
+        Config(),
+        api_key=SecretStr("k"),
+        cache_dir=tmp_path,
+        lines=lines("hi", "q"),
+        ui=RecordingUi(),
+        backends=backends,
+        voice_input=False,
+        voice_output=False,
+        spotify=SecretStr("id:secret"),
+    )
+    assert [s.get_secret_value() for s in seen if s] == ["id:secret"]
+
+
+def test_run_passes_stored_spotify_credentials(
+    invoke: Invoke, services: Services, ready: FakeBackends, fake_keyring: FakeKeyring
+) -> None:
+    fake_keyring.store[(KEYRING_SERVICE, "spotify")] = "a" * 32 + ":" + "b" * 32
+    seen: list[SecretStr | None] = []
+    real = ready.build
+
+    def build() -> Backends:
+        def computer(config: Config, spotify: SecretStr | None) -> list[Any]:
+            seen.append(spotify)
+            return []
+
+        return replace(real(), computer=computer)
+
+    services.backends = build
+    services.lines = lambda: lines("hello", "q")
+    assert invoke("run", "--text", "--mute").exit_code == 0
+    assert seen and seen[0] is not None

@@ -77,6 +77,14 @@ class AssistantUi(TurnObserver, Protocol):
         """Yarvis says a fixed phrase, e.g. a greeting."""
         ...
 
+    def alert(self, text: str) -> None:
+        """A timer or reminder is due (Yarvis is about to say ``text``)."""
+        ...
+
+    def activity(self, text: str) -> None:
+        """Yarvis is doing something ("set a 10-minute timer")."""
+        ...
+
     def interrupted(self) -> None:
         """The user talked over the reply; Yarvis stopped and is listening."""
         ...
@@ -160,6 +168,11 @@ class _Woken:
     prefix: Sequence[AudioArray]
 
 
+@dataclass(frozen=True, slots=True)
+class _Announcement:
+    text: str
+
+
 class Assistant:
     """Reads input lines; an empty line means "listen", any text is sent as typed input."""
 
@@ -172,9 +185,11 @@ class Assistant:
         ears: Ears | None,
         turn_taking: TurnTaking | None = None,
         greeter: Greeter | None = None,
+        announcements: asyncio.Queue[str] | None = None,
         clock: Callable[[], float] = time.monotonic,
     ) -> None:
         self._turn = turn
+        self._announcements = announcements
         self._greeter = greeter
         self._clock = clock
         self._lines = lines
@@ -192,11 +207,18 @@ class Assistant:
         step: _Listen | None = None
         try:
             while True:
+                # A due timer waits for a quiet moment: not while the user is mid-request.
+                if (step is None or step.prefix is None) and (text := self._due()) is not None:
+                    step = await self._run_command(self._announce(text))
+                    continue
                 if step is not None:
                     step = await self._run_command(self._listen_turn(step))
                     continue
                 self._ui.ready(voice=self._ears is not None, wake_word=self._wake_word)
                 event = await self._next_input()
+                if isinstance(event, _Announcement):
+                    step = await self._run_command(self._announce(event.text))
+                    continue
                 if isinstance(event, _Woken):
                     self._ui.woke()
                     await self._turn.chime()
@@ -225,30 +247,57 @@ class Assistant:
 
     # ------------------------------------------------------------------------- input
 
-    async def _next_input(self) -> str | _Woken | None:
-        """The next typed line or button press, or the wake word, whichever comes first."""
+    async def _next_input(self) -> str | _Woken | _Announcement | None:
+        """Whatever comes first: a typed line or button press, a due timer, the wake word."""
         if self._next_line is None:
             # Kept across calls: cancelling ``anext`` would close the input generator.
             self._next_line = asyncio.ensure_future(anext(self._lines, None))
         ears = self._ears
-        if ears is None or not self._wake_word:
-            line, self._next_line = self._next_line, None
-            return await line
-        waiting = asyncio.ensure_future(ears.wake())
+        hearing = ears.wake() if ears is not None and self._wake_word else None
+        waking = asyncio.ensure_future(hearing) if hearing is not None else None
+        queue = self._announcements
+        due = asyncio.ensure_future(queue.get()) if queue is not None else None
+        others = {task for task in (waking, due) if task is not None}
         try:
-            await asyncio.wait({self._next_line, waiting}, return_when=asyncio.FIRST_COMPLETED)
+            await asyncio.wait({self._next_line, *others}, return_when=asyncio.FIRST_COMPLETED)
         finally:
-            waiting.cancel()
-            await asyncio.wait({waiting})  # one reader at a time on the microphone
+            for task in others:
+                task.cancel()
+            if others:
+                await asyncio.wait(others)  # one reader at a time on the microphone
+        announcement = due.result() if due is not None and not due.cancelled() else None
         if self._next_line.done():
+            if announcement is not None and queue is not None:
+                queue.put_nowait(announcement)  # not lost: said after this command
             line, self._next_line = self._next_line, None
             return line.result()
-        error = waiting.exception()
+        if announcement is not None:
+            return _Announcement(announcement)
+        if waking is None:  # pragma: no cover - something above finished first
+            return await self._next_input()
+        error = waking.exception()
         if error is None:
-            return _Woken(waiting.result())
+            return _Woken(waking.result())
         self._wake_word = False  # do not retry in a tight loop; the buttons still work
         self._report(error, context="The wake word stopped working")
         return await self._next_input()
+
+    def _due(self) -> str | None:
+        """A timer or reminder that is waiting to be said."""
+        queue = self._announcements
+        if queue is None or queue.empty():
+            return None
+        return queue.get_nowait()
+
+    async def _announce(self, text: str) -> _Listen | None:
+        """Say a due timer or reminder, then give the user a moment to respond."""
+        logger.info("Announcing a timer or reminder")
+        self._ui.alert(text)
+        await self._turn.chime()
+        outcome = await self._interruptible(self._turn.say(text))
+        if isinstance(outcome, _Interrupted):
+            return await self._listen_after(outcome.interruption)
+        return self._open_conversation(self._turn_taking.follow_up_s)
 
     # ------------------------------------------------------------------------- commands
 

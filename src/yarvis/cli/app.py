@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import platform
+import re
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Annotated, NoReturn
 
@@ -208,13 +209,33 @@ def key_set(
 ) -> None:
     """Store an API key in the OS keychain (input is hidden)."""
     services = _services(ctx)
-    value: str = typer.prompt(f"Paste your {name.value} API key", hide_input=True)
+    if name is SecretName.SPOTIFY:
+        value = _spotify_credentials(services)
+    else:
+        value = typer.prompt(f"Paste your {name.value} API key", hide_input=True)
     try:
         services.secrets.set(name, value)
     except (InvalidSecretError, RuntimeError) as exc:
         services.err_console.print(f"[red]Not saved:[/] {escape(str(exc))}")
         raise typer.Exit(code=1) from None
     services.console.print(f"Saved the {name.value} key to the keychain.")
+
+
+_SPOTIFY_ID = re.compile(r"^[0-9a-f]{32}$")
+
+
+def _spotify_credentials(services: Services) -> str:
+    """Ask for a Spotify developer app's client ID and secret; store them as one value."""
+    services.console.print(
+        "Create an app at https://developer.spotify.com/dashboard (any name; redirect URI "
+        "http://127.0.0.1:8888/callback; tick 'Web API'), then copy its Client ID and secret.",
+        highlight=False,
+    )
+    client_id = typer.prompt("Client ID").strip()
+    secret = typer.prompt("Client secret", hide_input=True).strip()
+    if not (_SPOTIFY_ID.match(client_id) and _SPOTIFY_ID.match(secret)):
+        _fail(services, "Spotify client IDs and secrets are 32 characters of 0-9 and a-f.")
+    return f"{client_id}:{secret}"
 
 
 @key_app.command("delete")
@@ -283,6 +304,7 @@ def run(
                 voice_input=not text,
                 voice_output=not mute,
                 on_loading=ui.notice,
+                spotify=_spotify(services),
             )
         )
     services.console.print("\n[dim]Bye.[/]")
@@ -322,6 +344,7 @@ def app_command(
             backends=services.backends(),
             voice_input=not text,
             voice_output=not mute,
+            spotify=_spotify(services),
         )
     except RuntimeError as exc:
         _fail(
@@ -382,6 +405,7 @@ def _run_app(
     backends: Backends,
     voice_input: bool,
     voice_output: bool,
+    spotify: SecretStr | None = None,
 ) -> None:  # pragma: no cover - opens a real window
     from yarvis.app.window import run_app  # noqa: PLC0415 - GUI imports only when needed
 
@@ -392,7 +416,14 @@ def _run_app(
         backends=backends,
         voice_input=voice_input,
         voice_output=voice_output,
+        spotify=spotify,
     )
+
+
+def _spotify(services: Services) -> SecretStr | None:
+    """The Spotify developer app's credentials, if the user stored them."""
+    resolved = services.secrets.get(SecretName.SPOTIFY)
+    return resolved.value if resolved is not None else None
 
 
 @app.command()

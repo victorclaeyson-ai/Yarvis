@@ -53,6 +53,12 @@ barge_in = "auto"           # interrupt it mid-sentence: "voice" (headphones), "
 # input_device = "MacBook Air Microphone"
 # output_device = "MacBook Air Speakers"
 
+[tools]
+timers = true               # timers and reminders, announced out loud
+computer = true             # apps, websites and tabs, volume, music and Spotify (macOS)
+browser = "auto"            # or "Brave Browser", "Google Chrome", "Safari", ...
+typing = true               # type into apps; pressing Enter always asks you first
+
 [security]
 allow_tier3 = false         # dangerous tools (shell, delete, purchases): keep this off
 confirm_tier2 = true        # confirm external actions (send message, create event)

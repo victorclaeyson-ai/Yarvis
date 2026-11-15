@@ -228,6 +228,14 @@ class AppUi:
         """A fixed phrase, such as a greeting."""
         self._emit({"type": "said", "text": text})
 
+    def alert(self, text: str) -> None:
+        """A timer or reminder is due."""
+        self._emit({"type": "alert", "text": text})
+
+    def activity(self, text: str) -> None:
+        """Yarvis is doing something."""
+        self._emit({"type": "activity", "text": text})
+
     def nothing_heard(self) -> None:
         """No speech detected."""
         self._emit({"type": "notice", "text": "Didn't catch that."})

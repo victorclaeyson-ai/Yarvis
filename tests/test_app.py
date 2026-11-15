@@ -88,12 +88,16 @@ def test_app_ui_events() -> None:
     ui.stopped()
     ui.interrupted()
     ui.said("Good evening.")
+    ui.alert("Your timer is done.")
+    ui.activity("set a 10-minute timer")
     kinds = [event["type"] for event in events]
     assert kinds == [
         "notice", "state", "wake", "state", "speech", "level", "level", "user", "state",
-        "delta", "state", "done", "notice", "error", "stopped", "interrupted", "said",
+        "delta", "state", "done", "notice", "error", "stopped", "interrupted", "said", "alert",
+        "activity",
     ]  # fmt: skip
-    assert events[-1] == {"type": "said", "text": "Good evening."}
+    assert events[-3] == {"type": "said", "text": "Good evening."}
+    assert events[-1] == {"type": "activity", "text": "set a 10-minute timer"}
     assert events[1] == {"type": "state", "state": "idle", "voice": True, "wake": True}
     levels = [event["value"] for event in events if event["type"] == "level"]
     assert levels == [0.02, 1.0]  # every second frame, clamped

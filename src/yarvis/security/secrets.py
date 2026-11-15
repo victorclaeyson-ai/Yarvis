@@ -36,6 +36,8 @@ class SecretName(StrEnum):
     """Every credential Yarvis knows about. The value is the user-facing name."""
 
     ANTHROPIC = "anthropic"
+    SPOTIFY = "spotify"
+    """A Spotify developer app's ``client_id:client_secret`` (for searching music)."""
 
     @property
     def env_var(self) -> str:
@@ -45,6 +47,7 @@ class SecretName(StrEnum):
 
 _ENV_VARS: Final[dict[SecretName, str]] = {
     SecretName.ANTHROPIC: "ANTHROPIC_API_KEY",
+    SecretName.SPOTIFY: "YARVIS_SPOTIFY",
 }
 
 

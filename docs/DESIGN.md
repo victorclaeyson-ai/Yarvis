@@ -147,7 +147,7 @@ class LLMProvider(Protocol):
 
 ### 4.3 Tools
 
-- **Built-in (v1):** time/date, timers and reminders, system info, open app/URL, media control, notes, web search (read-only).
+- **Built-in (v1):** timers and reminders (spoken when due), open/quit app, volume, media control, browser tabs (list, switch, open, close, search, back/forward), Spotify by name (play, volume, shuffle, repeat, position, now playing), typing into apps (Enter = tier 2) (done, ADR 0007); web search (read-only), notes, system info (next).
 - **MCP:** any MCP server (stdio or remote HTTPS) declared in config. Nothing is auto-installed or auto-enabled.
 - Every tool — built-in or MCP — has a **declared permission tier** (§5.3). MCP tools default to the most restrictive tier until the user assigns one.
 
@@ -318,7 +318,7 @@ yarvis/
 | **3 · Memory & offline** | Memory store, recall, Ollama offline mode, Dutch voice | Fully offline demo; memory forget/export works |
 | **4 · Satellite** | ESP32-S3 firmware, pairing, secure audio streaming, LED states | Satellite pairs in < 1 minute; link passes security review |
 | **5 · Launch** | Demo video, docs site, install polish, launch posts | Public release v1.0 |
-| Later | Windows, speaker verification, more languages, plugin gallery | — |
+| Later | Windows, speaker verification, more languages, plugin gallery; **communication**: phone calls and SMS from Yarvis's own number (telephony API), and reading who called or messaged you (see §10) | — |
 
 ---
 
@@ -345,4 +345,5 @@ would block a relay-based remote mode later. No multi-tenant work before launch.
 3. **Wake-word licence and quality** — the pre-trained openWakeWord models are non-commercial (CC BY-NC-SA 4.0). A commercial edition needs a custom "Hey Yarvis" model; synthetic training data may need real recordings to hit the false-accept target.
 4. **macOS microphone permissions** for a CLI tool (prompts are attributed to the terminal app) — needs clear setup docs.
 5. **Model download size** for first run — keep the default set small; download on demand with progress and checksums.
+6. **Messages and calls** — the most valuable and the most dangerous tools. Incoming messages are untrusted content (the classic prompt-injection vector), so they are tainted and every send or call is tier 2 with a spoken readback. Access is uneven: Apple Messages can be read locally (needs Full Disk Access), but WhatsApp, Instagram and Messenger offer no personal APIs (Meta's are for businesses), and unofficial bridges break their terms. Calls and SMS with Yarvis's own number go through a telephony provider and cost money per minute.
 6. **Satellite channel protocol** (TLS-PSK vs Noise) — decide in Phase 4 ADR.

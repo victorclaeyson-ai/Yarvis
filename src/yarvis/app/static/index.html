@@ -177,6 +177,8 @@
   .line.system .txt { color: var(--dim); font-size: 11.5px; }
   .line.error .who { color: var(--red); text-shadow: 0 0 8px rgba(255, 51, 85, .7); }
   .line.error .txt { color: var(--red); text-shadow: 0 0 8px rgba(255, 51, 85, .55); }
+  .line.alert .who { color: var(--acid); text-shadow: 0 0 8px rgba(232, 255, 59, .7); }
+  .line.alert .txt { color: #fbffc2; }
   .cursor {
     display: inline-block; width: .6em; height: 1.05em; margin-left: 2px; vertical-align: -2px;
     background: var(--cyan); box-shadow: 0 0 8px var(--cyan); animation: blink 1s steps(1) infinite;
@@ -421,6 +423,8 @@
     wake() { ping = 1; glitch(ui.logo); addSystem("hey yarvis"); },
     interrupted() { finishReply(); addSystem("interrupted"); },
     said(e) { finishReply(); addLine("assistant", name.toUpperCase(), String(e.text || "")); },
+    alert(e) { finishReply(); ping = 1; glitch(ui.tag); addLine("alert", "ALERT", String(e.text || "")); },
+    activity(e) { addSystem(String(e.text || "")); },
     notice(e) { addSystem(String(e.text || "").toLowerCase()); },
     speech() { glitch(ui.core); },
     level(e) { levelTarget = Math.min(1, Math.sqrt(Math.max(0, Number(e.value) || 0)) * 3.2); },

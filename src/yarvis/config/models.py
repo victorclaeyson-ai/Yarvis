@@ -10,6 +10,8 @@ from typing import Annotated, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, StringConstraints, model_validator
 
+from yarvis.tools.browser import BrowserName  # noqa: TC001 - pydantic needs it at runtime
+
 LogLevel = Literal["DEBUG", "INFO", "WARNING", "ERROR"]
 
 
@@ -129,6 +131,23 @@ class VoiceConfig(_Section):
         return self
 
 
+class ToolsConfig(_Section):
+    """What Yarvis may do. Every tool also has a permission tier (design doc §5.3)."""
+
+    timers: bool = Field(default=True, description="Timers and reminders, said out loud.")
+    computer: bool = Field(
+        default=True,
+        description="Apps, websites and tabs, volume, music and Spotify (macOS).",
+    )
+    browser: BrowserName | Literal["auto"] = Field(
+        default="auto", description="Browser to control; 'auto' = the one that is open."
+    )
+    typing: bool = Field(
+        default=True,
+        description="Type into apps (pressing Enter always needs your confirmation).",
+    )
+
+
 class SecurityConfig(_Section):
     """Security policy. Defaults are the safe choice; see design doc §5.3."""
 
@@ -155,6 +174,7 @@ class Config(_Section):
     assistant: AssistantConfig = AssistantConfig()
     llm: LLMConfig = LLMConfig()
     voice: VoiceConfig = VoiceConfig()
+    tools: ToolsConfig = ToolsConfig()
     security: SecurityConfig = SecurityConfig()
     logging: LoggingConfig = LoggingConfig()
 

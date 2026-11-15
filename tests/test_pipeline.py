@@ -14,7 +14,7 @@ from yarvis.pipeline import Turn, TurnTimings
 if TYPE_CHECKING:
     from collections.abc import AsyncGenerator, Sequence
 
-    from yarvis.llm.base import Message
+    from yarvis.llm.base import Message, ToolCall, ToolSpec
     from yarvis.speech.base import AudioArray
 
 
@@ -115,7 +115,7 @@ def test_missing_timestamps_give_none() -> None:
 
 async def test_stopping_a_turn_silences_the_speaker() -> None:
     class SlowLLM(FakeLLM):
-        async def stream(self, messages, *, system, max_tokens):  # type: ignore[override]
+        async def stream(self, messages, *, system, max_tokens, tools=()):  # type: ignore[override]
             yield "First sentence. "
             await asyncio.sleep(60)
             yield "never"  # pragma: no cover
@@ -300,8 +300,13 @@ async def test_unanswered_until_the_first_word_is_spoken() -> None:
 
     class StuckLLM(FakeLLM):
         async def stream(
-            self, messages: Sequence[Message], *, system: str, max_tokens: int
-        ) -> AsyncGenerator[str]:
+            self,
+            messages: Sequence[Message],
+            *,
+            system: str,
+            max_tokens: int,
+            tools: Sequence[ToolSpec] = (),
+        ) -> AsyncGenerator[str | ToolCall]:
             await asyncio.Event().wait()
             yield ""  # pragma: no cover
 

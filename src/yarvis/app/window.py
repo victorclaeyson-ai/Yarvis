@@ -49,6 +49,7 @@ def run_app(
     backends: Backends,
     voice_input: bool = True,
     voice_output: bool = True,
+    spotify: SecretStr | None = None,
 ) -> None:  # pragma: no cover - needs a real display; the parts are unit-tested
     """Show the window (blocks until it is closed)."""
     try:
@@ -99,6 +100,7 @@ def run_app(
                     voice_output=voice_output,
                     on_loading=ui.notice,
                     controls=controls,
+                    spotify=spotify,
                 )
             )
         except Exception as exc:

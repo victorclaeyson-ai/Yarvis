@@ -19,7 +19,7 @@ if TYPE_CHECKING:
 
     from yarvis.ears import Interruption
     from yarvis.listen import PauseHooks, Utterance
-    from yarvis.llm.base import Message
+    from yarvis.llm.base import Message, ToolCall, ToolSpec
     from yarvis.speech.base import AudioArray
 
 VALID_KEY = "sk-ant-test-0123456789abcdefghij"  # gitleaks:allow
@@ -102,19 +102,26 @@ class FakeAudioProbe:
 class FakeLLM:
     """Streams scripted replies; records what it was asked."""
 
-    def __init__(self, *replies: list[str], error: Exception | None = None) -> None:
-        self.replies = list(replies)
+    def __init__(self, *replies: Sequence[str | ToolCall], error: Exception | None = None) -> None:
+        self.replies = [list(reply) for reply in replies]
         self.error = error
         self.calls: list[tuple[list[Message], str, int]] = []
+        self.offered: list[list[str]] = []  # tool names offered on each call
         self.warm_ups = 0
 
     async def warm_up(self) -> None:
         self.warm_ups += 1
 
     async def stream(
-        self, messages: Sequence[Message], *, system: str, max_tokens: int
-    ) -> AsyncGenerator[str]:
+        self,
+        messages: Sequence[Message],
+        *,
+        system: str,
+        max_tokens: int,
+        tools: Sequence[ToolSpec] = (),
+    ) -> AsyncGenerator[str | ToolCall]:
         self.calls.append((list(messages), system, max_tokens))
+        self.offered.append([tool.name for tool in tools])
         deltas = self.replies.pop(0) if self.replies else []
         for delta in deltas:
             await asyncio.sleep(0)

@@ -8,9 +8,13 @@ import httpx2
 import pytest
 from pydantic import SecretStr
 
-from yarvis.llm.anthropic import DEFAULT_MODEL, AnthropicProvider
+from yarvis.llm.anthropic import (
+    DEFAULT_MODEL,
+    AnthropicProvider,
+    _to_param,  # pyright: ignore[reportPrivateUsage]
+)
 from yarvis.llm.anthropic import _explain as explain  # pyright: ignore[reportPrivateUsage]
-from yarvis.llm.base import LLMError, Message
+from yarvis.llm.base import LLMError, Message, ToolCall, ToolResult, ToolSpec
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -63,7 +67,8 @@ def provider(handler: Callable[[httpx2.Request], httpx2.Response]) -> AnthropicP
 
 
 async def collect(p: AnthropicProvider, messages: list[Message]) -> str:
-    return "".join([t async for t in p.stream(messages, system="Be brief.", max_tokens=50)])
+    events = [e async for e in p.stream(messages, system="Be brief.", max_tokens=50)]
+    return "".join(e for e in events if isinstance(e, str))
 
 
 async def test_streams_text_and_sends_the_right_request() -> None:
@@ -172,3 +177,114 @@ async def test_warm_up_lists_models_and_never_raises() -> None:
         raise httpx2.ConnectError("offline", request=request)
 
     await provider(offline).warm_up()  # swallowed
+
+
+def tool_stream() -> bytes:
+    start: dict[str, Any] = {
+        "type": "message_start",
+        "message": {
+            "id": "msg_tool",
+            "type": "message",
+            "role": "assistant",
+            "model": DEFAULT_MODEL,
+            "content": [],
+            "stop_reason": None,
+            "stop_sequence": None,
+            "usage": {"input_tokens": 12, "output_tokens": 1},
+        },
+    }
+    return sse(
+        start,
+        {"type": "content_block_start", "index": 0, "content_block": {"type": "text", "text": ""}},
+        {
+            "type": "content_block_delta",
+            "index": 0,
+            "delta": {"type": "text_delta", "text": "On it."},
+        },
+        {"type": "content_block_stop", "index": 0},
+        {
+            "type": "content_block_start",
+            "index": 1,
+            "content_block": {
+                "type": "tool_use",
+                "id": "toolu_1",
+                "name": "set_timer",
+                "input": {},
+            },
+        },
+        {
+            "type": "content_block_delta",
+            "index": 1,
+            "delta": {"type": "input_json_delta", "partial_json": '{"minutes": 10}'},
+        },
+        {"type": "content_block_stop", "index": 1},
+        {
+            "type": "message_delta",
+            "delta": {"stop_reason": "tool_use", "stop_sequence": None},
+            "usage": {"output_tokens": 9},
+        },
+        {"type": "message_stop"},
+    )
+
+
+async def test_tools_are_offered_and_tool_calls_come_back() -> None:
+    seen: list[dict[str, Any]] = []
+
+    def handler(request: httpx2.Request) -> httpx2.Response:
+        seen.append(json.loads(request.content))
+        return httpx2.Response(
+            200, content=tool_stream(), headers={"content-type": "text/event-stream"}
+        )
+
+    spec = ToolSpec("set_timer", "Start a timer.", {"type": "object", "properties": {}})
+    events = [
+        e
+        async for e in provider(handler).stream(
+            [Message("user", "timer")], system="S", max_tokens=50, tools=[spec]
+        )
+    ]
+    assert events == ["On it.", ToolCall("toolu_1", "set_timer", {"minutes": 10})]
+    assert seen[0]["tools"] == [
+        {"name": "set_timer", "description": "Start a timer.", "input_schema": spec.input_schema}
+    ]
+
+
+async def test_tool_messages_are_sent_as_blocks() -> None:
+    seen: list[dict[str, Any]] = []
+
+    def handler(request: httpx2.Request) -> httpx2.Response:
+        seen.append(json.loads(request.content))
+        return httpx2.Response(
+            200, content=text_stream("Done."), headers={"content-type": "text/event-stream"}
+        )
+
+    messages = [
+        Message("user", "set a timer"),
+        Message("assistant", "", tool_calls=(ToolCall("t1", "set_timer", {"minutes": 1}),)),
+        Message("user", "", tool_results=(ToolResult("t1", "Timer 1 set.", is_error=False),)),
+    ]
+    assert await collect(provider(handler), messages) == "Done."
+    assert "tools" not in seen[0]
+    assert seen[0]["messages"][1:] == [
+        {
+            "role": "assistant",
+            "content": [
+                {"type": "tool_use", "id": "t1", "name": "set_timer", "input": {"minutes": 1}}
+            ],
+        },
+        {
+            "role": "user",
+            "content": [
+                {
+                    "type": "tool_result",
+                    "tool_use_id": "t1",
+                    "content": "Timer 1 set.",
+                    "is_error": False,
+                }
+            ],
+        },
+    ]
+    mixed = Message("user", "and also", tool_results=(ToolResult("t2", "Nope.", is_error=True),))
+    assert list(_to_param(mixed)["content"])[-1] == {"type": "text", "text": "and also"}
+    said = Message("assistant", "Sure.", tool_calls=(ToolCall("t3", "x", {}),))
+    assert next(iter(_to_param(said)["content"])) == {"type": "text", "text": "Sure."}

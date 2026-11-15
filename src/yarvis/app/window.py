@@ -12,6 +12,7 @@ from yarvis.app.bridge import AppApi, AppUi, CommandQueue, EventPump
 from yarvis.assistant import AssistantControls
 from yarvis.llm.anthropic import DEFAULT_MODEL
 from yarvis.runtime import run_assistant
+from yarvis.speech.choice import describe as describe_stt
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -20,6 +21,7 @@ if TYPE_CHECKING:
 
     from yarvis.config.models import Config
     from yarvis.runtime import Backends
+    from yarvis.tools.spotify import SpotifyKeys
 
 logger = logging.getLogger(__name__)
 
@@ -49,7 +51,7 @@ def run_app(
     backends: Backends,
     voice_input: bool = True,
     voice_output: bool = True,
-    spotify: SecretStr | None = None,
+    spotify: SpotifyKeys | None = None,
 ) -> None:  # pragma: no cover - needs a real display; the parts are unit-tested
     """Show the window (blocks until it is closed)."""
     try:
@@ -65,7 +67,7 @@ def run_app(
     ui = AppUi(pump.post)
     details = {
         "llm": config.llm.model or DEFAULT_MODEL,
-        "stt": f"whisper {config.voice.stt_model}" if voice_input else "off",
+        "stt": describe_stt(config.voice) if voice_input else "off",
         "tts": config.voice.voice if voice_output else "muted",
     }
     api = AppApi(commands, controls, name=config.assistant.name, voice=voice_input, details=details)

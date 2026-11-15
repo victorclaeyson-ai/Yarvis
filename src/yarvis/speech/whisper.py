@@ -23,6 +23,9 @@ if TYPE_CHECKING:
 # Whisper hallucinates text ("Thank you.") on noise; drop segments it is unsure contain speech.
 NO_SPEECH_THRESHOLD: Final = 0.6
 
+COMMAND_WORDS: Final = ("Spotify", "Brave", "Safari", "YouTube", "playlist")
+"""Names of things Yarvis controls, which small Whisper models often mishear."""
+
 
 class _Segment(Protocol):
     @property
@@ -97,8 +100,10 @@ class WhisperSTT:
         self.device: SttDevice = device
         """Requested device; after ``load`` it is the device actually in use."""
         # Whisper conditions on the prompt text, which strongly biases it towards these
-        # spellings. Phrased as a plain list so it does not leak into transcripts.
-        self._prompt = ", ".join(vocabulary) + "." if vocabulary else None
+        # spellings. Phrased as a plain list so it does not leak into transcripts. The
+        # names of what Yarvis controls are always included ("spot five" → "Spotify").
+        words = dict.fromkeys([*vocabulary, *COMMAND_WORDS])
+        self._prompt = ", ".join(words) + "."
         self._root = whisper_dir(cache_dir)
         self._loader = loader
         self._model: WhisperModelLike | None = None
@@ -141,7 +146,7 @@ class WhisperSTT:
         segments, _info = self._model.transcribe(
             audio,
             language="en",
-            beam_size=1,
+            beam_size=5,  # a few more ms (the encoder dominates); fewer misheard words
             vad_filter=False,
             condition_on_previous_text=False,
             without_timestamps=True,

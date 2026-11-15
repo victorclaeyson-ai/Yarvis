@@ -280,13 +280,17 @@ class MicrophoneEars:
             self._microphone.flush()
             return await self._until_wake_word(detector)
 
-    async def interruption(self) -> Interruption:
-        """Wait until the user interrupts (call while Yarvis is replying)."""
+    async def interruption(self, *, wake_word_only: bool = False) -> Interruption:
+        """Wait until the user interrupts (call while Yarvis is replying).
+
+        ``wake_word_only``: ignore plain talking, e.g. while music plays that the microphone
+        would take for the user.
+        """
         async with self._microphone.hold():
             self._microphone.flush()  # the end of the user's own request
-            if self._barge_in == "voice":
+            if self._barge_in == "voice" and not wake_word_only:
                 return Interruption(await self._until_voice(), wake_word=False)
-            if self._barge_in == "wake_word":
+            if self._barge_in != "off":
                 prefix = await self._until_wake_word(self._require_wake_word())
                 return Interruption(prefix, wake_word=True)
         msg = "barge-in is off"

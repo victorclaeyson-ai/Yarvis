@@ -63,6 +63,14 @@ class Tool[A: Arguments](ABC):
             ToolError: With a message the model can relay.
         """
 
+    def starts_playback(self, args: A) -> bool:
+        """Whether this call starts music or a video.
+
+        Sound starting mid-conversation would otherwise reach the microphone: Yarvis stops
+        listening for a plain voice interruption and ends the conversation after the reply.
+        """
+        return False
+
     @abstractmethod
     def describe(self, args: A) -> str:
         """What this call does, as a verb phrase ("set a 10-minute timer").

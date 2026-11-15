@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+from contextlib import aclosing
 from typing import TYPE_CHECKING, ClassVar
 
 import pytest
@@ -369,3 +370,54 @@ async def test_text_from_separate_rounds_does_not_run_together() -> None:
     assert await reply(make_conversation(llm, toolbox()), "go") == "Sure. Done and dusted."
     llm = FakeLLM(["Sure. ", call("echo", text="x")], ["Done."])
     assert await reply(make_conversation(llm, toolbox()), "go") == "Sure. Done."
+
+
+# --------------------------------------------------------------------------- after acting
+
+
+class Play(Echo):
+    name = "play"
+
+    def starts_playback(self, args: TextArgs) -> bool:
+        return args.text != "silence"
+
+
+async def test_tools_report_what_was_done_and_music_starting() -> None:
+    started: list[str] = []
+    box = Toolbox([Play(), Picky(), Send()], Gate(), on_playback=lambda: started.append("yes"))
+    outcome = await box.run(
+        [
+            call("play", "1", text="jazz"),
+            call("picky", "2", text="x"),
+            call("send", "3", to="a", text="b"),
+        ],
+        tainted=False,
+    )
+    assert outcome.done == ("echo 'jazz'",)  # failed and waiting calls did nothing yet
+    assert started == ["yes"]
+    await box.run([call("play", text="silence")], tainted=False)
+    assert started == ["yes"]  # not every call of a media tool starts sound
+    assert Echo().starts_playback(TextArgs(text="x")) is False  # the default
+
+
+async def test_an_interrupted_reply_remembers_what_it_already_did() -> None:
+    """Interrupted after acting: the model must not do it again when the user goes on."""
+    llm = FakeLLM([call("play", text="jazz")], ["Playing jazz now, enjoy."])
+    box = Toolbox([Play()], Gate())
+    conversation = make_conversation(llm, box)
+    draft = conversation.draft("play some jazz")
+    async with aclosing(draft.deltas()) as deltas:
+        async for _ in deltas:
+            break  # the user talks over the first words
+    assert draft.done == ["echo 'jazz'"]
+    remembered = conversation.history[-1].text
+    assert remembered == "Playing jazz now, enjoy. [Interrupted. Already done: echo 'jazz'.]"
+
+
+async def test_a_confirmed_action_counts_as_done() -> None:
+    llm = FakeLLM([call("send", to="Thomas", text="hi")], ["Okay."], ["Sent it."])
+    conversation = make_conversation(llm, toolbox())
+    await ask_to_send(conversation)
+    draft = conversation.draft("yes")
+    assert "".join([d async for d in draft.deltas()]) == "Okay."
+    assert draft.done == ["send 'hi' to Thomas"]

@@ -12,13 +12,17 @@ from yarvis.security.redact import default_redactor
 from yarvis.tools.base import ToolError
 from yarvis.tools.computer import OPEN
 from yarvis.tools.spotify import (
+    MY_PLAYLISTS_URL,
     SEARCH_URL,
     TOKEN_URL,
     AdjustArgs,
     NoArgs,
     PlayArgs,
+    SpotifyAccount,
     SpotifyAdjust,
     SpotifyCatalog,
+    SpotifyKeys,
+    SpotifyMyPlaylists,
     SpotifyNowPlaying,
     SpotifyPlay,
     spotify_tools,
@@ -251,3 +255,196 @@ def test_spotify_tools() -> None:
         "spotify_play", "spotify_now_playing", "spotify_adjust",
     ]  # fmt: skip
     assert json.dumps(SpotifyAdjust(FakeRunner()).spec().input_schema)  # serialisable for the API
+
+
+# --------------------------------------------------------------------------- your playlists
+
+REFRESH = "refresh-token-0123456789abcdefghijklmnop"  # gitleaks:allow - a test value
+WORKOUT = "spotify:playlist:" + "W" * 22
+CHILL = "spotify:playlist:" + "C" * 22
+
+
+def playlist(uri: str, name: str, owner: str = "Victor") -> dict[str, Any]:
+    return {"uri": uri, "name": name, "owner": {"display_name": owner}}
+
+
+class FakeAccount:
+    """Spotify's token endpoint (refresh grant) and /me/playlists, scripted."""
+
+    def __init__(self, *pages: dict[str, Any], token_status: int = 200) -> None:
+        self.pages = list(pages)
+        self.token_status = token_status
+        self.refreshes: list[str] = []
+        self.renew: str | None = None
+        self.requests: list[str] = []
+
+    def handler(self, request: httpx2.Request) -> httpx2.Response:
+        if str(request.url) == TOKEN_URL:
+            form = dict(item.split("=", 1) for item in request.content.decode().split("&"))
+            assert form["grant_type"] == "refresh_token"
+            assert request.headers["authorization"].startswith("Basic ")
+            self.refreshes.append(form["refresh_token"])
+            body: dict[str, Any] = {"access_token": "user-token-abcdefghijklmnop", "expires_in": 60}
+            if self.renew:
+                body["refresh_token"] = self.renew
+            return httpx2.Response(self.token_status, json=body)
+        assert request.headers["authorization"] == "Bearer user-token-abcdefghijklmnop"
+        self.requests.append(str(request.url))
+        return httpx2.Response(200, json=self.pages.pop(0) if self.pages else {})
+
+
+def account(
+    fake: FakeAccount,
+    clock: Callable[[], float] = lambda: 0.0,
+    save: Callable[[str], None] | None = None,
+) -> SpotifyAccount:
+    http = httpx2.AsyncClient(transport=httpx2.MockTransport(fake.handler))
+    return SpotifyAccount(
+        CLIENT_ID, SecretStr(SECRET), SecretStr(REFRESH), save=save, http=http, clock=clock
+    )
+
+
+async def test_your_playlists_across_pages() -> None:
+    fake = FakeAccount(
+        {
+            "items": [playlist(WORKOUT, "Workout Mix!"), None, {"uri": "spotify:album:x"}],
+            "next": "https://api.spotify.com/v1/me/playlists?offset=50&limit=50",
+        },
+        {"items": [playlist(CHILL, "Sunday chill", owner="Spotify")], "next": None},
+    )
+    mine = account(fake)
+    playlists = await mine.playlists()
+    assert [(p.uri, p.name, p.by) for p in playlists] == [
+        (WORKOUT, "Workout Mix!", "Victor"),
+        (CHILL, "Sunday chill", "Spotify"),
+    ]
+    assert fake.requests == [
+        f"{MY_PLAYLISTS_URL}?limit=50",
+        "https://api.spotify.com/v1/me/playlists?offset=50&limit=50",
+    ]
+    assert await mine.playlists() == playlists  # cached for a while
+    assert fake.refreshes == [REFRESH]
+    assert REFRESH not in default_redactor.redact(f"token {REFRESH}")
+
+
+@pytest.mark.parametrize(
+    ("spoken", "found"),
+    [
+        ("workout mix", WORKOUT),  # punctuation and case do not matter
+        ("workout", WORKOUT),  # part of the name
+        ("sunday chil", CHILL),  # misheard
+        ("jazz", None),
+    ],
+)
+async def test_finding_your_playlist_by_ear(spoken: str, found: str | None) -> None:
+    fake = FakeAccount(
+        {"items": [playlist(WORKOUT, "Workout Mix!"), playlist(CHILL, "Sunday chill")]}
+    )
+    match = await account(fake).find_playlist(spoken)
+    assert (match.uri if match else None) == found
+
+
+async def test_a_renewed_login_is_saved() -> None:
+    saved: list[str] = []
+    fake = FakeAccount({"items": []}, {"items": []})
+    fake.renew = "renewed-token-0123456789abcdefghijkl"  # gitleaks:allow - a test value
+    now = [0.0]
+    mine = account(fake, clock=lambda: now[0], save=saved.append)
+    await mine.playlists()
+    assert saved == [fake.renew]
+    now[0] = 1000.0  # the access token and the cached list have expired
+    await mine.playlists()
+    assert fake.refreshes == [REFRESH, fake.renew]  # the new one is used from then on
+    assert saved == [fake.renew]  # unchanged: nothing new to store
+
+
+async def test_your_playlists_can_fail() -> None:
+    with pytest.raises(ToolError, match="yarvis spotify login"):
+        await account(FakeAccount(token_status=400)).playlists()
+    evil = FakeAccount({"items": [], "next": "https://evil.example/steal"})
+    with pytest.raises(ToolError, match="unexpected answer"):
+        await account(evil).playlists()
+
+    def offline(request: httpx2.Request) -> httpx2.Response:
+        raise httpx2.ConnectError("offline")
+
+    http = httpx2.AsyncClient(transport=httpx2.MockTransport(offline))
+    mine = SpotifyAccount(CLIENT_ID, SecretStr(SECRET), SecretStr(REFRESH), http=http)
+    with pytest.raises(ToolError, match="could not be reached"):
+        await mine.playlists()
+
+
+async def test_listing_fails_cleanly_offline_after_login() -> None:
+    fake = FakeAccount()
+
+    def flaky(request: httpx2.Request) -> httpx2.Response:
+        if str(request.url) == TOKEN_URL:
+            return fake.handler(request)
+        raise httpx2.ConnectError("offline")
+
+    http = httpx2.AsyncClient(transport=httpx2.MockTransport(flaky))
+    mine = SpotifyAccount(CLIENT_ID, SecretStr(SECRET), SecretStr(REFRESH), http=http)
+    with pytest.raises(ToolError, match="could not be reached"):
+        await mine.playlists()
+
+
+def test_account_from_keys() -> None:
+    app = SecretStr(f"{CLIENT_ID}:{SECRET}")
+    assert SpotifyAccount.from_keys(SpotifyKeys(app)) is None  # not logged in
+    mine = SpotifyAccount.from_keys(SpotifyKeys(app, SecretStr(REFRESH)))
+    assert mine is not None
+    assert mine._client_id == CLIENT_ID  # pyright: ignore[reportPrivateUsage]
+
+
+async def test_playing_your_own_playlist_first() -> None:
+    run = FakeRunner()
+    mine = account(FakeAccount({"items": [playlist(WORKOUT, "Workout Mix!")]}))
+    tool = SpotifyPlay(run, catalog(FakeSpotify()), mine)
+    assert await tool.run(PlayArgs(title="workout", kind="playlist")) == (
+        "Playing your playlist 'Workout Mix!'."
+    )
+    assert run.commands[-1][-1] == WORKOUT
+    # Not one of yours: Spotify's catalogue is searched instead.
+    public = {"playlists": {"items": [playlist(CHILL, "90s Dance", owner="Spotify")]}}
+    tool = SpotifyPlay(run, catalog(FakeSpotify(public)), mine)
+    assert await tool.run(PlayArgs(title="90s dance", kind="playlist")) == (
+        "Playing the playlist '90s Dance' by Spotify."
+    )
+
+
+async def test_listing_your_playlists() -> None:
+    names = [playlist(WORKOUT, f"List {i}") for i in range(65)]
+    tool = SpotifyMyPlaylists(account(FakeAccount({"items": names})))
+    said = await tool.run(NoArgs())
+    assert said.startswith("65 playlists: 'List 0' (by Victor), 'List 1'")
+    assert said.endswith(", and 5 more.")
+    assert tool.untrusted_output and tool.describe(NoArgs()) == "look at your playlists"
+    nothing = SpotifyMyPlaylists(account(FakeAccount({"items": []})))
+    assert await nothing.run(NoArgs()) == "The user has no playlists."
+    names = [t.name for t in spotify_tools(FakeRunner(), None, account(FakeAccount()))]
+    assert names[-1] == "spotify_my_playlists"
+
+
+async def test_your_own_playlist_by_name() -> None:
+    run = FakeRunner()
+    mine = account(FakeAccount({"items": [playlist(WORKOUT, "Workout Mix!")]}))
+    tool = SpotifyPlay(run, catalog(FakeSpotify()), mine)
+    args = PlayArgs(title="workout", kind="playlist", mine=True)
+    assert await tool.run(args) == "Playing your playlist 'Workout Mix!'."
+    assert run.commands[-1][-1] == WORKOUT
+    assert tool.describe(args) == "play your playlist workout on Spotify"
+    assert tool.starts_playback(args)  # music: the conversation makes way for it
+
+
+async def test_your_own_playlists_explain_what_is_missing() -> None:
+    not_logged_in = SpotifyPlay(FakeRunner(), catalog(FakeSpotify()))
+    with pytest.raises(ToolError, match="yarvis spotify login"):
+        await not_logged_in.run(PlayArgs(title="workout", mine=True))
+    mine = account(
+        FakeAccount({"items": [playlist(WORKOUT, "Workout Mix!"), playlist(CHILL, "Sunday chill")]})
+    )
+    tool = SpotifyPlay(FakeRunner(), None, mine)
+    with pytest.raises(ToolError, match="Theirs include: 'Workout Mix!', 'Sunday chill'"):
+        await tool.run(PlayArgs(title="jazz evenings", mine=True))
+    with pytest.raises(ToolError, match="Liked Songs"):
+        await tool.run(PlayArgs(title="Liked Songs", mine=True))

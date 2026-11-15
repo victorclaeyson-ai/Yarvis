@@ -22,6 +22,7 @@ from contextlib import aclosing
 from typing import TYPE_CHECKING, Final
 
 from yarvis.agent.confirmation import classify_answer
+from yarvis.agent.toolbox import CONFIRMED_AND_DONE
 from yarvis.llm.base import LLMError, Message, ToolCall
 
 if TYPE_CHECKING:
@@ -50,6 +51,8 @@ class Draft:
         self._consumed = False
         self._live = asyncio.Event()
         self._last_char = ""  # of the text emitted so far
+        self.done: list[str] = []
+        """What this reply has actually done so far ("play … on Spotify")."""
         self._task = asyncio.create_task(self._generate())
 
     async def _generate(self) -> None:
@@ -79,6 +82,7 @@ class Draft:
                 return
             await self._live.wait()  # never act on a reply the user may not want
             outcome = await toolbox.run(calls, tainted=tainted)
+            self.done += outcome.done
             tainted = outcome.tainted
             messages += [
                 Message("assistant", text, tool_calls=tuple(calls)),
@@ -126,6 +130,8 @@ class Draft:
         elif answer == "yes":
             logger.info("Confirmed by the user: %s", pending.tool.name)
             note = await toolbox.confirm(pending)
+            if note.startswith(CONFIRMED_AND_DONE):
+                self.done.append(pending.description)
         elif answer == "no":
             note = f"The user declined, so you did not {pending.description}."
         else:
@@ -161,16 +167,23 @@ class Draft:
         self._consumed = True
         self._live.set()
         heard: list[str] = []
+        finished = False
         try:
             while (item := await self._queue.get()) is not None:
                 if isinstance(item, BaseException):
                     raise item
                 heard.append(item)
                 yield item
+            finished = True
         finally:
             if not self._task.done():
                 self._task.cancel()
-            if reply := "".join(heard).strip():
+            reply = "".join(heard).strip()
+            if self.done and not finished:
+                # Cut off after acting: say so, or the model would do it all again when
+                # the user goes on ("skip" must not skip two songs).
+                reply = f"{reply} [Interrupted. Already done: {'; '.join(self.done)}.]".strip()
+            if reply:
                 self._conversation.remember(self.user_text, reply)
 
     def discard(self) -> None:

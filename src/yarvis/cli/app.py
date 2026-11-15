@@ -4,27 +4,31 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import logging
 import platform
 import re
+import webbrowser
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Annotated, NoReturn
 
 import httpx2
 import typer
+from pydantic import SecretStr
 from rich.console import Console
 from rich.markup import escape
 from rich.progress import BarColumn, DownloadColumn, Progress, TextColumn, TransferSpeedColumn
 from rich.table import Table
 
-from yarvis import __version__
+from yarvis import __version__, spotify_login
 from yarvis.audio.devices import AudioProbe, SoundDeviceProbe
-from yarvis.bench import recommendation, run_bench
+from yarvis.bench import SttCandidate, recommendation, run_bench
 from yarvis.cli.ui import ConsoleUi, stdin_lines
 from yarvis.config import Config, ConfigError, load_config, write_default_config
 from yarvis.doctor import CheckResult, DoctorContext, Status, has_failures, run_doctor
 from yarvis.log import configure_logging
 from yarvis.models import (
     KOKORO_FILES,
+    PARAKEET_FILES,
     WAKE_WORD_FILES,
     WHISPER_APPROX_MB,
     ModelFile,
@@ -32,20 +36,29 @@ from yarvis.models import (
     download,
     kokoro_dir,
     missing,
+    parakeet_dir,
     wake_word_dir,
     whisper_present,
 )
 from yarvis.paths import AppPaths
 from yarvis.runtime import Backends, LoadableSTT, run_assistant
-from yarvis.security.secrets import InvalidSecretError, ResolvedSecret, SecretName, SecretStore
+from yarvis.security.secrets import (
+    InvalidSecretError,
+    ResolvedSecret,
+    SecretName,
+    SecretSource,
+    SecretStore,
+)
+from yarvis.speech.choice import SttEngine, choose_engine, parakeet_available
+from yarvis.tools.spotify import SpotifyKeys
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Callable
     from pathlib import Path
 
-    from pydantic import SecretStr
-
     from yarvis.speech.whisper import SttDevice
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass(slots=True)
@@ -63,6 +76,14 @@ class Services:
         default=lambda model, directory, progress: download(model, directory, progress=progress)
     )
     app_runner: Callable[..., None] = field(default_factory=lambda: _run_app)
+    parakeet_ok: Callable[[], bool] = parakeet_available
+    """Whether Parakeet speech recognition can run here (an Apple Silicon Mac)."""
+    spotify_login: Callable[[str, SecretStr], str] = field(
+        default=lambda client_id, secret: spotify_login.login(
+            client_id, secret, open_url=webbrowser.open
+        )
+    )
+    """Runs the Spotify consent flow in the browser; returns a refresh token."""
 
     @classmethod
     def default(cls) -> Services:
@@ -87,9 +108,11 @@ app = typer.Typer(
 config_app = typer.Typer(help="Manage the configuration file.", no_args_is_help=True)
 key_app = typer.Typer(help="Manage API keys in the OS keychain.", no_args_is_help=True)
 models_app = typer.Typer(help="Download and inspect speech models.", no_args_is_help=True)
+spotify_app = typer.Typer(help="Connect your Spotify account.", no_args_is_help=True)
 app.add_typer(config_app, name="config")
 app.add_typer(key_app, name="key")
 app.add_typer(models_app, name="models")
+app.add_typer(spotify_app, name="spotify")
 
 
 def _services(ctx: typer.Context) -> Services:
@@ -209,6 +232,8 @@ def key_set(
 ) -> None:
     """Store an API key in the OS keychain (input is hidden)."""
     services = _services(ctx)
+    if name is SecretName.SPOTIFY_LOGIN:
+        _fail(services, "Log in through Spotify instead: yarvis spotify login")
     if name is SecretName.SPOTIFY:
         value = _spotify_credentials(services)
     else:
@@ -389,12 +414,26 @@ def _prepare(
             "to talk.[/]"
         )
         config = _without_wake_word(config)
-    if voice_input and not whisper_present(services.paths.cache_dir, config.voice.stt_model):
+    if voice_input:
+        config = _with_speech_recognition(services, config, assume_yes=assume_yes)
+    return config, key
+
+
+def _with_speech_recognition(services: Services, config: Config, *, assume_yes: bool) -> Config:
+    """Resolve ``stt = "auto"`` and make sure the chosen model is (being) downloaded."""
+    engine = choose_engine(config.voice, parakeet_ok=services.parakeet_ok())
+    if engine == "parakeet" and not _ensure_parakeet(services, assume_yes=assume_yes):
+        services.console.print("[yellow]Using Whisper for speech recognition instead.[/]")
+        engine = "faster-whisper"
+    config = config.model_copy(update={"voice": config.voice.model_copy(update={"stt": engine})})
+    if engine == "faster-whisper" and not whisper_present(
+        services.paths.cache_dir, config.voice.stt_model
+    ):
         size = WHISPER_APPROX_MB[config.voice.stt_model]
         services.console.print(
             f"[dim]First run: downloading the speech recognition model (~{size} MB)…[/]"
         )
-    return config, key
+    return config
 
 
 def _run_app(
@@ -405,7 +444,7 @@ def _run_app(
     backends: Backends,
     voice_input: bool,
     voice_output: bool,
-    spotify: SecretStr | None = None,
+    spotify: SpotifyKeys | None = None,
 ) -> None:  # pragma: no cover - opens a real window
     from yarvis.app.window import run_app  # noqa: PLC0415 - GUI imports only when needed
 
@@ -420,10 +459,49 @@ def _run_app(
     )
 
 
-def _spotify(services: Services) -> SecretStr | None:
-    """The Spotify developer app's credentials, if the user stored them."""
-    resolved = services.secrets.get(SecretName.SPOTIFY)
-    return resolved.value if resolved is not None else None
+def _spotify(services: Services) -> SpotifyKeys | None:
+    """The Spotify developer app's credentials and the user's login, if stored."""
+    app_keys = services.secrets.get(SecretName.SPOTIFY)
+    if app_keys is None:
+        return None
+    login = services.secrets.get(SecretName.SPOTIFY_LOGIN)
+
+    def save_login(token: str) -> None:
+        try:
+            services.secrets.set(SecretName.SPOTIFY_LOGIN, token)
+        except (InvalidSecretError, RuntimeError) as exc:  # pragma: no cover - keychain trouble
+            logger.warning("Could not store the renewed Spotify login: %s", exc)
+
+    return SpotifyKeys(
+        app_keys.value,
+        login.value if login is not None else None,
+        save_login if login is not None and login.source is SecretSource.KEYCHAIN else None,
+    )
+
+
+@spotify_app.command("login")
+def spotify_login_command(ctx: typer.Context) -> None:
+    """Let Yarvis see and play your own playlists (read-only, asks Spotify once)."""
+    services = _services(ctx)
+    app_keys = services.secrets.get(SecretName.SPOTIFY)
+    if app_keys is None:
+        _fail(services, "First store your Spotify app's keys: yarvis key set spotify")
+    client_id, _, secret = app_keys.value.get_secret_value().partition(":")
+    services.console.print(
+        "Your browser will open Spotify. Approve read-only access to your playlists, then "
+        "come back here. (Yarvis listens on "
+        f"{spotify_login.REDIRECT_URI} until Spotify answers.)",
+        highlight=False,
+    )
+    try:
+        token = services.spotify_login(client_id, SecretStr(secret))
+        services.secrets.set(SecretName.SPOTIFY_LOGIN, token)
+    except (spotify_login.LoginError, InvalidSecretError, RuntimeError) as exc:
+        _fail(services, f"Spotify login failed: {exc}")
+    services.console.print(
+        "[green]Connected.[/] Yarvis can now play your own playlists. To disconnect: "
+        "yarvis key delete spotify-login"
+    )
 
 
 @app.command()
@@ -443,16 +521,24 @@ def bench(
     if platform.system() == "Darwin" and platform.machine() == "arm64":
         devices.append("mps")
 
-    def make_stt(device: SttDevice) -> LoadableSTT:
-        voice = config.voice.model_copy(update={"stt_device": device})
-        return backends.stt(config.model_copy(update={"voice": voice}), cache)
+    def make_stt(engine: SttEngine, device: SttDevice = "cpu") -> Callable[[], LoadableSTT]:
+        voice = config.voice.model_copy(update={"stt": engine, "stt_device": device})
+        return lambda: backends.stt(config.model_copy(update={"voice": voice}), cache)
 
+    recognizers = [
+        SttCandidate(
+            f"whisper {config.voice.stt_model} on {device}",
+            device,
+            make_stt("faster-whisper", device),
+        )
+        for device in devices
+    ]
+    if config.voice.stt == "parakeet":  # resolved by _prepare: Apple Silicon, downloaded
+        recognizers.insert(0, SttCandidate("parakeet on mps", "mps", make_stt("parakeet")))
     results = asyncio.run(
         run_bench(
             tts=backends.tts(config, cache),
-            make_stt=make_stt,
-            devices=devices,
-            stt_model=config.voice.stt_model,
+            recognizers=recognizers,
             llm=backends.llm(config, key.value) if claude else None,
             rounds=rounds,
             on_progress=lambda message: services.console.print(f"[dim]{message}[/]"),
@@ -493,7 +579,10 @@ def models_download(
         raise typer.Exit(code=1)
     if config.voice.wake_word and not _ensure_wake_word(services, assume_yes=yes):
         raise typer.Exit(code=1)
-    if not whisper_present(services.paths.cache_dir, config.voice.stt_model):
+    if choose_engine(config.voice, parakeet_ok=services.parakeet_ok()) == "parakeet":
+        if not _ensure_parakeet(services, assume_yes=yes):
+            raise typer.Exit(code=1)
+    elif not whisper_present(services.paths.cache_dir, config.voice.stt_model):
         services.console.print(f"Downloading Whisper {config.voice.stt_model}…")
         stt = services.backends().stt(config, services.paths.cache_dir)
         stt.load()
@@ -512,6 +601,21 @@ def _ensure_kokoro(services: Services, *, assume_yes: bool) -> bool:
         return True
     megabytes = sum(model.size for model in todo) / 1_000_000
     services.console.print(f"Yarvis needs its voice model (Kokoro, {megabytes:.0f} MB, one time).")
+    if not assume_yes and not typer.confirm("Download it now?", default=True):
+        return False
+    return _download(services, todo, directory)
+
+
+def _ensure_parakeet(services: Services, *, assume_yes: bool) -> bool:
+    directory = parakeet_dir(services.paths.cache_dir)
+    todo = missing(PARAKEET_FILES, directory)
+    if not todo:
+        return True
+    gigabytes = sum(model.size for model in todo) / 1_000_000_000
+    services.console.print(
+        "Yarvis can understand you much better with Parakeet, a speech recognition model "
+        f"that runs on your Mac's GPU ({gigabytes:.1f} GB, one time; NVIDIA, CC BY 4.0)."
+    )
     if not assume_yes and not typer.confirm("Download it now?", default=True):
         return False
     return _download(services, todo, directory)

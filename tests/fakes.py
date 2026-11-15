@@ -224,6 +224,7 @@ class FakeEars:
         self.prefixes: list[Sequence[AudioArray] | None] = []
         self.timeouts: list[float | None] = []
         self.sessions = 0
+        self.wake_word_only: list[bool] = []
 
     @property
     def wake_word(self) -> bool:
@@ -256,8 +257,9 @@ class FakeEars:
         assert self._wake is not None
         return await self._wake()
 
-    async def interruption(self) -> Interruption:
+    async def interruption(self, *, wake_word_only: bool = False) -> Interruption:
         assert self._interruption is not None
+        self.wake_word_only.append(wake_word_only)
         return await self._interruption()
 
 

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 from datetime import UTC, datetime
-from typing import TYPE_CHECKING, Never
+from typing import TYPE_CHECKING, Any, Never
 
 import numpy as np
 import pytest
@@ -19,10 +19,11 @@ from yarvis.listen import MicrophoneSilentError, MicrophoneStalledError
 from yarvis.pipeline import Turn
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator, Awaitable, Callable, Sequence
+    from collections.abc import AsyncGenerator, AsyncIterator, Awaitable, Callable, Sequence
 
     from fakes import ListenFn
     from yarvis.listen import PauseHooks, Utterance
+    from yarvis.llm.base import Message, ToolCall
     from yarvis.pipeline import TurnResult
     from yarvis.speech.base import AudioArray
 
@@ -714,3 +715,130 @@ async def test_a_typed_line_and_a_timer_at_the_same_moment() -> None:
     ).run()
     assert "alert:Your 2-minute timer is done." in ui.events  # not lost
     assert "reply:Hi." in ui.events
+
+
+# --------------------------------------------------------------------------- music starting
+
+
+async def test_music_started_by_a_tool_cannot_interrupt_and_ends_the_conversation() -> None:
+    """The song is not the user: only "Hey Yarvis" interrupts, and nothing more is heard."""
+    from test_agent_tools import Play  # noqa: PLC0415 - a fake media tool
+    from test_listen_and_assistant import RecordingDucker  # noqa: PLC0415
+    from yarvis.agent.toolbox import Toolbox  # noqa: PLC0415
+    from yarvis.llm.base import ToolCall  # noqa: PLC0415
+    from yarvis.security.gate import Gate  # noqa: PLC0415
+
+    ui = EventUi()
+    toolbox = Toolbox([Play()], Gate())
+    llm = FakeLLM([ToolCall("1", "play", {"text": "jazz"})], ["Playing jazz."])
+    conversation = Conversation(
+        llm, system_prompt=lambda: "S", max_tokens=32, clock=TickingClock(), toolbox=toolbox
+    )
+    speaker = PlayingSpeaker()
+    speaker.finish.set()  # each reply plays to the end
+    turn = Turn(
+        conversation,
+        stt=ScriptedSTT("play some jazz"),
+        tts=FakeTTS(),
+        speaker=speaker,
+        observer=ui,
+        chime=CHIME,
+    )
+    listened: list[bool] = []
+
+    async def listen(hooks: PauseHooks, *, follow_up: bool = False) -> Utterance | None:
+        listened.append(follow_up)
+        return utterance()
+
+    ears = FakeEars(listen, wake=forever, interruption=forever)
+    assistant = Assistant(
+        turn=turn,
+        lines=talk_then_quit(ui.replied),
+        ui=ui,
+        ears=ears,
+        turn_taking=NO_SPECULATION,
+        ducker=RecordingDucker(ui),
+    )
+    toolbox.on_playback = assistant.media_started
+    await assistant.run()
+    assert "reply:Playing jazz." in ui.events
+    assert ears.wake_word_only == [False, True]  # voice at first, then only the wake word
+    assert listened == [False]  # no follow-up: the music would be heard as the user
+    # Down when the conversation starts, and again once the new song is playing.
+    assert ui.events.count("music down") == 2
+    assert ui.events.index("music down", 2) > ui.events.index("you:play some jazz")
+    assert ui.events.count("music up") == 1  # back up once the conversation is over
+
+
+async def test_after_acting_an_interruption_is_a_new_request() -> None:
+    """Cut off after a tool ran: the next words are not glued to the old request (which
+    would make the model do it all again: "skip" skipping two songs)."""
+    from test_agent_tools import Play, TextArgs  # noqa: PLC0415
+    from yarvis.agent.toolbox import Toolbox  # noqa: PLC0415
+    from yarvis.llm.base import ToolCall  # noqa: PLC0415
+    from yarvis.security.gate import Gate  # noqa: PLC0415
+
+    acted = asyncio.Event()
+    blocked = asyncio.Event()
+
+    class Signalling(Play):
+        async def run(self, args: TextArgs) -> str:
+            acted.set()
+            await blocked.wait()  # still busy when the user talks over it
+            return "never"  # pragma: no cover
+
+    class ThinkingLLM(FakeLLM):
+        """After the tool call, takes its time to answer."""
+
+        async def stream(
+            self, messages: Sequence[Message], **kwargs: Any
+        ) -> AsyncGenerator[str | ToolCall]:
+            if self.calls:
+                await blocked.wait()
+            async for event in super().stream(messages, **kwargs):
+                yield event
+
+    def make(tool: Play) -> Turn:
+        llm = ThinkingLLM([ToolCall("1", "play", {"text": "jazz"})], ["Playing jazz."])
+        conversation = Conversation(
+            llm,
+            system_prompt=lambda: "S",
+            max_tokens=32,
+            clock=TickingClock(),
+            toolbox=Toolbox([tool], Gate()),
+        )
+        speaker = PlayingSpeaker()
+        speaker.finish.set()
+        return Turn(
+            conversation,
+            stt=ScriptedSTT("play some jazz"),
+            tts=FakeTTS(),
+            speaker=speaker,
+            observer=EventUi(),
+            chime=CHIME,
+        )
+
+    # Interrupted while the tool is still running: nothing done yet, the request goes on.
+    turn = make(Signalling())
+    replying = asyncio.create_task(turn.from_audio(PREFIX[0], speech_end=0, turn_detected=0))
+    await acted.wait()
+    replying.cancel()
+    await asyncio.wait({replying})
+    assert turn.unanswered == "play some jazz"
+
+    # Interrupted after the tool ran, before a word was said: a new request.
+    acted.clear()
+
+    class Done(Play):
+        async def run(self, args: TextArgs) -> str:
+            acted.set()
+            return await super().run(args)
+
+    turn = make(Done())
+    replying = asyncio.create_task(turn.from_audio(PREFIX[0], speech_end=0, turn_detected=0))
+    await acted.wait()
+    await asyncio.sleep(0)  # the tool returns
+    replying.cancel()
+    await asyncio.wait({replying})
+    assert turn.unanswered is None
+    assert history(turn) == ["play some jazz", "[Interrupted. Already done: echo 'jazz'.]"]

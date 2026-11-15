@@ -24,7 +24,6 @@ if TYPE_CHECKING:
     from yarvis.llm.base import LLMProvider
     from yarvis.runtime import LoadableSTT, LoadableTTS
     from yarvis.speech.base import AudioArray
-    from yarvis.speech.whisper import SttDevice
 
 TTS_PHRASE: Final = "Good afternoon, Victor."
 STT_PHRASE: Final = "What's the weather like in Zedelgem tomorrow?"
@@ -44,6 +43,17 @@ class Measurement:
     def median_ms(self) -> float:
         """Median of the runs."""
         return statistics.median(self.runs_ms)
+
+
+@dataclass(frozen=True, slots=True)
+class SttCandidate:
+    """A speech recognition setting to measure."""
+
+    setting: str
+    """Shown in the table, e.g. "whisper base.en on cpu"."""
+    device: str
+    """Where it should run; if it ends up elsewhere, the table says so."""
+    make: Callable[[], LoadableSTT]
 
 
 def resample(audio: AudioArray, source_rate: int, target_rate: int) -> AudioArray:
@@ -83,15 +93,13 @@ async def first_token_ms(llm: LLMProvider, clock: Callable[[], float] = time.per
 async def run_bench(
     *,
     tts: LoadableTTS,
-    make_stt: Callable[[SttDevice], LoadableSTT],
-    devices: Sequence[SttDevice],
-    stt_model: str,
+    recognizers: Sequence[SttCandidate],
     llm: LLMProvider | None,
     rounds: int = 3,
     on_progress: Callable[[str], None] | None = None,
     clock: Callable[[], float] = time.perf_counter,
 ) -> list[Measurement]:
-    """Measure voice, speech recognition per device, and Claude's time to first token."""
+    """Measure the voice, each speech recognition setting, and Claude's first token."""
 
     def progress(message: str) -> None:
         if on_progress is not None:
@@ -106,17 +114,19 @@ async def run_bench(
 
     speech = await tts.synthesize(STT_PHRASE)
     sample = resample(speech, tts.sample_rate, MIC_SAMPLE_RATE)
-    for device in devices:
-        progress(f"Measuring speech recognition on {device}…")
-        stt = make_stt(device)
+    for candidate in recognizers:
+        progress(f"Measuring speech recognition: {candidate.setting}…")
+        stt = candidate.make()
         await asyncio.to_thread(stt.load)
         runs = await timed(lambda stt=stt: stt.transcribe(sample), rounds, clock)
         heard = await stt.transcribe(sample)
-        actual = getattr(stt, "device", device)
-        note = f'heard: "{heard}"' if actual == device else f"{device} unavailable, ran on {actual}"
-        results.append(
-            Measurement("Speech-to-text", f"whisper {stt_model} on {device}", runs, note)
+        actual = getattr(stt, "device", candidate.device)
+        note = (
+            f'heard: "{heard}"'
+            if actual == candidate.device
+            else f"{candidate.device} unavailable, ran on {actual}"
         )
+        results.append(Measurement("Speech-to-text", candidate.setting, runs, note))
 
     if llm is not None:
         progress("Measuring Claude…")
@@ -128,11 +138,13 @@ async def run_bench(
 
 
 def recommendation(results: Sequence[Measurement]) -> str | None:
-    """Suggest the GPU for speech recognition if it is clearly faster."""
+    """Suggest the GPU for Whisper if it is clearly faster there."""
     by_device = {
         m.setting.rsplit(" on ", 1)[-1]: m
         for m in results
-        if m.component == "Speech-to-text" and "unavailable" not in m.note
+        if m.component == "Speech-to-text"
+        and m.setting.startswith("whisper ")
+        and "unavailable" not in m.note
     }
     cpu, gpu = by_device.get("cpu"), by_device.get("mps")
     if cpu is None or gpu is None:

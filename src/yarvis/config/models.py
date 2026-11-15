@@ -56,11 +56,17 @@ VocabularyWord = Annotated[
 class VoiceConfig(_Section):
     """Audio devices and speech backends.
 
-    Only implemented backends are accepted; more (MLX Whisper, Piper) arrive in later phases.
+    Only implemented backends are accepted; more (Piper) arrive in later phases.
     """
 
-    stt: Literal["auto", "faster-whisper"] = "auto"
-    stt_model: SttModel = "base.en"
+    stt: Literal["auto", "parakeet", "faster-whisper"] = Field(
+        default="auto",
+        description=(
+            "Speech recognition. 'auto': Parakeet on the GPU of Apple Silicon Macs (the most "
+            "accurate), Whisper elsewhere."
+        ),
+    )
+    stt_model: SttModel = Field(default="small.en", description="The Whisper model.")
     stt_device: Literal["cpu", "mps"] = Field(
         default="cpu",
         description="'mps' runs Whisper on the Apple GPU (experimental; try `yarvis bench`).",
@@ -68,7 +74,7 @@ class VoiceConfig(_Section):
     vocabulary: tuple[VocabularyWord, ...] = Field(
         default=("Yarvis",),
         max_length=50,
-        description="Names and places speech recognition should spell correctly.",
+        description="Names and places Whisper should spell correctly (Parakeet needs no hints).",
     )
     tts: Literal["kokoro"] = "kokoro"
     voice: str = Field(default="bm_george", pattern=r"^[a-z]{2}_[a-z]+$")
@@ -112,6 +118,10 @@ class VoiceConfig(_Section):
         description="Higher means fewer accidental wake-ups; lower means it wakes more easily.",
     )
     wake_chime: bool = Field(default=True, description="Play a short sound when woken.")
+    duck_music: bool = Field(
+        default=True,
+        description="Turn Spotify down while you talk to Yarvis, so it hears you, not the song.",
+    )
     barge_in: BargeIn = Field(
         default="auto",
         description=(

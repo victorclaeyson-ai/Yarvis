@@ -88,7 +88,7 @@ def test_real_window_end_to_end(tmp_path: Path) -> None:  # pragma: no cover - o
 
         wait_for(lambda: pill() == "ONLINE", 20, "app becomes Ready")
         models = js("document.getElementById('models').textContent")
-        ok = "haiku" in models and "base.en" in models
+        ok = "haiku" in models and "STT small.en" in models
         results.append(("OK   " if ok else "FAIL ") + f"models shown: {models!r}")
         api_ok = js(
             "typeof window.pywebview.api.talk === 'function' && typeof window.pywebview.api.stop === 'function'"

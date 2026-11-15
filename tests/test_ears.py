@@ -289,6 +289,20 @@ async def test_saying_the_wake_word_interrupts_on_speakers() -> None:
     assert result.prefix[-1][0] == FakeWakeWord.TRIGGER
 
 
+async def test_while_music_plays_only_the_wake_word_interrupts() -> None:
+    """With headphones, plain talking interrupts; once a song plays, only "Hey Yarvis"."""
+    mic = QueueMic()
+    vad = ScriptedVAD()
+    ears, shared = make_ears(mic, wake_word=FakeWakeWord(), barge_in="voice", barge_in_vad=vad)
+    async with shared:
+        waiting = asyncio.ensure_future(ears.interruption(wake_word_only=True))
+        await asyncio.sleep(0)
+        mic.feed(*[voiced(0.99)] * 40, trigger())  # the singing is ignored
+        result = await waiting
+    assert result.wake_word
+    assert vad.resets == 0  # the voice detector was never consulted
+
+
 async def test_interruption_is_unavailable_when_barge_in_is_off() -> None:
     ears, shared = make_ears(QueueMic())
     async with shared:

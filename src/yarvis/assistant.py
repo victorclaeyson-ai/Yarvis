@@ -15,7 +15,7 @@ import asyncio
 import logging
 import threading
 import time
-from contextlib import nullcontext
+from contextlib import nullcontext, suppress
 from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING, Any, Protocol
 
@@ -34,6 +34,7 @@ if TYPE_CHECKING:
     from yarvis.listen import PauseControl, Utterance
     from yarvis.pipeline import Speculation, Turn, TurnResult
     from yarvis.speech.base import AudioArray
+    from yarvis.tools.ducking import Ducker
 
 logger = logging.getLogger(__name__)
 
@@ -130,8 +131,8 @@ class Ears(Protocol):
         """Wait for the wake word; returns the audio around it."""
         ...
 
-    def interruption(self) -> Awaitable[Interruption]:
-        """Wait until the user interrupts a reply."""
+    def interruption(self, *, wake_word_only: bool = False) -> Awaitable[Interruption]:
+        """Wait until the user interrupts a reply (``wake_word_only``: only "Hey Yarvis")."""
         ...
 
 
@@ -186,9 +187,14 @@ class Assistant:
         turn_taking: TurnTaking | None = None,
         greeter: Greeter | None = None,
         announcements: asyncio.Queue[str] | None = None,
+        ducker: Ducker | None = None,
         clock: Callable[[], float] = time.monotonic,
     ) -> None:
         self._turn = turn
+        self._ducker = ducker
+        self._ducking: asyncio.Task[None] | None = None
+        self._playback = asyncio.Event()
+        """Set when a tool started music or a video during the current reply."""
         self._announcements = announcements
         self._greeter = greeter
         self._clock = clock
@@ -214,12 +220,14 @@ class Assistant:
                 if step is not None:
                     step = await self._run_command(self._listen_turn(step))
                     continue
+                await self._music_back_up()  # the conversation is over
                 self._ui.ready(voice=self._ears is not None, wake_word=self._wake_word)
                 event = await self._next_input()
                 if isinstance(event, _Announcement):
                     step = await self._run_command(self._announce(event.text))
                     continue
                 if isinstance(event, _Woken):
+                    self._music_down()
                     self._ui.woke()
                     await self._turn.chime()
                     step = _Listen(prefix=event.prefix, woken=True)
@@ -229,10 +237,36 @@ class Assistant:
                 if text := event.strip():
                     step = await self._run_command(self._text_turn(text))
                 else:
+                    self._music_down()
                     step = _Listen()
         finally:
             if self._next_line is not None:
                 self._next_line.cancel()
+            await self._music_back_up()
+
+    def _music_down(self) -> None:
+        """Turn music down for the conversation, without delaying the listening."""
+        if self._ducker is None or (self._ducking is not None and not self._ducking.done()):
+            return
+        self._ducking = asyncio.create_task(self._ducker.duck())
+
+    def media_started(self) -> None:
+        """A tool started music or a video: keep it out of the microphone.
+
+        For the rest of the reply only "Hey Yarvis" can interrupt (the song would otherwise
+        "talk over" Yarvis), the music is turned down while Yarvis speaks, and the
+        conversation ends after the reply instead of transcribing the music.
+        """
+        self._playback.set()
+        self._music_down()
+
+    async def _music_back_up(self) -> None:
+        if self._ducker is None or self._ducking is None:
+            return
+        ducking, self._ducking = self._ducking, None
+        with suppress(Exception):
+            await ducking  # it may still be on its way down
+        await self._ducker.restore()
 
     def stop(self) -> None:
         """Stop whatever is happening (listening, thinking, speaking). Thread-safe."""
@@ -412,8 +446,11 @@ class Assistant:
         self._ui.reply_finished(outcome)
         if ends_conversation(outcome.transcript):
             logger.info("Conversation closed by the user")
-            return None
-        return self._open_conversation(self._turn_taking.follow_up_s)
+        elif self._playback.is_set():
+            logger.info("Music or a video started: say 'Hey Yarvis' to talk again")
+        else:
+            return self._open_conversation(self._turn_taking.follow_up_s)
+        return None
 
     def _open_conversation(self, seconds: float) -> _Listen | None:
         """Keep listening without the wake word for ``seconds``."""
@@ -441,11 +478,26 @@ class Assistant:
         ears = self._ears
         if ears is None or not ears.barge_in:
             return await reply
+        self._playback.clear()
         async with ears.session():
             replying = asyncio.create_task(reply)
             watching = asyncio.ensure_future(ears.interruption())
+            playback = asyncio.ensure_future(self._playback.wait())
             try:
-                await asyncio.wait({replying, watching}, return_when=asyncio.FIRST_COMPLETED)
+                while True:
+                    await asyncio.wait(
+                        {replying, watching, playback}, return_when=asyncio.FIRST_COMPLETED
+                    )
+                    if replying.done() or watching.done() or not playback.done():
+                        break
+                    watching.cancel()  # music started: from now on, only "Hey Yarvis"
+                    await asyncio.wait({watching})
+                    watching = asyncio.ensure_future(
+                        ears.interruption(wake_word_only=True)
+                        if ears.wake_word
+                        else asyncio.get_running_loop().create_future()  # nothing can
+                    )
+                    playback = asyncio.get_running_loop().create_future()  # handled
                 if not replying.done() and watching.exception() is None:
                     interruption = watching.result()
                     logger.info(
@@ -461,7 +513,8 @@ class Assistant:
             finally:
                 replying.cancel()
                 watching.cancel()
-                await asyncio.wait({replying, watching})
+                playback.cancel()
+                await asyncio.wait({replying, watching, playback})
 
     async def _listen_after(self, interruption: Interruption) -> _Listen:
         self._ui.interrupted()

@@ -69,6 +69,41 @@ whatever it was told or tricked into, the decision to run a tool is made by code
      pressing. Terminals (where typing runs commands), password managers and System
      Settings are off-limits, and so is Yarvis's own window.
 
+9. **Pages, playlists and quiet music** (after the first tests with a real user):
+   - **Tabs in every window.** Tabs are listed and numbered across all windows, front
+     window first. Private (incognito) windows are skipped, and pages in them are never
+     read. Command output is no longer cut at 500 characters: a long tab list was being
+     truncated, so six tabs were reported as one.
+   - **Reading and clicking on pages.** Small JavaScript programs, fixed in the source,
+     run in the current tab through the browser's own AppleScript (the user has to allow
+     "JavaScript from Apple Events" once). The model never writes JavaScript: it picks an
+     element by the number the listing gave it and repeats its label, and the code
+     checks the element still carries that label. **Following a link** (tier 1) only
+     opens its address after the same `https://` check as any website, so a page's
+     `onclick` never runs. **Pressing a button** is tier 2, because a button can send,
+     buy or delete: the readback names the button. **Playing and pausing** media is
+     tier 1. Everything a page says is untrusted content.
+   - **Your own playlists.** `yarvis spotify login` runs Spotify's authorization code flow
+     once, with read-only scopes (`playlist-read-private`, `playlist-read-collaborative`).
+     For the few moments of the login, Yarvis listens on `127.0.0.1:8888` for exactly one
+     redirect, checks its random `state`, and stops; there is no other listener. The
+     refresh token lives in the keychain (renewed tokens are saved back) and is redacted
+     from logs. "Play my workout playlist" prefers the user's own playlists, matched
+     forgivingly, because speech recognition mishears names.
+   - **Music down while we talk.** When a conversation starts, Spotify and a video playing
+     in the browser's current tab drop to a quarter of their volume, and go back when it
+     ends, unless the user set a volume in the meantime. Music in the microphone made
+     speech recognition hear lyrics as requests and set off false interruptions.
+   - **Music started by Yarvis is not the user.** Tools say whether a call starts sound
+     (`Tool.starts_playback`). When one does, the rest of the reply can only be
+     interrupted by "Hey Yarvis", and the conversation ends after the reply instead of
+     listening to the song.
+   - **Interrupted after acting.** A reply cut off before its first word used to be
+     treated as unfinished, so the user's next words were added to the same request,
+     and the model did everything again ("skip" skipped two songs). Once a tool has
+     acted, the next words are a new request, and the conversation remembers what was
+     already done.
+
 ## Consequences
 
 - A confirmation costs one extra exchange; tier 2 is reserved for actions where that is

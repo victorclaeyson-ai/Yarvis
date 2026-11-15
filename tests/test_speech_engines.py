@@ -107,11 +107,13 @@ async def test_whisper_joins_confident_segments(tmp_path: Path) -> None:
         "base.en", cache_dir=tmp_path, vocabulary=["Yarvis", "Zedelgem"], loader=loader
     )
     assert await stt.transcribe(np.zeros(16_000, np.float32)) == "Hello world"
-    assert model.options["initial_prompt"] == "Yarvis, Zedelgem."
+    assert model.options["initial_prompt"] == (
+        "Yarvis, Zedelgem, Spotify, Brave, Safari, YouTube, playlist."
+    )
     assert await stt.transcribe(np.zeros(16_000, np.float32)) == "Hello world"
     assert calls == [True]  # loaded once, from the local cache
     assert model.options["language"] == "en"
-    assert model.options["beam_size"] == 1
+    assert model.options["beam_size"] == 5
 
 
 def test_whisper_downloads_when_not_cached(tmp_path: Path) -> None:
@@ -124,7 +126,7 @@ def test_whisper_downloads_when_not_cached(tmp_path: Path) -> None:
         return FakeWhisper([])
 
     stt = WhisperSTT("tiny.en", cache_dir=tmp_path, loader=loader)
-    assert stt._prompt is None  # pyright: ignore[reportPrivateUsage]
+    assert stt._prompt == "Spotify, Brave, Safari, YouTube, playlist."  # pyright: ignore[reportPrivateUsage]
     stt.load()
     stt.load()
     assert calls == [True, False]

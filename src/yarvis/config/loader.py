@@ -42,8 +42,10 @@ voice = "bm_george"         # British male. Try "af_heart", "am_michael", "bf_em
 speech_rate = 1.0
 end_of_turn_ms = 900        # silence that ends a sentence that sounds finished
 thinking_pause_ms = 2000    # ...and one that sounds unfinished ("and", "um", "the")
-follow_up_s = 15            # keep the conversation open after a reply (0 = off);
-                            # "thanks" or "that's all" ends it sooner
+stay_open_s = 300           # after a request, keep listening for the next one (0 = off);
+                            # only what's meant for Yarvis counts ("open Spotify", "Yarvis, ..."),
+                            # other talk is ignored on this computer; "thanks" ends it sooner
+follow_up_s = 15            # when Yarvis asks you something, any answer counts this long
 speculative = true          # start working during pauses: much faster, costs a few extra tokens
 wake_word = true            # "Hey Yarvis", detected on this computer (the mic stays open)
 wake_word_threshold = 0.5   # higher = fewer accidental wake-ups, lower = wakes more easily

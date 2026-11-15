@@ -136,3 +136,72 @@ def ends_conversation(text: str, *, names: Iterable[str] = DEFAULT_WAKE_NAMES) -
         and all(word in _CLOSING_WORDS for word in words)
         and any(word in _CLOSERS for word in words)
     )
+
+
+# ----------------------------------------------------------------------------- who is it for?
+
+# While a conversation stays open, people also talk to each other. Only sentences that are
+# clearly for Yarvis become requests: ones that use its name, or that are phrased like the
+# commands it understands. Everything else is dropped on the spot (never sent anywhere).
+# The patterns are deliberately narrow: "play some jazz" is for Yarvis, "play with me" or
+# "go to bed" are not.
+_LEAD_IN: Final = re.compile(
+    r"^(?:(?:please|pls|hey|hi|ok|okay|oh|and|also|now|so|just|um|uh|right|alright|then|"
+    r"can you|could you|would you|will you|can u|could u)\s+)+"
+)
+_SITES: Final = (
+    r"youtube|spotify|gmail|google|netflix|github|facebook|instagram|whatsapp|twitter|"
+    r"reddit|wikipedia|amazon|linkedin|outlook|maps|calendar|chatgpt|claude|brave|safari"
+)
+_COMMANDS: Final = tuple(
+    re.compile(pattern)
+    for pattern in (
+        r"^(open|launch|close|quit) (?!(the|a|an|your|my|his|her|it|up|this|that)\b)\S",
+        r"^open (a )?new (tab|window)\b",
+        r"^play$|^play (?!(fair|nice|with|outside|along|together|ball|games?|cards|"
+        r"football|soccer|tennis|fifa|minecraft)\b)\S",
+        r"^(pause|resume|unpause|skip|shuffle|unshuffle|mute|unmute)\b",
+        r"^(next|previous|last)( (song|track|one|video|tab))?$",
+        r"^stop (the )?(music|song|video|playing|timer|alarm)\b",
+        r"^(louder|quieter|softer)\b",
+        r"^(volume|sound) (up|down|to|at)\b",
+        r"^turn (it |the (music|volume|sound|song|video) )?(up|down|on|off)\b",
+        r"^turn (up|down|on|off) the (music|volume|sound|song|video)\b",
+        r"^set (a |an |the |my )?\S*\s*(timer|alarm|reminder|volume)\b",
+        r"^(remind me|cancel (the |my |that )?(timer|alarm|reminder))\b",
+        r"^(search|google|look up) (?!me\b)\S",
+        r"^go (back|forward)\b",
+        rf"^go to (the )?(\S+\.(com|be|org|net|io|eu)|{_SITES})\b",
+        r"^(switch|change) to\b",
+        r"^(close|reload|refresh) (this|the|that) (tab|page|window)\b",
+        r"^(type|press|click|scroll)\b",
+        r"^(what'?s|what is) (playing|this song|on)\b",
+        r"^(what|which) song\b",
+        r"^(i want to|i'd like to|let me) (hear|listen to)\b",
+    )
+)
+# Right after Yarvis answered, "what about tomorrow?" continues the conversation.
+_CONTINUATION: Final = re.compile(
+    r"^(and )?(what|how) about\b|^and (what|how|where|when|who|why)\b"
+)
+_NOT_WORDS: Final = re.compile(r"[^a-z0-9'.\s]+")
+_LOOSE_DOT: Final = re.compile(r"\.(?!\w)")  # a full stop, not the one in "kuleuven.be"
+
+
+def meant_for_assistant(
+    text: str, *, names: Iterable[str] = DEFAULT_WAKE_NAMES, just_answered: bool = False
+) -> bool:
+    """Whether an overheard sentence is a request for Yarvis.
+
+    True if it uses Yarvis's name, or is phrased like a command it understands ("open
+    Spotify", "can you play some jazz", "turn it up"). With ``just_answered`` (Yarvis spoke
+    a moment ago), "and what about tomorrow?" counts as well.
+    """
+    lowered = text.lower()
+    if any(re.search(rf"\b{re.escape(name.lower())}\b", lowered) for name in names if name):
+        return True
+    words = " ".join(_LOOSE_DOT.sub(" ", _NOT_WORDS.sub(" ", lowered)).split())
+    words = _LEAD_IN.sub("", words)
+    if any(pattern.search(words) for pattern in _COMMANDS):
+        return True
+    return just_answered and bool(_CONTINUATION.search(words))

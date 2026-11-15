@@ -261,6 +261,7 @@ async def run_assistant(
                 speculate=config.voice.speculative,
                 thinking_pause_ms=config.voice.thinking_pause_ms,
                 follow_up_s=config.voice.follow_up_s,
+                stay_open_s=config.voice.stay_open_s,
             ),
             greeter=greeter,
             announcements=announcements,

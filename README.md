@@ -74,6 +74,12 @@ models are free for personal, **non-commercial** use (CC BY-NC-SA 4.0), so Yarvi
 them separately (4 MB) instead of bundling them. Prefer press-to-talk? Set
 `wake_word = false` in the config, or start with `--no-wake-word`.
 
+**No wake word needed for five minutes.** After a request, Yarvis keeps listening for the
+next one, but only acts on what's meant for it: its name, or a command like "open Spotify",
+"turn it up" or "go to YouTube". Talking to someone else in the room is ignored right there
+on your computer (never sent, shown or stored). Say "thanks" or "that's all" to end it
+sooner, or set `stay_open_s` (0 turns it off).
+
 Curious how fast it is on your machine? `yarvis bench` measures each stage (voice, each
 speech recognition engine and what it heard, Claude's first token) and recommends settings.
 

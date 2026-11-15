@@ -2,7 +2,12 @@ from __future__ import annotations
 
 import pytest
 
-from yarvis.speech.turn_taking import ends_conversation, sounds_finished, strip_wake_phrase
+from yarvis.speech.turn_taking import (
+    ends_conversation,
+    meant_for_assistant,
+    sounds_finished,
+    strip_wake_phrase,
+)
 
 
 @pytest.mark.parametrize(
@@ -100,3 +105,49 @@ def test_goodbyes_close_the_conversation(text: str) -> None:
 )  # fmt: skip
 def test_requests_keep_the_conversation_open(text: str) -> None:
     assert not ends_conversation(text)
+
+
+# --------------------------------------------------------------------------- who is it for?
+
+
+@pytest.mark.parametrize(
+    "said",
+    [
+        "Open Spotify.", "open spotify", "Can you open Brave?", "Open a new tab.",
+        "Okay, so can you please play some jazz?", "Play.",
+        "Play Feel What You Want by Kristine W.", "Pause.", "Skip.", "Next song.", "Next",
+        "Turn it up.", "Turn the music down", "Turn up the volume", "Louder!", "Volume to 30",
+        "Set a timer for ten minutes.", "Set a pasta timer", "Remind me at six to call mom.",
+        "Cancel the timer.", "Search for trains to Ghent.", "Google the weather in Leuven",
+        "Go back.", "Go to YouTube.", "Go to kuleuven.be", "Switch to the Gmail tab.",
+        "Close this tab.", "Click on the first video.", "Type hello in Messages",
+        "What's playing?", "What song is this?", "I want to hear something by Daft Punk",
+        "Stop the music.", "Hey Yarvis, what's the weather?", "What do you think, Yarvis?",
+        "Jarvis, how tall is the Eiffel Tower?", "Shuffle.", "Mute.",
+    ],
+)  # fmt: skip
+def test_requests_for_yarvis(said: str) -> None:
+    assert meant_for_assistant(said)
+
+
+@pytest.mark.parametrize(
+    "said",
+    [
+        "Do you want to play with me?", "Play fair!", "Let's play FIFA.", "Go to bed.",
+        "I'm going to the shop.", "What time do you have to leave?", "Stop it!",
+        "Turn left at the lights.", "Next time we should go.", "Set the table, please.",
+        "Can you pass me the salt?", "That was a good movie.", "Thanks man.",
+        "Where did you put my keys?", "Close the door.", "Search me.", "",
+        "And then we went to Ghent.", "What about tomorrow?", "Open the window.",
+        "Stop!", "Play with your brother.",
+    ],
+)  # fmt: skip
+def test_talking_to_someone_else(said: str) -> None:
+    assert not meant_for_assistant(said)
+
+
+def test_right_after_an_answer_a_follow_up_question_counts() -> None:
+    assert meant_for_assistant("And what about tomorrow?", just_answered=True)
+    assert meant_for_assistant("How about Brussels?", just_answered=True)
+    assert not meant_for_assistant("And then we went to Ghent.", just_answered=True)
+    assert not meant_for_assistant("Do you want to play with me?", just_answered=True)

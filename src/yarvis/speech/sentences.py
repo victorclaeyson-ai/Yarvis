@@ -7,7 +7,9 @@ Rules:
 
 * The **first** sentence is emitted as soon as it ends, however short, so audio starts fast.
   Better still, its first *clause* is emitted at a comma, colon or dash once it is long
-  enough to sound natural on its own ("Grey skies and drizzle, | as usual for Leuven.").
+  enough to sound natural on its own ("Right now in Leuven, | it's grey and drizzly.").
+  Synthesis time grows with the length of the audio, so a short first chunk is the
+  cheapest way to make the voice start sooner; the rest is synthesized while it plays.
 * Later sentences are merged until they reach ``min_chars``: very short TTS chunks sound
   choppy, and by then the voice is already busy speaking the first one.
 * A newline always ends a sentence (lists, paragraphs).
@@ -38,7 +40,7 @@ class SentenceSplitter:
         *,
         min_chars: int = 40,
         max_chars: int = 220,
-        first_clause_chars: int | None = 24,
+        first_clause_chars: int | None = 12,
     ) -> None:
         if not 0 < min_chars < max_chars:
             msg = "require 0 < min_chars < max_chars"

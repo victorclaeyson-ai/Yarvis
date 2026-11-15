@@ -18,14 +18,16 @@ import asyncio
 import logging
 from contextlib import aclosing
 from dataclasses import dataclass
+from functools import partial
 from typing import TYPE_CHECKING, Protocol
 
 from yarvis.speech.sentences import SentenceSplitter, SpeechFilter
+from yarvis.speech.turn_taking import DEFAULT_WAKE_NAMES, strip_wake_phrase
 
 logger = logging.getLogger(__name__)
 
 if TYPE_CHECKING:
-    from collections.abc import Callable
+    from collections.abc import Callable, Iterable, Sequence
 
     from yarvis.agent.conversation import Conversation, Draft
     from yarvis.speech.base import AudioArray, AudioSink, SpeechToText, TextToSpeech
@@ -115,6 +117,7 @@ class Speculation:
         conversation: Conversation,
         audio: AudioArray,
         clock: Callable[[], float],
+        clean: Callable[[str], str] = str.strip,
     ) -> None:
         self.started = clock()
         self.transcribed: float | None = None
@@ -123,10 +126,11 @@ class Speculation:
         self._stt = stt
         self._conversation = conversation
         self._clock = clock
+        self._clean = clean
         self._task = asyncio.create_task(self._run(audio))
 
     async def _run(self, audio: AudioArray) -> str:
-        text = (await self._stt.transcribe(audio)).strip()
+        text = self._clean(await self._stt.transcribe(audio))
         self.transcribed = self._clock()
         if text:
             self.llm_started = self._clock()
@@ -165,18 +169,57 @@ class Turn:
         tts: TextToSpeech | None,
         speaker: AudioSink | None,
         observer: TurnObserver,
+        chime: AudioArray | None = None,
+        names: Sequence[str] = DEFAULT_WAKE_NAMES,
     ) -> None:
         self._conversation = conversation
         self._stt = stt
         self._tts = tts
         self._speaker = speaker
         self._observer = observer
+        self._chime = chime
+        self._names = tuple(names)
+        self.unanswered: str | None = None
+        """The request of a reply that was stopped before any of it was spoken."""
+        self.only_wake_phrase = False
+        """The latest transcript held nothing but "Hey Yarvis" (the user wants attention)."""
+        self._phrases: dict[str, AudioArray] = {}
         # One time source for every timestamp, shared with the conversation's drafts.
         self._clock = conversation.clock
 
-    def speculate(self, audio: AudioArray) -> Speculation:
+    def speculate(
+        self, audio: AudioArray, *, woken: bool = False, preface: str = ""
+    ) -> Speculation:
         """Start transcribing and drafting a reply for ``audio`` right now."""
-        return Speculation(self._require_stt(), self._conversation, audio, self._clock)
+        clean = self._cleaner(woken=woken, preface=preface)
+        return Speculation(self._require_stt(), self._conversation, audio, self._clock, clean)
+
+    async def prepare(self, phrases: Iterable[str]) -> None:
+        """Synthesize fixed phrases ahead of time, so ``say`` can play them instantly."""
+        if self._tts is None:
+            return
+        for phrase in phrases:
+            if phrase not in self._phrases:
+                self._phrases[phrase] = await self._tts.synthesize(phrase)
+
+    async def say(self, phrase: str) -> None:
+        """Speak a fixed phrase (no Claude), e.g. a greeting; returns when it has been heard."""
+        if self._tts is None or self._speaker is None:
+            return
+        audio = self._phrases.get(phrase)
+        if audio is None:
+            audio = self._phrases[phrase] = await self._tts.synthesize(phrase)
+        try:
+            await self._speaker.play(audio)
+            await self._speaker.drain()
+        except asyncio.CancelledError:
+            self._silence()
+            raise
+
+    async def chime(self) -> None:
+        """Play the "I'm listening" sound (if there is a speaker and the chime is on)."""
+        if self._speaker is not None and self._chime is not None:
+            await self._speaker.play(self._chime)
 
     async def from_audio(
         self,
@@ -185,12 +228,18 @@ class Turn:
         speech_end: float,
         turn_detected: float,
         speculation: Speculation | None = None,
+        woken: bool = False,
+        preface: str = "",
     ) -> TurnResult | None:
         """Reply to ``audio``. Returns None if nothing intelligible was said.
 
         If ``speculation`` was started for this same audio during the pause, its transcript
-        and draft reply are used instead of starting from scratch.
+        and draft reply are used instead of starting from scratch. ``woken`` means the audio
+        starts with the wake word's pre-roll, so "Hey Yarvis" is cut from the transcript.
+        ``preface`` is an earlier request that was never answered (see ``unanswered``); the
+        new words are added to it.
         """
+        self.unanswered = None
         timings = TurnTimings(speech_end=speech_end, turn_detected=turn_detected)
         draft: Draft | None = None
         if speculation is not None:
@@ -203,7 +252,7 @@ class Turn:
         else:
             stt = self._require_stt()
             timings.stt_started = self._clock()
-            transcript = (await stt.transcribe(audio)).strip()
+            transcript = self._cleaner(woken=woken, preface=preface)(await stt.transcribe(audio))
             timings.transcribed = self._clock()
         if not transcript:
             return None
@@ -211,8 +260,24 @@ class Turn:
 
     async def from_text(self, text: str) -> TurnResult:
         """Reply to typed text."""
+        self.unanswered = None
         now = self._clock()
         return await self._reply(text.strip(), TurnTimings(transcribed=now))
+
+    def retract(self, text: str) -> None:
+        """Forget an exchange the user never heard (see ``Conversation.retract``)."""
+        self._conversation.retract(text)
+
+    def _cleaner(self, *, woken: bool, preface: str = "") -> Callable[[str], str]:
+        """Transcript clean-up: drop the wake phrase so only the request reaches Claude."""
+        strip = partial(strip_wake_phrase, anywhere=woken, names=self._names)
+
+        def clean(text: str) -> str:
+            request = strip(text)
+            self.only_wake_phrase = bool(text.strip()) and not request
+            return f"{preface} {request}".strip() if preface else request
+
+        return clean
 
     def _require_stt(self) -> SpeechToText:
         if self._stt is None:
@@ -227,6 +292,7 @@ class Turn:
             timings.llm_started = self._clock()
             draft = self._conversation.draft(transcript)
         self._observer.on_transcript(transcript)
+        self.unanswered = transcript
         sentences: asyncio.Queue[str | None] = asyncio.Queue()
         parts: list[str] = []
         try:
@@ -244,6 +310,7 @@ class Turn:
             raise
         finally:
             draft.discard()  # no-op if finished; stops generation if we were interrupted
+        self.unanswered = None
         timings.finished = self._clock()
         logger.info(
             "Turn: %s ms to first word (%s; end of turn %s, stt %s, llm %s, tts %s)",
@@ -294,6 +361,7 @@ class Turn:
             audio = await self._tts.synthesize(speakable)
             if timings.first_audio is None:
                 timings.first_audio = self._clock()
+                self.unanswered = None
                 self._observer.on_audio_started()
             await self._speaker.play(audio)
 

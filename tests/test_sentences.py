@@ -39,6 +39,13 @@ def test_first_clause_is_emitted_at_a_comma_when_long_enough() -> None:
     assert splitter.flush() == "as usual for November."
 
 
+def test_a_short_opening_clause_is_spoken_first() -> None:
+    splitter = SentenceSplitter()
+    assert splitter.feed("Right now in Leuven, it's grey") == ["Right now in Leuven,"]
+    assert splitter.feed(" and drizzly. ") == []  # later sentences are merged
+    assert splitter.flush() == "it's grey and drizzly."
+
+
 def test_short_first_clauses_wait_for_more_text() -> None:
     splitter = SentenceSplitter()
     assert splitter.feed("Well, ") == []

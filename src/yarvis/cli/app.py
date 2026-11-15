@@ -24,12 +24,14 @@ from yarvis.doctor import CheckResult, DoctorContext, Status, has_failures, run_
 from yarvis.log import configure_logging
 from yarvis.models import (
     KOKORO_FILES,
+    WAKE_WORD_FILES,
     WHISPER_APPROX_MB,
     ModelFile,
     ModelIntegrityError,
     download,
     kokoro_dir,
     missing,
+    wake_word_dir,
     whisper_present,
 )
 from yarvis.paths import AppPaths
@@ -253,10 +255,19 @@ def run(
     yes: Annotated[
         bool, typer.Option("--yes", "-y", help="Download missing models without asking.")
     ] = False,
+    no_wake_word: Annotated[
+        bool, typer.Option("--no-wake-word", help="Don't listen for “Hey Yarvis” this time.")
+    ] = False,
 ) -> None:
     """Start a conversation with Yarvis in the terminal."""
     services = _services(ctx)
-    config, key = _prepare(services, voice_input=not text, voice_output=not mute, assume_yes=yes)
+    config, key = _prepare(
+        services,
+        voice_input=not text,
+        voice_output=not mute,
+        assume_yes=yes,
+        wake_word=not no_wake_word,
+    )
     cache_dir = services.paths.cache_dir
     ui = ConsoleUi(services.console, name=config.assistant.name)
     services.console.print(f"[bold]{config.assistant.name}[/] is ready. Say hello!")
@@ -289,10 +300,19 @@ def app_command(
     yes: Annotated[
         bool, typer.Option("--yes", "-y", help="Download missing models without asking.")
     ] = False,
+    no_wake_word: Annotated[
+        bool, typer.Option("--no-wake-word", help="Don't listen for “Hey Yarvis” this time.")
+    ] = False,
 ) -> None:
     """Open the Yarvis app window."""
     services = _services(ctx)
-    config, key = _prepare(services, voice_input=not text, voice_output=not mute, assume_yes=yes)
+    config, key = _prepare(
+        services,
+        voice_input=not text,
+        voice_output=not mute,
+        assume_yes=yes,
+        wake_word=not no_wake_word,
+    )
     services.console.print(f"Opening [bold]{config.assistant.name}[/]… (close the window to quit)")
     try:
         services.app_runner(
@@ -312,10 +332,21 @@ def app_command(
 
 
 def _prepare(
-    services: Services, *, voice_input: bool, voice_output: bool, assume_yes: bool
+    services: Services,
+    *,
+    voice_input: bool,
+    voice_output: bool,
+    assume_yes: bool,
+    wake_word: bool = True,
 ) -> tuple[Config, ResolvedSecret]:
-    """Checks shared by ``run`` and ``app``: config, logging, API key, models."""
+    """Checks shared by ``run`` and ``app``: config, logging, API key, models.
+
+    Returns the configuration as it will actually run (e.g. without the wake word if its
+    model is unavailable).
+    """
     config = _load_config_or_exit(services)
+    if not (wake_word and voice_input):
+        config = _without_wake_word(config)
     services.paths.ensure_all()
     configure_logging(
         level=config.logging.level,
@@ -329,6 +360,12 @@ def _prepare(
         _fail(services, "No Anthropic API key found. Run: yarvis key set anthropic")
     if voice_output and not _ensure_kokoro(services, assume_yes=assume_yes):
         _fail(services, "Yarvis cannot speak without its voice model. Use --mute to skip it.")
+    if config.voice.wake_word and not _ensure_wake_word(services, assume_yes=assume_yes):
+        services.console.print(
+            "[yellow]Continuing without the wake word: press Space (app) or Enter (terminal) "
+            "to talk.[/]"
+        )
+        config = _without_wake_word(config)
     if voice_input and not whisper_present(services.paths.cache_dir, config.voice.stt_model):
         size = WHISPER_APPROX_MB[config.voice.stt_model]
         services.console.print(
@@ -417,17 +454,24 @@ def models_download(
     ctx: typer.Context,
     yes: Annotated[bool, typer.Option("--yes", "-y", help="Do not ask for confirmation.")] = False,
 ) -> None:
-    """Download the voice and speech recognition models ahead of time."""
+    """Download the voice, wake-word and speech recognition models ahead of time."""
     services = _services(ctx)
     config = _load_config_or_exit(services)
     services.paths.ensure_all()
     if not _ensure_kokoro(services, assume_yes=yes):
+        raise typer.Exit(code=1)
+    if config.voice.wake_word and not _ensure_wake_word(services, assume_yes=yes):
         raise typer.Exit(code=1)
     if not whisper_present(services.paths.cache_dir, config.voice.stt_model):
         services.console.print(f"Downloading Whisper {config.voice.stt_model}…")
         stt = services.backends().stt(config, services.paths.cache_dir)
         stt.load()
     services.console.print("[green]All speech models are ready.[/]")
+
+
+def _without_wake_word(config: Config) -> Config:
+    voice = config.voice.model_copy(update={"wake_word": False})
+    return config.model_copy(update={"voice": voice})
 
 
 def _ensure_kokoro(services: Services, *, assume_yes: bool) -> bool:
@@ -439,6 +483,25 @@ def _ensure_kokoro(services: Services, *, assume_yes: bool) -> bool:
     services.console.print(f"Yarvis needs its voice model (Kokoro, {megabytes:.0f} MB, one time).")
     if not assume_yes and not typer.confirm("Download it now?", default=True):
         return False
+    return _download(services, todo, directory)
+
+
+def _ensure_wake_word(services: Services, *, assume_yes: bool) -> bool:
+    directory = wake_word_dir(services.paths.cache_dir)
+    todo = missing(WAKE_WORD_FILES, directory)
+    if not todo:
+        return True
+    megabytes = max(1, round(sum(model.size for model in todo) / 1_000_000))
+    services.console.print(
+        f"The “Hey Yarvis” wake word needs a small model (openWakeWord, {megabytes} MB, one "
+        "time). It is free for personal, non-commercial use (CC BY-NC-SA 4.0)."
+    )
+    if not assume_yes and not typer.confirm("Download it now?", default=True):
+        return False
+    return _download(services, todo, directory)
+
+
+def _download(services: Services, todo: list[ModelFile], directory: Path) -> bool:
     try:
         with Progress(
             TextColumn("{task.description}"),

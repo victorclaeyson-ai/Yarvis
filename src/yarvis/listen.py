@@ -116,14 +116,19 @@ async def listen(
         clock=clock,
     )
     iterator = aiter(frames)
-    while (frame := await _next_frame(iterator)) is not None:
+    while (frame := await read_frame(iterator)) is not None:
         finished, utterance = session.push(frame)
         if finished:
             return utterance
     return None
 
 
-async def _next_frame(iterator: AsyncIterator[AudioArray]) -> AudioArray | None:
+async def read_frame(iterator: AsyncIterator[AudioArray]) -> AudioArray | None:
+    """Next microphone frame, or None when the stream ends.
+
+    Raises:
+        MicrophoneStalledError: If no audio arrives for ``STALLED_MIC_SECONDS``.
+    """
     try:
         async with asyncio.timeout(STALLED_MIC_SECONDS):
             return await anext(iterator)
@@ -132,6 +137,34 @@ async def _next_frame(iterator: AsyncIterator[AudioArray]) -> AudioArray | None:
     except TimeoutError:
         logger.warning("No audio from the microphone for %.1f s", STALLED_MIC_SECONDS)
         raise MicrophoneStalledError from None
+
+
+class SignalCheck:
+    """Detects a microphone that delivers pure digital silence (a permission problem)."""
+
+    def __init__(self, frame_ms: int, clock: Callable[[], float] = time.monotonic) -> None:
+        self._limit = max(1, -(-SILENT_MIC_MS // frame_ms))  # rounded up
+        self._silent_frames = 0
+        self._heard_signal = False
+        self._clock = clock
+        self._opened = clock()
+
+    def __call__(self, frame: AudioArray) -> None:
+        """Check one frame.
+
+        Raises:
+            MicrophoneSilentError: After ``SILENT_MIC_MS`` of exact zeros.
+        """
+        if self._heard_signal:
+            return
+        if frame.any():
+            self._heard_signal = True
+            waited = (self._clock() - self._opened) * 1000
+            logger.info("Microphone delivering audio after %d ms", waited)
+            return
+        self._silent_frames += 1
+        if self._silent_frames >= self._limit:
+            raise MicrophoneSilentError
 
 
 class _Session:
@@ -153,10 +186,7 @@ class _Session:
         self._on_level = on_level
         self._hooks = hooks
         self._clock = clock
-        self._silent_limit = settings.frames(SILENT_MIC_MS)
-        self._silent_frames = 0
-        self._heard_signal = False
-        self._opened = clock()
+        self._check_signal = SignalCheck(settings.frame_ms, clock)
         vad.reset()
 
     def push(self, frame: AudioArray) -> tuple[bool, Utterance | None]:
@@ -179,18 +209,6 @@ class _Session:
             return True, None
         self._notify(event)
         return False, None
-
-    def _check_signal(self, frame: AudioArray) -> None:
-        if self._heard_signal:
-            return
-        if frame.any():
-            self._heard_signal = True
-            waited = (self._clock() - self._opened) * 1000
-            logger.info("Microphone delivering audio after %d ms", waited)
-            return
-        self._silent_frames += 1
-        if self._silent_frames >= self._silent_limit:
-            raise MicrophoneSilentError
 
     def _notify(self, event: EndpointEvent) -> None:
         if event is EndpointEvent.SPEECH_STARTED:

@@ -26,7 +26,8 @@ but nothing useful happened during it.
    consumed. Discarded drafts never enter the conversation, so the model never sees a
    question the user did not finish. Interrupted replies remember what was actually heard.
 3. **Speak from the first clause.** The first chunk sent to the voice ends at the first
-   comma/colon/dash once it is at least 24 characters long.
+   comma/colon/dash once it is at least 24 characters long (12 since
+   [ADR 0006](0006-wake-word-and-barge-in.md)).
 4. **Warm everything.** Each engine runs once at startup; the HTTPS connection to Claude is
    kept alive for 5 minutes (the client default was 5 seconds) and refreshed when the user
    starts speaking.
@@ -35,8 +36,9 @@ but nothing useful happened during it.
    ("and", "the", "um", a trailing comma or "…"), the endpointer waits up to
    `thinking_pause_ms` (2 s) instead of `end_of_turn_ms` (0.9 s). The heuristic is
    deliberately conservative: when in doubt, answer.
-6. **Follow-up listening.** After a spoken reply, Yarvis listens for `follow_up_s` (5 s)
-   without a key press, so a conversation flows; silence ends it quietly.
+6. **Follow-up listening.** After a spoken reply, Yarvis listens for `follow_up_s` (5 s;
+   15 s since [ADR 0006](0006-wake-word-and-barge-in.md)) without a key press, so a
+   conversation flows; silence ends it quietly.
 7. **Measure, don't guess.** `yarvis bench` measures every stage on the user's machine,
    including Whisper on the Apple GPU (`stt_device = "mps"`, experimental, with automatic
    fallback to the CPU).

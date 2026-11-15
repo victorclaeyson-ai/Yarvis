@@ -104,8 +104,8 @@ Defaults are chosen on paper; **every row marked ⚖ is benchmarked in Phase 1**
 | Component | Default | Alternatives | Rationale |
 |---|---|---|---|
 | Audio I/O | `sounddevice` (PortAudio) | native CoreAudio via PyObjC | Cross-platform, mature |
-| Echo cancellation ⚖ | macOS Voice Processing I/O; Linux PipeWire `echo-cancel` | WebRTC APM bindings, headphones-only mode | Barge-in on laptop speakers is impossible without AEC |
-| Wake word | openWakeWord, custom "Hey Yarvis" model | Push-to-talk hotkey | Open, local, trainable on synthetic data |
+| Echo cancellation ⚖ | Not yet: barge-in by voice on headphones, by wake word on speakers (ADR 0006) | macOS Voice Processing I/O; Linux PipeWire `echo-cancel`; WebRTC APM | Voice barge-in on laptop speakers needs AEC; the wake word works without it |
+| Wake word | openWakeWord "hey jarvis" model (also hears "Hey Yarvis"), own ONNX inference (ADR 0006) | Custom "Hey Yarvis" model; push-to-talk hotkey | Local, ~2 % of one core; pre-trained models are CC BY-NC-SA, so they are downloaded, not bundled |
 | VAD | Silero VAD (ONNX) | WebRTC VAD | Accurate, tiny, fast |
 | Turn detection ⚖ | Silero silence threshold + Smart Turn model | Silence threshold only | Fewer premature cut-offs → can use a shorter silence window |
 | STT ⚖ | macOS: MLX Whisper / Parakeet-MLX; Linux: faster-whisper | Moonshine | Fastest option per platform; all local |
@@ -175,7 +175,7 @@ class LLMProvider(Protocol):
 | T6 | Secret leakage | API key in logs, config committed to git, key passed to a tool | OS keychain, log redaction, secrets never in tool context (§5.5) |
 | T7 | Memory poisoning | Injected content makes Yarvis "remember" a false instruction | Memory writes from tainted turns require confirmation; memories stored as data, never as instructions |
 | T8 | Supply chain | Malicious dependency, tampered model weights | Locked hashes, scanning, pinned model checksums, no pickle (§5.7) |
-| T9 | Privacy leak of audio | Recordings stored or uploaded | Audio never persisted or uploaded by default; pre-wake buffer discarded (§5.8) |
+| T9 | Privacy leak of audio | Recordings stored or uploaded | Audio never persisted or uploaded by default; the 2 s pre-wake buffer only reaches the local speech recognizer, and everything up to the wake phrase is cut from the transcript (§5.8) |
 
 ### 5.3 Permission tiers and the confirmation gate
 
@@ -340,9 +340,9 @@ would block a relay-based remote mode later. No multi-tenant work before launch.
 
 ## 10. Risks and open questions
 
-1. **Echo cancellation on laptop speakers** — the biggest technical risk for barge-in. Fallback: headphones mode plus satellite (physically separated mic and speaker).
+1. **Echo cancellation on laptop speakers** — the biggest technical risk for barge-in. Current approach (ADR 0006): voice barge-in on headphones, wake-word barge-in on speakers; AEC and the satellite (physically separated mic and speaker) would allow voice barge-in everywhere.
 2. **Cloud LLM latency variance** — may push p95 well above target. Mitigations: fast-tier model, prompt caching, speculative turns.
-3. **Custom wake-word quality** — synthetic training data may need real recordings to hit the false-accept target.
+3. **Wake-word licence and quality** — the pre-trained openWakeWord models are non-commercial (CC BY-NC-SA 4.0). A commercial edition needs a custom "Hey Yarvis" model; synthetic training data may need real recordings to hit the false-accept target.
 4. **macOS microphone permissions** for a CLI tool (prompts are attributed to the terminal app) — needs clear setup docs.
 5. **Model download size** for first run — keep the default set small; download on demand with progress and checksums.
 6. **Satellite channel protocol** (TLS-PSK vs Noise) — decide in Phase 4 ADR.

@@ -133,6 +133,17 @@ class Conversation:
             async for delta in deltas:
                 yield delta
 
+    def retract(self, user_text: str) -> bool:
+        """Forget the last exchange if it answered ``user_text``; True if one was removed.
+
+        Used when a reply was cut off before the user heard any of it: the question is then
+        asked again together with what the user added, and must not appear twice.
+        """
+        if len(self._history) >= _EXCHANGE and self._history[-_EXCHANGE].text == user_text:
+            del self._history[-_EXCHANGE:]
+            return True
+        return False
+
     def remember(self, user_text: str, reply: str) -> None:
         """Record a finished exchange (the hook point for long-term memory)."""
         self._history.extend((Message("user", user_text), Message("assistant", reply)))

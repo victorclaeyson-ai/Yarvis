@@ -126,3 +126,35 @@ def test_thinking_pause_must_not_be_shorter_than_end_of_turn() -> None:
         parse_config("[voice]\nend_of_turn_ms = 1500\nthinking_pause_ms = 1000\n")
     config = parse_config("[voice]\nfollow_up_s = 0\n")
     assert config.voice.follow_up_s == 0
+
+
+def test_wake_word_and_barge_in_settings() -> None:
+    voice = Config().voice
+    assert voice.wake_word and voice.wake_chime
+    assert voice.wake_word_threshold == 0.5
+    assert voice.barge_in == "auto"
+    custom = parse_config(
+        '[voice]\nwake_word = false\nbarge_in = "voice"\nwake_word_threshold = 0.7'
+    )
+    assert not custom.voice.wake_word
+    assert custom.voice.barge_in == "voice"
+    with pytest.raises(ConfigError, match="barge_in"):
+        parse_config('[voice]\nbarge_in = "always"')
+    with pytest.raises(ConfigError, match="wake_word_threshold"):
+        parse_config("[voice]\nwake_word_threshold = 1.0")
+
+
+def test_user_name() -> None:
+    assert Config().assistant.user_name is None
+    for name in ("Victor", "Jean-Luc", "Anne Marie", "O'Brien", "Zoë"):
+        assert parse_config(f'[assistant]\nuser_name = "{name}"').assistant.user_name == name
+    for bad in ("x1", " ", "Victor; rm -rf", "a" * 41):
+        with pytest.raises(ConfigError, match="user_name"):
+            parse_config(f'[assistant]\nuser_name = "{bad}"')
+
+
+def test_follow_up_window() -> None:
+    assert Config().voice.follow_up_s == 15
+    assert parse_config("[voice]\nfollow_up_s = 0").voice.follow_up_s == 0
+    with pytest.raises(ConfigError, match="follow_up_s"):
+        parse_config("[voice]\nfollow_up_s = 61")

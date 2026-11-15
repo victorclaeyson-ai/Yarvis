@@ -5,7 +5,7 @@ from typing import TYPE_CHECKING, Any
 
 import pytest
 
-from yarvis.audio.devices import AudioBackendError, SoundDeviceProbe
+from yarvis.audio.devices import AudioBackendError, SoundDeviceProbe, looks_like_headphones
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -106,3 +106,22 @@ def test_malformed_device_info_is_tolerated() -> None:
     assert device.index == -1
     assert device.max_input_channels == 0
     assert device.default_samplerate == 0.0
+
+
+@pytest.mark.parametrize(
+    ("name", "expected"),
+    [
+        ("AirPods Pro", True),
+        ("Victor’s AirPods Max", True),  # noqa: RUF001 - macOS uses a typographic apostrophe
+        ("External Headphones", True),
+        ("WH-1000XM5", True),
+        ("Jabra Evolve2 65 Headset", True),
+        ("Galaxy Buds2", True),
+        ("MacBook Pro Speakers", False),
+        ("DELL U2723QE", False),
+        ("", False),
+        (None, False),
+    ],
+)
+def test_looks_like_headphones(name: str | None, expected: bool) -> None:
+    assert looks_like_headphones(name) is expected

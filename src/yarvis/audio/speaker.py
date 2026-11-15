@@ -2,7 +2,7 @@
 
 Audio is appended to a thread-safe buffer; the PortAudio callback pulls exactly as many
 samples as the device asks for. This keeps sentences flowing without gaps and makes
-``stop()`` immediate, which barge-in (Phase 1, PR 2) relies on.
+``stop()`` immediate, which barge-in relies on.
 """
 
 from __future__ import annotations
@@ -91,6 +91,8 @@ class Speaker:
         self._idle = asyncio.Event()
         self._loop: asyncio.AbstractEventLoop | None = None
         self._stream: Any = None
+        self.device_name: str | None = None
+        """Name of the device actually playing (known once open)."""
 
     async def __aenter__(self) -> Self:
         sd = self._loader()
@@ -108,6 +110,7 @@ class Speaker:
         except sd.PortAudioError as exc:
             msg = f"cannot open the speaker: {exc}"
             raise AudioBackendError(msg) from exc
+        self.device_name = _device_name(sd, self._stream)
         return self
 
     async def __aexit__(
@@ -149,3 +152,12 @@ class Speaker:
             loop = self._loop
             if loop is not None and not loop.is_closed():
                 loop.call_soon_threadsafe(self._idle.set)
+
+
+def _device_name(sd: ModuleType, stream: Any) -> str | None:  # noqa: ANN401 - untyped library
+    """Name of the device ``stream`` plays on; None if PortAudio cannot tell."""
+    try:
+        info: Any = sd.query_devices(stream.device)
+        return str(info["name"])
+    except (sd.PortAudioError, ValueError, TypeError, KeyError, AttributeError):
+        return None

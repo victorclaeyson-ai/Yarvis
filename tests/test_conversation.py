@@ -114,3 +114,19 @@ async def test_stopping_mid_reply_remembers_what_was_heard() -> None:
     assert await anext(stream) == "One. "
     await stream.aclose()
     assert conversation.history[-1] == Message("assistant", "One.")
+
+
+def test_retract_forgets_only_a_matching_last_exchange() -> None:
+    conversation = Conversation(FakeLLM(), system_prompt=lambda: "S", max_tokens=8)
+    assert not conversation.retract("anything")
+    conversation.remember("first", "one")
+    conversation.remember("second", "two")
+    assert not conversation.retract("first")  # not the last exchange
+    assert conversation.retract("second")
+    assert [m.text for m in conversation.history] == ["first", "one"]
+
+
+def test_system_prompt_knows_who_it_is_talking_to() -> None:
+    moment = datetime(2026, 11, 14, 13, 5, tzinfo=UTC)
+    assert "talking to Victor" in system_prompt("Yarvis", moment, user_name="Victor")
+    assert "talking to" not in system_prompt("Yarvis", moment)

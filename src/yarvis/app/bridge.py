@@ -178,12 +178,16 @@ class AppUi:
         """Neutral status text."""
         self._emit({"type": "notice", "text": message})
 
-    def ready(self, *, voice: bool) -> None:
+    def ready(self, *, voice: bool, wake_word: bool = False) -> None:
         """Waiting for input."""
-        self._emit({"type": "state", "state": "idle", "voice": voice})
+        self._emit({"type": "state", "state": "idle", "voice": voice, "wake": wake_word})
+
+    def woke(self) -> None:
+        """The wake word was heard."""
+        self._emit({"type": "wake"})
 
     def listening(self) -> None:
-        """The microphone is open."""
+        """Capturing a request."""
         self._frames = 0
         self._emit({"type": "state", "state": "listening"})
 
@@ -220,6 +224,10 @@ class AppUi:
             }
         )
 
+    def said(self, text: str) -> None:
+        """A fixed phrase, such as a greeting."""
+        self._emit({"type": "said", "text": text})
+
     def nothing_heard(self) -> None:
         """No speech detected."""
         self._emit({"type": "notice", "text": "Didn't catch that."})
@@ -231,3 +239,7 @@ class AppUi:
     def stopped(self) -> None:
         """The user stopped the current command."""
         self._emit({"type": "stopped"})
+
+    def interrupted(self) -> None:
+        """The user talked over the reply."""
+        self._emit({"type": "interrupted"})

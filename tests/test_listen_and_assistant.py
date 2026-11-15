@@ -6,7 +6,7 @@ from typing import TYPE_CHECKING
 import numpy as np
 import pytest
 
-from fakes import FakeLLM, FakeSpeaker, FakeSTT, FakeTTS, TickingClock
+from fakes import FakeEars, FakeLLM, FakeSpeaker, FakeSTT, FakeTTS, TickingClock
 from test_speech_engines import frames, speech_clip
 from yarvis.agent.conversation import Conversation
 from yarvis.assistant import Assistant, AssistantControls, TurnTaking
@@ -89,8 +89,17 @@ class RecordingUi:
         self.events: list[str] = []
         self.levels: list[float] = []
 
-    def ready(self, *, voice: bool) -> None:
-        self.events.append(f"ready:{voice}")
+    def ready(self, *, voice: bool, wake_word: bool = False) -> None:
+        self.events.append(f"ready:{voice}" + (":wake" if wake_word else ""))
+
+    def woke(self) -> None:
+        self.events.append("woke")
+
+    def interrupted(self) -> None:
+        self.events.append("interrupted")
+
+    def said(self, text: str) -> None:
+        self.events.append(f"said:{text}")
 
     def listening(self) -> None:
         self.events.append("listening")
@@ -156,7 +165,7 @@ async def test_enter_listens_and_text_is_sent_directly() -> None:
         turn=make_turn(llm),
         lines=lines("\n", "hello\n", "q\n", "never\n"),
         ui=ui,
-        listen=fake_listen,
+        ears=FakeEars(fake_listen),
     )
     await assistant.run()
     assert heard == [False, True]  # the key press, then the automatic follow-up
@@ -179,7 +188,7 @@ async def test_nothing_heard_cases() -> None:
         return None if follow_up else results.pop(0)
 
     turn = make_turn(FakeLLM(), stt_text="  ")
-    await Assistant(turn=turn, lines=lines("", ""), ui=ui, listen=fake_listen).run()
+    await Assistant(turn=turn, lines=lines("", ""), ui=ui, ears=FakeEars(fake_listen)).run()
     assert ui.events.count("nothing") == 2
 
 
@@ -191,7 +200,7 @@ async def test_errors_are_shown_and_the_loop_continues() -> None:
 
     llm = FakeLLM([], error=LLMError("out of credits"))
     assistant = Assistant(
-        turn=make_turn(llm), lines=lines("", "hello", "exit"), ui=ui, listen=broken_listen
+        turn=make_turn(llm), lines=lines("", "hello", "exit"), ui=ui, ears=FakeEars(broken_listen)
     )
     await assistant.run()
     assert "error:mic unplugged" in ui.events
@@ -200,7 +209,7 @@ async def test_errors_are_shown_and_the_loop_continues() -> None:
 
 async def test_text_only_mode_ignores_empty_lines() -> None:
     ui = RecordingUi()
-    await Assistant(turn=make_turn(FakeLLM()), lines=lines("", "  "), ui=ui, listen=None).run()
+    await Assistant(turn=make_turn(FakeLLM()), lines=lines("", "  "), ui=ui, ears=None).run()
     assert ui.events == ["ready:False", "ready:False", "ready:False"]
 
 
@@ -234,7 +243,7 @@ async def test_stop_cancels_listening_and_the_loop_continues() -> None:
     controls = AssistantControls()
     controls.stop()  # nothing attached yet: harmless
     assistant = Assistant(
-        turn=make_turn(FakeLLM(["Hi."])), lines=commands(), ui=ui, listen=endless_listen
+        turn=make_turn(FakeLLM(["Hi."])), lines=commands(), ui=ui, ears=FakeEars(endless_listen)
     )
     controls.attach(assistant)
     runner = asyncio.create_task(assistant.run())
@@ -249,7 +258,7 @@ async def test_stop_cancels_listening_and_the_loop_continues() -> None:
 
 
 async def test_stop_without_a_running_command_is_harmless() -> None:
-    assistant = Assistant(turn=make_turn(FakeLLM()), lines=lines(), ui=RecordingUi(), listen=None)
+    assistant = Assistant(turn=make_turn(FakeLLM()), lines=lines(), ui=RecordingUi(), ears=None)
     assistant.stop()  # not running yet
     await assistant.run()
     assistant.stop()  # loop finished
@@ -265,7 +274,9 @@ async def test_unexpected_errors_are_reported_and_the_loop_continues(
         raise ZeroDivisionError
 
     llm = FakeLLM(["Still here."])
-    await Assistant(turn=make_turn(llm), lines=lines("", "hi"), ui=ui, listen=buggy_listen).run()
+    await Assistant(
+        turn=make_turn(llm), lines=lines("", "hi"), ui=ui, ears=FakeEars(buggy_listen)
+    ).run()
     assert any(e.startswith("error:Something went wrong (ZeroDivisionError)") for e in ui.events)
     assert "reply:Still here." in ui.events
     assert "Unexpected error" in caplog.text
@@ -280,7 +291,7 @@ async def test_cancelling_the_whole_loop_cancels_the_command() -> None:
         return None  # pragma: no cover
 
     assistant = Assistant(
-        turn=make_turn(FakeLLM()), lines=lines(""), ui=RecordingUi(), listen=endless_listen
+        turn=make_turn(FakeLLM()), lines=lines(""), ui=RecordingUi(), ears=FakeEars(endless_listen)
     )
     runner = asyncio.create_task(assistant.run())
     await asyncio.wait_for(started.wait(), 1)
@@ -305,7 +316,7 @@ async def test_assistant_speculates_on_pauses_and_discards_on_resume() -> None:
 
     llm = FakeLLM(["discarded draft"], ["The real answer."])
     turn = make_turn(llm, stt_text="the full question")
-    await Assistant(turn=turn, lines=lines(""), ui=ui, listen=talker).run()
+    await Assistant(turn=turn, lines=lines(""), ui=ui, ears=FakeEars(talker)).run()
     stt = turn._stt  # pyright: ignore[reportPrivateUsage]
     assert isinstance(stt, FakeSTT)
     assert stt.received == [8_000, 12_000]  # one speculation per pause, none after
@@ -325,7 +336,11 @@ async def test_speculation_can_be_disabled() -> None:
 
     turn = make_turn(FakeLLM(["ok"]))
     await Assistant(
-        turn=turn, lines=lines(""), ui=ui, listen=talker, turn_taking=TurnTaking(speculate=False)
+        turn=turn,
+        lines=lines(""),
+        ui=ui,
+        ears=FakeEars(talker),
+        turn_taking=TurnTaking(speculate=False),
     ).run()
     stt = turn._stt  # pyright: ignore[reportPrivateUsage]
     assert isinstance(stt, FakeSTT)
@@ -365,7 +380,7 @@ async def test_unfinished_sentences_get_more_time() -> None:
     controls: list[FakeControl] = []
     turn = make_turn(FakeLLM(["Go on."]), stt_text="So I was thinking about the")
     await Assistant(
-        turn=turn, lines=lines(""), ui=RecordingUi(), listen=pausing_talker(controls)
+        turn=turn, lines=lines(""), ui=RecordingUi(), ears=FakeEars(pausing_talker(controls))
     ).run()
     assert controls[0].required == [2_000]
 
@@ -374,7 +389,7 @@ async def test_finished_sentences_get_the_normal_wait() -> None:
     controls: list[FakeControl] = []
     turn = make_turn(FakeLLM(["Noon."]), stt_text="What time is it?")
     await Assistant(
-        turn=turn, lines=lines(""), ui=RecordingUi(), listen=pausing_talker(controls)
+        turn=turn, lines=lines(""), ui=RecordingUi(), ears=FakeEars(pausing_talker(controls))
     ).run()
     assert controls[0].required == []
 
@@ -386,7 +401,7 @@ async def test_adaptive_waiting_can_be_disabled() -> None:
         turn=turn,
         lines=lines(""),
         ui=RecordingUi(),
-        listen=pausing_talker(controls),
+        ears=FakeEars(pausing_talker(controls)),
         turn_taking=TurnTaking(thinking_pause_ms=None),
     )
     await assistant.run()
@@ -403,7 +418,7 @@ async def test_follow_up_continues_the_conversation_without_a_key_press() -> Non
         return answers.pop(0)
 
     llm = FakeLLM(["First answer."], ["Second answer."])
-    await Assistant(turn=make_turn(llm), lines=lines(""), ui=ui, listen=talker).run()
+    await Assistant(turn=make_turn(llm), lines=lines(""), ui=ui, ears=FakeEars(talker)).run()
     assert calls == [False, True, True]
     assert ui.events.count("listening") == 3
     assert "reply:First answer." in ui.events
@@ -424,8 +439,8 @@ async def test_follow_up_can_be_disabled() -> None:
         turn=turn,
         lines=lines(""),
         ui=RecordingUi(),
-        listen=talker,
-        turn_taking=TurnTaking(follow_up=False),
+        ears=FakeEars(talker),
+        turn_taking=TurnTaking(follow_up_s=0),
     )
     await assistant.run()
     assert calls == [False]
@@ -439,6 +454,9 @@ async def test_typed_messages_do_not_trigger_follow_up() -> None:
         return None  # pragma: no cover
 
     await Assistant(
-        turn=make_turn(FakeLLM(["Hi."])), lines=lines("hello"), ui=RecordingUi(), listen=talker
+        turn=make_turn(FakeLLM(["Hi."])),
+        lines=lines("hello"),
+        ui=RecordingUi(),
+        ears=FakeEars(talker),
     ).run()
     assert calls == []

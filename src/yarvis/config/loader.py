@@ -24,6 +24,7 @@ DEFAULT_CONFIG_TOML: Final = """\
 
 [assistant]
 name = "Yarvis"
+# user_name = "Victor"      # what Yarvis calls you ("Good evening, Victor.")
 language = "en"
 
 [llm]
@@ -41,8 +42,14 @@ voice = "bm_george"         # British male. Try "af_heart", "am_michael", "bf_em
 speech_rate = 1.0
 end_of_turn_ms = 900        # silence that ends a sentence that sounds finished
 thinking_pause_ms = 2000    # ...and one that sounds unfinished ("and", "um", "the")
-follow_up_s = 5             # keep listening after a reply, no key press needed (0 = off)
+follow_up_s = 15            # keep the conversation open after a reply (0 = off);
+                            # "thanks" or "that's all" ends it sooner
 speculative = true          # start working during pauses: much faster, costs a few extra tokens
+wake_word = true            # "Hey Yarvis", detected on this computer (the mic stays open)
+wake_word_threshold = 0.5   # higher = fewer accidental wake-ups, lower = wakes more easily
+wake_chime = true           # short sound when Yarvis wakes up
+barge_in = "auto"           # interrupt it mid-sentence: "voice" (headphones), "wake_word",
+                            # "auto" (voice on headphones, wake word on speakers) or "off"
 # input_device = "MacBook Air Microphone"
 # output_device = "MacBook Air Speakers"
 

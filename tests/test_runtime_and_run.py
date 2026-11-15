@@ -1,24 +1,29 @@
 from __future__ import annotations
 
+import asyncio
 import io
 from typing import TYPE_CHECKING, Self
 
+import numpy as np
 import pytest
 from pydantic import SecretStr
 from rich.console import Console
 
-from fakes import VALID_KEY, FakeKeyring, FakeLLM, FakeSTT, FakeTTS, Invoke
+from fakes import VALID_KEY, FakeKeyring, FakeLLM, FakeSTT, FakeTTS, FakeWakeWord, Invoke
 from test_listen_and_assistant import RecordingUi, lines
 from test_speech_engines import frames, speech_clip
+from test_wake_and_barge_in import EventUi
 from yarvis.cli.app import Services
 from yarvis.cli.ui import ConsoleUi, format_timings, stdin_lines
 from yarvis.config import Config
 from yarvis.models import (
     KOKORO_FILES,
+    WAKE_WORD_FILES,
     WHISPER_REVISIONS,
     ModelFile,
     ModelIntegrityError,
     kokoro_dir,
+    wake_word_dir,
     whisper_dir,
 )
 from yarvis.paths import is_private
@@ -51,11 +56,18 @@ class LoadableTTS(FakeTTS):
 
 
 class FakeMic:
-    def __init__(self) -> None:
+    def __init__(self, script: list[AudioArray] | None = None) -> None:
         self.opened = 0
+        self.flushes = 0
+        self._script = script
+        self._pending: list[AudioArray] = []
 
     async def __aenter__(self) -> Self:
         self.opened += 1
+        # The user asks one question; after that the microphone hears nothing (the stream
+        # ends), so a follow-up listen returns without speech.
+        first = self._script if self._script is not None else frames(speech_clip())
+        self._pending = list(first) if self.opened == 1 else []
         return self
 
     async def __aexit__(
@@ -66,20 +78,22 @@ class FakeMic:
     ) -> None:
         pass
 
-    def __aiter__(self) -> AsyncIterator[AudioArray]:
-        # The user asks one question; after that the microphone hears nothing (the stream
-        # ends), so a follow-up listen returns without speech.
-        speech = frames(speech_clip()) if self.opened == 1 else []
+    def __aiter__(self) -> Self:
+        return self
 
-        async def gen() -> AsyncIterator[AudioArray]:
-            for frame in speech:
-                yield frame
+    async def __anext__(self) -> AudioArray:
+        await asyncio.sleep(0)  # like real hardware: one frame at a time, safe to cancel
+        if not self._pending:
+            raise StopAsyncIteration
+        return self._pending.pop(0)
 
-        return gen()
+    def flush(self) -> None:
+        self.flushes += 1
 
 
 class FakeSink:
-    def __init__(self) -> None:
+    def __init__(self, device_name: str | None = None) -> None:
+        self.device_name = device_name
         self.played = 0
         self.closed = False
 
@@ -111,6 +125,7 @@ class FakeBackends:
         self.tts = LoadableTTS()
         self.mic = FakeMic()
         self.sink = FakeSink()
+        self.wake = FakeWakeWord()
         self.keys: list[str] = []
 
     def build(self) -> Backends:
@@ -125,7 +140,11 @@ class FakeBackends:
             vad=SileroVAD,
             microphone=lambda config: self.mic,
             speaker=lambda config, rate: self.sink,
+            wake_word=lambda config, cache: self.wake,
         )
+
+
+NO_WAKE_WORD = Config.model_validate({"voice": {"wake_word": False}})
 
 
 async def test_full_voice_turn_through_the_real_wiring(tmp_path: Path) -> None:
@@ -133,7 +152,7 @@ async def test_full_voice_turn_through_the_real_wiring(tmp_path: Path) -> None:
     ui = RecordingUi()
     loading: list[str] = []
     await run_assistant(
-        Config(),
+        NO_WAKE_WORD,
         api_key=SecretStr("k"),
         cache_dir=tmp_path,
         lines=lines("", "q"),
@@ -142,18 +161,55 @@ async def test_full_voice_turn_through_the_real_wiring(tmp_path: Path) -> None:
         on_loading=loading.append,
     )
     assert fakes.stt.loaded and fakes.tts.loaded
+    assert not fakes.wake.loaded
     assert loading == ["Loading speech models…", "Warming up…"]
     assert fakes.mic.opened == 2  # the question, then the follow-up window (silence)
     warm_up, *real = fakes.stt.received
     assert warm_up == 8_000  # half a second of silence at startup
     assert len(real) == 1  # the speculation during the final pause, reused at end of turn
     assert real[0] > 2 * 16_000
-    assert ui.events[:4] == ["ready:True", "listening", "speech", "you:hey yarvis what time is it"]
+    # "hey yarvis" is cut from the transcript: Claude only sees the request itself
+    assert ui.events[:4] == ["ready:True", "listening", "speech", "you:what time is it"]
     assert "reply:It is half past one." in ui.events
     assert fakes.tts.spoken == ["Ready.", "It is half past one."]
     assert fakes.sink.played == 1 and fakes.sink.closed
     assert fakes.keys == ["k"]
     assert fakes.llm.warm_ups == 2  # at startup, and again when speech started
+
+
+async def test_wake_word_through_the_real_wiring(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    fakes = FakeBackends(FakeLLM(["Half past one."]))
+    trigger = np.full(512, 0.01, np.float32)
+    trigger[0] = FakeWakeWord.TRIGGER
+    quiet = [np.full(512, 0.001, np.float32)] * 20
+    fakes.mic = FakeMic([*quiet, trigger, *frames(speech_clip())])
+    fakes.sink = FakeSink(device_name="AirPods Pro")
+    ui = EventUi()
+
+    async def quit_after_reply() -> AsyncIterator[str]:
+        await ui.replied.wait()
+        yield "q"
+
+    caplog.set_level("INFO")
+    await run_assistant(
+        Config(),
+        api_key=SecretStr("k"),
+        cache_dir=tmp_path,
+        lines=quit_after_reply(),
+        ui=ui,
+        backends=fakes.build(),
+    )
+    assert fakes.wake.loaded
+    assert fakes.mic.opened == 1  # one stream for the whole session
+    assert ui.events[:3] == ["ready:True:wake", "woke", "listening"]
+    assert "you:what time is it" in ui.events  # "hey yarvis" is cut from the transcript
+    assert "reply:Half past one." in ui.events
+    assert fakes.sink.played == 2  # the chime, then the reply
+    assert "Barge-in: voice (output device: AirPods Pro)" in caplog.text
+    assert any(text.startswith(("Good ", "Still up")) for text in fakes.tts.spoken)  # greetings
+    assert "The microphone stays open" in caplog.text
 
 
 async def test_text_and_mute_mode_load_nothing(tmp_path: Path) -> None:
@@ -176,13 +232,16 @@ async def test_text_and_mute_mode_load_nothing(tmp_path: Path) -> None:
 # --------------------------------------------------------------------------- CLI: run / models
 
 
-def install_models(paths: AppPaths, *, whisper: bool = True) -> None:
+def install_models(paths: AppPaths, *, whisper: bool = True, wake_word: bool = True) -> None:
     paths.ensure_all()
-    directory = kokoro_dir(paths.cache_dir)
-    directory.mkdir(parents=True)
-    for model in KOKORO_FILES:
-        with (directory / model.name).open("wb") as handle:
-            handle.truncate(model.size)  # sparse file with the right size
+    sets: list[tuple[Path, tuple[ModelFile, ...]]] = [(kokoro_dir(paths.cache_dir), KOKORO_FILES)]
+    if wake_word:
+        sets.append((wake_word_dir(paths.cache_dir), WAKE_WORD_FILES))
+    for directory, models in sets:
+        directory.mkdir(parents=True)
+        for model in models:
+            with (directory / model.name).open("wb") as handle:
+                handle.truncate(model.size)  # sparse file with the right size
     if whisper:
         snapshot = (
             whisper_dir(paths.cache_dir) / "models--Systran--faster-whisper-base.en" / "snapshots"
@@ -213,7 +272,7 @@ def test_run_voice_mode(invoke: Invoke, services: Services, ready: FakeBackends)
     services.lines = lambda: lines("", "q")
     result = invoke("run")
     assert result.exit_code == 0, result.output
-    assert "You: hey yarvis what time is it" in result.output
+    assert "You: what time is it" in result.output
     assert "to first word" in result.output
 
 
@@ -268,6 +327,63 @@ def test_kokoro_download_flow(
     accepted = invoke("run", "--text", "--yes")
     assert accepted.exit_code == 0, accepted.output
     assert downloaded == [model.name for model in KOKORO_FILES]
+
+
+def recording_downloader(
+    downloaded: list[str],
+) -> Callable[[ModelFile, Path, Callable[[int], None]], Path]:
+    def fake_download(model: ModelFile, directory: Path, progress: Callable[[int], None]) -> Path:
+        downloaded.append(model.name)
+        progress(model.size)
+        return directory / model.name
+
+    return fake_download
+
+
+def test_wake_word_download_flow(
+    invoke: Invoke, services: Services, fake_keyring: FakeKeyring, paths: AppPaths
+) -> None:
+    fake_keyring.store[(KEYRING_SERVICE, "anthropic")] = VALID_KEY
+    install_models(paths, wake_word=False)
+    fakes = FakeBackends(FakeLLM())
+    services.backends = fakes.build
+    services.lines = lambda: lines("q")
+    downloaded: list[str] = []
+    services.downloader = recording_downloader(downloaded)
+
+    typed = invoke("run", "--text")  # no microphone, so no wake word and no question
+    assert typed.exit_code == 0, typed.output
+    assert "wake word" not in typed.output
+    skipped = invoke("run", "--no-wake-word")
+    assert skipped.exit_code == 0 and "wake word" not in skipped.output
+    declined = invoke("run", stdin="n\n")
+    assert declined.exit_code == 0, declined.output
+    assert "non-commercial" in declined.output  # the licence is stated before downloading
+    assert "Continuing without the wake word" in declined.output
+    assert not fakes.wake.loaded
+    assert downloaded == []
+    accepted = invoke("run", "--yes")
+    assert accepted.exit_code == 0, accepted.output
+    assert downloaded == [model.name for model in WAKE_WORD_FILES]
+    assert fakes.wake.loaded
+
+
+def test_models_download_includes_the_wake_word(
+    invoke: Invoke, services: Services, paths: AppPaths
+) -> None:
+    install_models(paths, wake_word=False)
+    services.backends = FakeBackends(FakeLLM()).build
+    downloaded: list[str] = []
+    services.downloader = recording_downloader(downloaded)
+    assert invoke("models", "download", "--yes").exit_code == 0
+    assert downloaded == [model.name for model in WAKE_WORD_FILES]
+
+    downloaded.clear()
+    for model in WAKE_WORD_FILES:
+        (wake_word_dir(paths.cache_dir) / model.name).unlink(missing_ok=True)
+    declined = invoke("models", "download", stdin="n\n")
+    assert declined.exit_code == 1
+    assert downloaded == []
 
 
 def test_kokoro_download_failure(invoke: Invoke, services: Services) -> None:
@@ -329,11 +445,17 @@ def test_console_ui_streams_and_escapes_markup() -> None:
     ui.nothing_heard()
     ui.on_reply_delta("partial")
     ui.error("broken [pipe]")
+    ui.ready(voice=True, wake_word=True)
+    ui.woke()
+    ui.on_reply_delta("cut")
+    ui.interrupted()
+    ui.said("Good [evening].")
     text = out.getvalue()
     for expected in (
         "Loading…", "Enter = talk", "listening", "You: [bold]not markup[/]",
         "Yarvis: Hello [there]", "Claude 0.20", "type a message", "Didn't catch that",
-        "partial\n", "✗ broken [pipe]",
+        "partial\n", "✗ broken [pipe]", "Say “Hey Yarvis” · Enter = talk", "cut\n",
+        "↳ interrupted", "Yarvis: Good [evening].",
     ):  # fmt: skip
         assert expected in text
 

@@ -5,10 +5,11 @@
 Your own Jarvis — except it lives on your machine, like a yeti lives off the grid.
 
 > **Status: early development (Phase 2 of 5).** Talk to Yarvis in its own app window: say
-> "Hey Yarvis", ask, interrupt it mid-sentence. It can now set timers and reminders, drive
-> your browser (tabs, pages, links, videos), play any song or your own playlists on Spotify,
-> type into apps, and control apps and volume on your Mac. Web answers, calendar and memory
-> are next. Star or watch the repo to follow along.
+> "Hey Yarvis", ask, interrupt it mid-sentence. It can now look things up on the web, tell
+> you the weather, set timers and reminders, drive your browser (tabs, pages, links,
+> videos), play any song or your own playlists on Spotify, type into apps, and control apps
+> and volume on your Mac. Calendar, email and memory are next. Star or watch the repo to
+> follow along.
 
 ## Why Yarvis
 
@@ -24,13 +25,17 @@ Your own Jarvis — except it lives on your machine, like a yeti lives off the g
   fewer words than small Whisper models). Audio never leaves your machine and is never
   stored; only the text of your request goes to the language model. A fully offline mode is
   on the roadmap.
-- **Actually does things** — timers and reminders that speak up, apps, websites, volume
-  and music today; web search and any MCP server (calendar, email, …) next.
+- **Actually does things** — searches the web, checks the weather, sets timers and
+  reminders that speak up, drives apps, websites, volume and music; any MCP server
+  (calendar, email, …) next.
 - **Safe to give power to** — a security model that assumes the AI *will* be manipulated:
   every action passes a permission gate in code, consequential ones need your spoken "yes"
   (the question is built by code, so you hear exactly what will happen), and content from
   outside can never skip that step
-  ([how it works](docs/adr/0007-tools-and-the-permission-gate.md)).
+  ([how it works](docs/adr/0007-tools-and-the-permission-gate.md)). A
+  [prompt-injection test suite](docs/adr/0009-web-search-weather-and-injection-tests.md)
+  plants the same attack in every page, tab title, song title, place name and search result
+  and checks that it never gets through.
 - **Has a body** — an optional ESP32 desk satellite with mic, speaker and LED ring.
 
 Read the full [design document](docs/DESIGN.md).
@@ -85,17 +90,28 @@ speech recognition engine and what it heard, Claude's first token) and recommend
 
 Prefer the terminal? `yarvis run` does the same in your shell. Both accept `--text` (type
 instead of speaking), `--mute` (no voice output) and `--no-wake-word`. `yarvis config init`
-writes a commented config file (your name, voice, speed, model, vocabulary for names,
-end-of-turn timing, how long a conversation stays open, wake word, interruptions, and which
-tools are on).
+writes a commented config file (your name and where you live, voice, speed, model,
+vocabulary for names, end-of-turn timing, how long a conversation stays open, wake word,
+interruptions, and which tools are on).
 
-**Things to try:** "Set a pasta timer for nine minutes", "Remind me at six to call mom",
+**Things to try:** "What's the weather tomorrow?", "Who won the Belgian Grand Prix?",
+"Is the Albert Heijn in Leuven open on Sunday?", "Set a pasta timer for nine minutes", "Remind me at six to call mom",
 "Play Feel What You Want by Kristine W", "Spotify volume to forty", "Turn on shuffle",
 "Play my workout playlist", "What's playing?", "Open Brave", "Open a new tab", "Go to
 YouTube", "Click on the first video", "Pause the video", "Switch to the Gmail tab",
 "Search for trains to Ghent", "Go back", "Type 'see you at eight' in Messages", "Quit
 Safari" (Yarvis asks first). The first time Yarvis controls an app, macOS asks whether your
 terminal may do so.
+
+**Web search and the weather.** For anything that may have changed (news, scores, opening
+hours), Claude searches the web itself through Anthropic's
+[web search tool](https://docs.claude.com/en/docs/agents-and-tools/tool-use/web-search-tool):
+no extra account, about 1 cent per search on your Anthropic bill, at most 3 per question
+(`[tools] web_search = false` turns it off). Search results are treated like any web page:
+they can't make Yarvis do anything without your "yes". The weather comes straight from
+[Open-Meteo](https://open-meteo.com) (free, no account; data CC BY 4.0); only the place name
+leaves your computer. Set `location = "Leuven, Belgium"` in the config so "the weather" and
+"near me" mean where you live.
 
 **Pages in your browser.** To read a page and follow its links (a video, an article),
 Yarvis runs a small, fixed script in the current tab. Browsers only allow that once you turn

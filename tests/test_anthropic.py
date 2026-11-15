@@ -14,7 +14,7 @@ from yarvis.llm.anthropic import (
     _to_param,  # pyright: ignore[reportPrivateUsage]
 )
 from yarvis.llm.anthropic import _explain as explain  # pyright: ignore[reportPrivateUsage]
-from yarvis.llm.base import LLMError, Message, ToolCall, ToolResult, ToolSpec
+from yarvis.llm.base import LLMError, Message, ToolCall, ToolResult, ToolSpec, WebSearch
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -288,3 +288,193 @@ async def test_tool_messages_are_sent_as_blocks() -> None:
     assert list(_to_param(mixed)["content"])[-1] == {"type": "text", "text": "and also"}
     said = Message("assistant", "Sure.", tool_calls=(ToolCall("t3", "x", {}),))
     assert next(iter(_to_param(said)["content"])) == {"type": "text", "text": "Sure."}
+
+
+# --------------------------------------------------------------------------- web search
+
+
+def message_start() -> dict[str, Any]:
+    return {
+        "type": "message_start",
+        "message": {
+            "id": "msg_search",
+            "type": "message",
+            "role": "assistant",
+            "model": DEFAULT_MODEL,
+            "content": [],
+            "stop_reason": None,
+            "stop_sequence": None,
+            "usage": {"input_tokens": 12, "output_tokens": 1},
+        },
+    }
+
+
+def text_block(index: int, text: str) -> list[dict[str, Any]]:
+    block = {"type": "text", "text": ""}
+    delta = {"type": "text_delta", "text": text}
+    return [
+        {"type": "content_block_start", "index": index, "content_block": block},
+        {"type": "content_block_delta", "index": index, "delta": delta},
+        {"type": "content_block_stop", "index": index},
+    ]
+
+
+def search_blocks(index: int, query: str, *, with_result: bool = True) -> list[dict[str, Any]]:
+    events: list[dict[str, Any]] = [
+        {
+            "type": "content_block_start",
+            "index": index,
+            "content_block": {
+                "type": "server_tool_use", "id": "srvtoolu_1", "name": "web_search", "input": {},
+            },
+        },
+        {
+            "type": "content_block_delta",
+            "index": index,
+            "delta": {"type": "input_json_delta", "partial_json": json.dumps({"query": query})},
+        },
+        {"type": "content_block_stop", "index": index},
+    ]  # fmt: skip
+    if with_result:
+        result = {
+            "type": "web_search_tool_result",
+            "tool_use_id": "srvtoolu_1",
+            "content": [
+                {
+                    "type": "web_search_result",
+                    "url": "https://example.com/match",
+                    "title": "Club Brugge 2-1 Anderlecht",
+                    "encrypted_content": "ENCRYPTED",
+                    "page_age": None,
+                }
+            ],
+        }
+        events += [
+            {"type": "content_block_start", "index": index + 1, "content_block": result},
+            {"type": "content_block_stop", "index": index + 1},
+        ]
+    return events
+
+
+def end(reason: str) -> list[dict[str, Any]]:
+    return [
+        {
+            "type": "message_delta",
+            "delta": {"stop_reason": reason, "stop_sequence": None},
+            "usage": {"output_tokens": 9},
+        },
+        {"type": "message_stop"},
+    ]
+
+
+def streaming(*bodies: bytes) -> tuple[Callable[[httpx2.Request], httpx2.Response], list[Any]]:
+    seen: list[dict[str, Any]] = []
+    queue = list(bodies)
+
+    def handler(request: httpx2.Request) -> httpx2.Response:
+        seen.append(json.loads(request.content))
+        return httpx2.Response(
+            200, content=queue.pop(0), headers={"content-type": "text/event-stream"}
+        )
+
+    return handler, seen
+
+
+TIMER = ToolSpec("set_timer", "Start a timer.", {"type": "object", "properties": {}})
+
+
+def searching(handler: Callable[[httpx2.Request], httpx2.Response]) -> AnthropicProvider:
+    p = provider(handler)
+    p.web_search = True
+    return p
+
+
+async def test_claude_searches_the_web_and_says_so() -> None:
+    body = sse(
+        message_start(),
+        *text_block(0, "Let me check. "),
+        *search_blocks(1, "Club Brugge score"),
+        *text_block(3, "Club Brugge won two one."),
+        *end("end_turn"),
+    )
+    handler, seen = streaming(body)
+    events = [
+        e
+        async for e in searching(handler).stream(
+            [Message("user", "how did Brugge do")], system="S", max_tokens=50, tools=[TIMER]
+        )
+    ]
+    assert events == ["Let me check. ", WebSearch("Club Brugge score"), "Club Brugge won two one."]
+    assert seen[0]["tools"][-1] == {
+        "type": "web_search_20250305",
+        "name": "web_search",
+        "max_uses": 3,
+    }
+
+
+async def test_no_web_search_without_tools_or_when_off() -> None:
+    handler, seen = streaming(text_stream("Hi."), text_stream("Hi."))
+    p = searching(handler)
+    assert [e async for e in p.stream([Message("user", "x")], system="S", max_tokens=5)] == ["Hi."]
+    assert "tools" not in seen[0]  # the last round, without tools: no search either
+    off = provider(handler)
+    events = [
+        e async for e in off.stream([Message("user", "x")], system="S", max_tokens=5, tools=[TIMER])
+    ]
+    assert events == ["Hi."]
+    assert [tool["name"] for tool in seen[1]["tools"]] == ["set_timer"]
+
+
+async def test_a_paused_search_is_resumed() -> None:
+    first = sse(
+        message_start(), *search_blocks(0, "news Leuven", with_result=False), *end("pause_turn")
+    )
+    second = sse(message_start(), *text_block(0, "Quiet day in Leuven."), *end("end_turn"))
+    handler, seen = streaming(first, second)
+    events = [
+        e
+        async for e in searching(handler).stream(
+            [Message("user", "news?")], system="S", max_tokens=50, tools=[TIMER]
+        )
+    ]
+    assert events == [WebSearch("news Leuven"), "Quiet day in Leuven."]
+    resumed = seen[1]["messages"][-1]
+    assert resumed["role"] == "assistant"  # the paused turn goes back unchanged
+    assert resumed["content"][0]["type"] == "server_tool_use"
+    assert resumed["content"][0]["input"] == {"query": "news Leuven"}
+
+
+async def test_a_search_before_a_tool_call_is_sent_back_exactly() -> None:
+    """Search results are encrypted: the API needs the turn back as it was."""
+    use: dict[str, object] = {"type": "tool_use", "id": "toolu_9", "name": "set_timer", "input": {}}
+    tool: list[dict[str, object]] = [
+        {"type": "content_block_start", "index": 2, "content_block": use},
+        {
+            "type": "content_block_delta",
+            "index": 2,
+            "delta": {"type": "input_json_delta", "partial_json": '{"minutes": 90}'},
+        },
+        {"type": "content_block_stop", "index": 2},
+    ]  # fmt: skip
+    first = sse(message_start(), *search_blocks(0, "match length"), *tool, *end("tool_use"))
+    handler, seen = streaming(first, text_stream("Done."))
+    p = searching(handler)
+    events = [
+        e async for e in p.stream([Message("user", "x")], system="S", max_tokens=50, tools=[TIMER])
+    ]
+    call = ToolCall("toolu_9", "set_timer", {"minutes": 90})
+    assert events == [WebSearch("match length"), call]
+    follow_up = [
+        Message("user", "x"),
+        Message("assistant", "", tool_calls=(call,)),
+        Message("user", "", tool_results=(ToolResult("toolu_9", "Set."),)),
+    ]
+    await collect(p, follow_up)
+    sent = seen[1]["messages"][1]["content"]
+    assert [block["type"] for block in sent] == [
+        "server_tool_use", "web_search_tool_result", "tool_use",
+    ]  # fmt: skip
+    assert sent[1]["content"][0]["encrypted_content"] == "ENCRYPTED"
+    for n in range(20):  # only recent turns are kept
+        p._keep(f"id{n}", [])  # pyright: ignore[reportPrivateUsage]
+    assert "toolu_9" not in p._turns  # pyright: ignore[reportPrivateUsage]

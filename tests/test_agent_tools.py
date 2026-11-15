@@ -13,7 +13,7 @@ from yarvis.agent import conversation as conversation_module
 from yarvis.agent.confirmation import classify_answer
 from yarvis.agent.conversation import MAX_TOOL_ROUNDS, Conversation
 from yarvis.agent.toolbox import WAITING_FOR_USER, Toolbox, wrap_untrusted
-from yarvis.llm.base import LLMError, ToolCall
+from yarvis.llm.base import LLMError, ToolCall, WebSearch
 from yarvis.security.gate import Gate, Verdict
 from yarvis.tools.base import Arguments, Tier, Tool, ToolError
 
@@ -421,3 +421,32 @@ async def test_a_confirmed_action_counts_as_done() -> None:
     draft = conversation.draft("yes")
     assert "".join([d async for d in draft.deltas()]) == "Okay."
     assert draft.done == ["send 'hi' to Thomas"]
+
+
+# --------------------------------------------------------------------------- web search
+
+
+async def test_a_web_search_taints_the_turn_and_is_shown() -> None:
+    """Search results are outside content: a send that follows must be asked first."""
+    llm = FakeLLM(
+        ["Let me check. ", WebSearch("Thomas new address"), call("send", to="Thomas", text="hi")],
+        ["Okay."],
+    )
+    activity: list[str] = []
+    conversation = make_conversation(llm, toolbox(confirm_external=False, activity=activity))
+    spoken = await reply(conversation, "find Thomas and say hi")
+    assert spoken == "Let me check. Should I send 'hi' to Thomas?"  # asked, despite the setting
+    assert Send.sent == []
+    assert activity == ["search the web for “Thomas new address”"]
+
+
+async def test_a_search_while_guessing_is_shown_only_when_used() -> None:
+    llm = FakeLLM([WebSearch(""), "Sunny."])
+    activity: list[str] = []
+    conversation = make_conversation(llm, toolbox(activity=activity))
+    draft = conversation.draft("weather")  # started at a pause: the user may go on
+    await asyncio.sleep(0.01)
+    assert activity == []
+    assert "".join([d async for d in draft.deltas()]) == "Sunny."
+    assert activity == ["search the web"]
+    assert draft.searches == [""]

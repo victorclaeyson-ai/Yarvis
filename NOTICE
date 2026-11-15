@@ -22,3 +22,9 @@ cache folder, except Silero VAD, which comes inside the faster-whisper package:
 
 Yarvis's wake-word inference (src/yarvis/speech/wakeword.py) follows the openWakeWord
 reference implementation, Copyright David Scripka, licensed under the Apache License 2.0.
+
+Services used at runtime
+------------------------
+- Weather data by Open-Meteo.com (https://open-meteo.com), licensed under CC BY 4.0
+  (https://creativecommons.org/licenses/by/4.0/). Open-Meteo's free API is for
+  non-commercial use.

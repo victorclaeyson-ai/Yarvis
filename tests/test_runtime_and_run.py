@@ -565,14 +565,20 @@ async def test_tools_through_the_real_wiring(tmp_path: Path) -> None:
     assert "did:set a 1-minute timer" in ui.events
     assert "reply:Done." in ui.events
     system = llm.calls[0][1]
-    assert "What you can do: set, list and cancel timers and reminders." in system
-    assert llm.offered[0] == ["set_timer", "set_reminder", "list_timers", "cancel_timer"]
+    assert "What you can do: set, list and cancel timers and reminders; tell the weather" in system
+    assert "search the web for anything current" in system  # Claude's own search, on
+    assert "search the web instead of guessing" in system
+    assert llm.offered[0] == [
+        "set_timer", "set_reminder", "list_timers", "cancel_timer", "weather",
+    ]  # fmt: skip
 
 
 async def test_tools_can_be_switched_off(tmp_path: Path) -> None:
     llm = FakeLLM(["No can do."])
     fakes = FakeBackends(llm)
-    config = Config.model_validate({"tools": {"timers": False, "computer": False}})
+    config = Config.model_validate(
+        {"tools": {"timers": False, "computer": False, "weather": False}}
+    )
     await run_assistant(
         config,
         api_key=SecretStr("k"),

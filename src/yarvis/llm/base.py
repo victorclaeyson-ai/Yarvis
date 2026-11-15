@@ -30,6 +30,16 @@ class ToolCall:
 
 
 @dataclass(frozen=True, slots=True)
+class WebSearch:
+    """The model searched the web on the provider's side (not through the toolbox).
+
+    Its results are now part of the model's context: outside content, like a web page.
+    """
+
+    query: str
+
+
+@dataclass(frozen=True, slots=True)
 class ToolResult:
     """What a tool call produced, sent back to the model."""
 
@@ -66,11 +76,12 @@ class LLMProvider(Protocol):
         system: str,
         max_tokens: int,
         tools: Sequence[ToolSpec] = (),
-    ) -> AsyncGenerator[str | ToolCall]:
+    ) -> AsyncGenerator[str | ToolCall | WebSearch]:
         """Yield the reply as text fragments as soon as they are generated.
 
         If the model wants to use tools, the ``ToolCall`` objects follow at the end of
-        the response; the caller runs them and asks again with the results.
+        the response; the caller runs them and asks again with the results. A provider
+        that searches the web itself reports each search as a ``WebSearch``.
 
         Raises:
             LLMError: On any failure, with a user-presentable message.

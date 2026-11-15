@@ -147,7 +147,7 @@ class LLMProvider(Protocol):
 
 ### 4.3 Tools
 
-- **Built-in (v1):** timers and reminders (spoken when due), open/quit app, volume, media control, browser tabs (list, switch, open, close, search, back/forward), Spotify by name (play, volume, shuffle, repeat, position, now playing), typing into apps (Enter = tier 2) (done, ADR 0007); web search through Anthropic's server tool (tainting, like a page) and the weather from Open-Meteo (done, ADR 0009); notes, system info (next).
+- **Built-in (v1):** timers and reminders (spoken when due), open/quit app, volume, media control, browser tabs (list, switch, open, close, search, back/forward), Spotify by name (play, volume, shuffle, repeat, position, now playing), typing into apps (Enter = tier 2) (done, ADR 0007); web search through Anthropic's server tool (tainting, like a page) and the weather from Open-Meteo (done, ADR 0009); calendars (EventKit) and email (Mail, names from Contacts) through the Mac's own Internet Accounts, with no developer setup and no tokens held by Yarvis (done, ADR 0010); notes, system info (next).
 - **MCP:** any MCP server (stdio or remote HTTPS) declared in config. Nothing is auto-installed or auto-enabled.
 - Every tool — built-in or MCP — has a **declared permission tier** (§5.3). MCP tools default to the most restrictive tier until the user assigns one.
 
@@ -190,7 +190,8 @@ class LLMProvider(Protocol):
 
 - any Tier ≥ 2 call requires confirmation, even if the user previously chose "always allow" for that tool;
 - the confirmation shows the *exact* arguments, so an injected recipient or URL is visible;
-- memory writes require confirmation (T7).
+- memory writes require confirmation (T7);
+- a Tier 1 call that can carry text to a destination the model chose (opening a web address) requires confirmation, with the address read out including its path and query, so read data cannot leave quietly (ADR 0010).
 
 **Untrusted-content wrapping.** Tool results are inserted as clearly delimited data blocks with an explicit note that they are content to analyse, not instructions to follow. This reduces — but does not replace — the gate above.
 
@@ -314,7 +315,7 @@ yarvis/
 |---|---|---|
 | **0 · Foundations** | Repo, tooling, CI, config, secrets, logging, event bus, `yarvis doctor` | CI green on macOS + Linux; `doctor` checks mic, speaker, models, keys |
 | **1 · Voice loop** | Audio I/O, wake word, VAD, STT, Claude streaming, TTS, barge-in, latency harness | Natural conversation with barge-in; p50 latency measured and published |
-| **2 · Tools & security core** | Permission gate, taint tracking, confirmations, built-in tools, MCP client + pinning | Injection suite passing; MCP calendar demo works end to end |
+| **2 · Tools & security core** | Permission gate, taint tracking, confirmations, built-in tools, MCP client + pinning | Injection suite passing; calendar and email work end to end (through the Mac, ADR 0010); MCP client with pinning |
 | **3 · Memory & offline** | Memory store, recall, Ollama offline mode, Dutch voice | Fully offline demo; memory forget/export works |
 | **4 · Satellite** | ESP32-S3 firmware, pairing, secure audio streaming, LED states | Satellite pairs in < 1 minute; link passes security review |
 | **5 · Launch** | Demo video, docs site, install polish, launch posts | Public release v1.0 |

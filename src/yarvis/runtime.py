@@ -104,6 +104,8 @@ class Backends:
     """The tools that act on this computer (given the Spotify keys, if any)."""
     ducker: Callable[[Config], Ducker | None] = lambda _config: None
     """Turns music down during conversations (None: nothing to turn down)."""
+    personal: Callable[[Config], list[Tool[Any]]] = lambda _config: []
+    """Calendars and email (on a Mac, through its own accounts)."""
 
     @classmethod
     def real(cls) -> Backends:  # pragma: no cover - exercised on real machines, not in CI
@@ -115,7 +117,11 @@ class Backends:
         from yarvis.speech.kokoro import KokoroTTS  # noqa: PLC0415
         from yarvis.speech.silero import SileroVAD  # noqa: PLC0415
         from yarvis.speech.wakeword import WakeWordDetector  # noqa: PLC0415
-        from yarvis.tools.desktop import computer_tools, music_ducker  # noqa: PLC0415
+        from yarvis.tools.desktop import (  # noqa: PLC0415
+            computer_tools,
+            music_ducker,
+            personal_tools,
+        )
         from yarvis.tools.spotify import SpotifyAccount, SpotifyCatalog  # noqa: PLC0415
 
         return cls(
@@ -137,6 +143,7 @@ class Backends:
                 cache_dir=cache, threshold=config.voice.wake_word_threshold
             ),
             ducker=music_ducker,
+            personal=personal_tools,
             computer=lambda config, spotify: computer_tools(
                 browser=config.tools.browser,
                 typing=config.tools.typing,
@@ -293,6 +300,9 @@ def _tools(
     if config.tools.computer and (computer := backends.computer(config, spotify)):
         tools += computer
         said += abilities(computer)
+    if personal := backends.personal(config):
+        tools += personal
+        said += abilities(personal)
     if config.tools.weather:
         tools.append(Weather(config.assistant.location))
         said.append("tell the weather, now and for the coming week")

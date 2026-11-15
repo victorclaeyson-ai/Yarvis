@@ -64,6 +64,8 @@ browser = "auto"            # or "Brave Browser", "Google Chrome", "Safari", ...
 typing = true               # type into apps; pressing Enter always asks you first
 web_search = true           # Claude searches the web for current info (~1 cent per search)
 weather = true              # forecasts from Open-Meteo (free, no account)
+calendar = true             # your calendars, via System Settings → Internet Accounts (macOS)
+mail = true                 # your email, via the Mail app; sending always asks you first
 
 [security]
 allow_tier3 = false         # dangerous tools (shell, delete, purchases): keep this off

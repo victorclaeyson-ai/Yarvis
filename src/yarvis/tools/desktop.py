@@ -4,9 +4,11 @@ from __future__ import annotations
 
 import os
 import sys
+from functools import partial
 from typing import TYPE_CHECKING, Any, Literal
 
 from yarvis.tools.browser import Browsers, browser_tools
+from yarvis.tools.calendars import EventKitStore, calendar_tools
 from yarvis.tools.computer import (
     XDG_OPEN,
     Apps,
@@ -18,6 +20,7 @@ from yarvis.tools.computer import (
     run_command,
 )
 from yarvis.tools.ducking import BrowserDucker, Duckers, SpotifyDucker
+from yarvis.tools.mail import MAIL_TIMEOUT_S, MacMail, mail_tools
 from yarvis.tools.spotify import spotify_tools
 from yarvis.tools.typing import typing_tools
 
@@ -27,6 +30,7 @@ if TYPE_CHECKING:
     from yarvis.config.models import Config
     from yarvis.tools.base import Tool
     from yarvis.tools.browser import BrowserName
+    from yarvis.tools.calendars import CalendarStore
     from yarvis.tools.computer import Runner
     from yarvis.tools.ducking import Ducker
     from yarvis.tools.spotify import SpotifyAccount, SpotifyCatalog
@@ -61,6 +65,24 @@ def computer_tools(
     if platform.startswith("linux") and os.access(XDG_OPEN, os.X_OK):
         return [OpenWebsite(run, opener=XDG_OPEN)]
     return []
+
+
+def personal_tools(
+    config: Config,
+    *,
+    platform: str = sys.platform,
+    run: Runner | None = None,
+    store: CalendarStore | None = None,
+) -> list[Tool[Any]]:
+    """Calendars and email, through the Mac's own apps and accounts."""
+    if platform != "darwin":
+        return []
+    tools: list[Tool[Any]] = []
+    if config.tools.calendar:
+        tools += calendar_tools(store or EventKitStore())
+    if config.tools.mail:
+        tools += mail_tools(MacMail(run or partial(run_command, timeout_s=MAIL_TIMEOUT_S)))
+    return tools
 
 
 def music_ducker(
@@ -112,4 +134,15 @@ def abilities(tools: Sequence[Tool[Any]]) -> list[str]:
         )
     if "type_text" in names:
         said.append("type text into apps (pressing Enter needs the user's confirmation)")
+    if "calendar_events" in names:
+        said.append(
+            "read every calendar the user has on this Mac (Google, Outlook, iCloud, ...) and "
+            "add events (the user confirms)"
+        )
+    if "mail_list" in names:
+        said.append(
+            "list, search and read the user's email in all their accounts, and send emails "
+            "or replies (the user confirms; names are looked up in their contacts). Read "
+            "emails out as who, what and the gist, never the addresses"
+        )
     return said

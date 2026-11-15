@@ -45,19 +45,24 @@ class Gate:
         self._confirm_external = confirm_external
         self._allow_dangerous = allow_dangerous
 
-    def check(self, tool: Tool[Any], *, tainted: bool) -> Decision:
-        """Decide for one call. ``tainted``: the turn has read untrusted content."""
-        decision = self._decide(tool.tier, tainted=tainted)
+    def check(self, tool: Tool[Any], *, tainted: bool, sends_out: bool = False) -> Decision:
+        """Decide for one call.
+
+        ``tainted``: the turn has read untrusted content. ``sends_out``: the call can carry
+        text to a destination the model chose (``Tool.sends_data_out``).
+        """
+        decision = self._decide(tool.tier, tainted=tainted, sends_out=sends_out)
         logger.info(
-            "Gate: %s (tier %d%s) -> %s",
+            "Gate: %s (tier %d%s%s) -> %s",
             tool.name,
             tool.tier,
             ", tainted" if tainted else "",
+            ", sends data out" if sends_out else "",
             decision.verdict.value,
         )
         return decision
 
-    def _decide(self, tier: Tier, *, tainted: bool) -> Decision:
+    def _decide(self, tier: Tier, *, tainted: bool, sends_out: bool) -> Decision:
         if tier >= Tier.DANGEROUS:
             if self._allow_dangerous:
                 # Design doc §5.3: dangerous actions need an on-screen confirmation per
@@ -66,4 +71,8 @@ class Gate:
             return Decision(Verdict.DENY, "Dangerous actions are disabled.")
         if tier == Tier.EXTERNAL and (self._confirm_external or tainted):
             return Decision(Verdict.CONFIRM, "Needs the user's confirmation.")
+        if tainted and sends_out:
+            # Outside content (an email, a page) may be steering the model into sending what
+            # it has read somewhere: the user hears where it would go and decides.
+            return Decision(Verdict.CONFIRM, "Sends data out after reading outside content.")
         return Decision(Verdict.ALLOW, "Allowed.")

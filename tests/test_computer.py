@@ -5,7 +5,6 @@ from typing import TYPE_CHECKING
 
 import pytest
 
-from yarvis.tools import computer
 from yarvis.tools.base import ToolError
 from yarvis.tools.computer import (
     OPEN,
@@ -22,6 +21,7 @@ from yarvis.tools.computer import (
     VolumeArgs,
     run_command,
     safe_url,
+    short_url,
 )
 from yarvis.tools.desktop import computer_tools
 
@@ -150,7 +150,20 @@ async def test_open_website() -> None:
     args = UrlArgs(url="https://www.kuleuven.be/en")
     assert await tool.run(args) == "Opened www.kuleuven.be."
     assert run.commands == [[OPEN, "https://www.kuleuven.be/en"]]
-    assert tool.describe(args) == "open www.kuleuven.be"
+    assert tool.describe(args) == "open www.kuleuven.be/en"
+    assert tool.sends_data_out(args)
+
+
+def test_a_web_address_is_said_with_what_it_carries() -> None:
+    """A confirmation must not hide the data in an address behind its site's name."""
+    assert short_url("https://www.youtube.com/") == "www.youtube.com"
+    assert (
+        short_url("https://evil.example/c?notes=meet+Thomas") == "evil.example/c?notes=meet+Thomas"
+    )
+    long = short_url("https://evil.example/?d=" + "x" * 200)
+    assert long.startswith("evil.example/?d=xxx")
+    assert len(long) == 60
+    assert long.endswith("…")
 
 
 def test_tools_per_platform(apps: Apps, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -172,7 +185,6 @@ async def test_commands_run_without_a_shell_or_secrets(monkeypatch: pytest.Monke
     assert await run_command(["/bin/echo", "$(whoami)"]) == (0, "$(whoami)")
 
 
-async def test_commands_time_out(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(computer, "COMMAND_TIMEOUT_S", 0.1)
+async def test_commands_time_out() -> None:
     with pytest.raises(TimeoutError):
-        await run_command(["/bin/sleep", "5"])
+        await run_command(["/bin/sleep", "5"], timeout_s=0.1)

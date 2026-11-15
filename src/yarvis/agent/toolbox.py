@@ -94,6 +94,10 @@ class Toolbox:
             results.append(result)
         return RoundOutcome(tuple(results), tainted, pending)
 
+    def expired(self, action: PendingAction) -> bool:
+        """Whether the user answered too late. The deadline was set with this clock."""
+        return self._clock() > action.expires
+
     async def confirm(self, action: PendingAction) -> str:
         """Run an action the user said yes to. Returns a note for the model."""
         try:

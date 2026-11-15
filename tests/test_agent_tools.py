@@ -120,6 +120,9 @@ def toolbox(
         tools,
         Gate(confirm_external=confirm_external),
         timeout_s=timeout_s,
+        # Far behind the conversation's clock (which starts at 100), like a machine that
+        # booted a minute ago: deadlines must be checked with the clock that set them.
+        clock=TickingClock(start=1.0),
         on_activity=None if activity is None else activity.append,
     )
 

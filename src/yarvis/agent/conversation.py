@@ -119,13 +119,13 @@ class Draft:
         if conversation.pending is pending:
             conversation.pending = None
         answer = classify_answer(self.user_text)
-        if conversation.clock() > pending.expires:
+        toolbox = conversation.toolbox
+        # The toolbox set the deadline with its own clock, so only it can check it.
+        if toolbox is None or toolbox.expired(pending):
             note = f"The question about whether to {pending.description} expired; nothing was done."
-        elif answer == "yes" and conversation.toolbox is not None:
+        elif answer == "yes":
             logger.info("Confirmed by the user: %s", pending.tool.name)
-            note = await conversation.toolbox.confirm(pending)
-        elif answer == "yes":  # pragma: no cover - a pending action implies a toolbox
-            note = "Nothing was done."
+            note = await toolbox.confirm(pending)
         elif answer == "no":
             note = f"The user declined, so you did not {pending.description}."
         else:

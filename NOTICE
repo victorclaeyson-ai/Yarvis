@@ -10,6 +10,10 @@ upstream sources (pinned by size and SHA-256, or by exact commit) and stored in 
 cache folder, except Silero VAD, which comes inside the faster-whisper package:
 
 - Kokoro-82M text-to-speech (Apache 2.0), via kokoro-onnx (MIT).
+- Parakeet TDT 0.6B v2 speech recognition by NVIDIA (CC BY 4.0,
+  https://huggingface.co/nvidia/parakeet-tdt-0.6b-v2), converted to MLX by the MLX
+  Community (https://huggingface.co/mlx-community/parakeet-tdt-0.6b-v2), run with
+  parakeet-mlx (Apache 2.0). Used on Apple Silicon Macs.
 - Whisper speech recognition (MIT), via faster-whisper / CTranslate2 (MIT).
 - Silero VAD (MIT).
 - openWakeWord pre-trained models: melspectrogram, embedding_model and hey_jarvis, by

@@ -108,7 +108,7 @@ Defaults are chosen on paper; **every row marked ⚖ is benchmarked in Phase 1**
 | Wake word | openWakeWord "hey jarvis" model (also hears "Hey Yarvis"), own ONNX inference (ADR 0006) | Custom "Hey Yarvis" model; push-to-talk hotkey | Local, ~2 % of one core; pre-trained models are CC BY-NC-SA, so they are downloaded, not bundled |
 | VAD | Silero VAD (ONNX) | WebRTC VAD | Accurate, tiny, fast |
 | Turn detection ⚖ | Silero silence threshold + Smart Turn model | Silence threshold only | Fewer premature cut-offs → can use a shorter silence window |
-| STT ⚖ | macOS: MLX Whisper / Parakeet-MLX; Linux: faster-whisper | Moonshine | Fastest option per platform; all local |
+| STT ⚖ | Apple Silicon: Parakeet TDT 0.6B on the GPU (MLX); elsewhere: faster-whisper | Whisper turbo (MLX), Moonshine | Most accurate option that is still fast per platform; all local ([ADR 0008](adr/0008-parakeet-speech-recognition.md)) |
 | LLM | Anthropic Messages API (streaming, tool use) | Ollama (offline mode) | Best tool use and instruction following; one switch for offline |
 | TTS ⚖ | Kokoro (ONNX) for English | Piper (incl. Dutch `nl_BE` voices) | Natural voice with very low first-chunk latency |
 | Tools | Built-ins + official `mcp` Python SDK | — | Standard protocol, huge existing ecosystem |
@@ -252,7 +252,7 @@ model = "<fast-tier model>"   # chosen in Phase 1 by latency benchmark
 max_tokens = 1024
 
 [voice]
-stt = "auto"                  # mlx-whisper on macOS, faster-whisper on Linux
+stt = "auto"                  # Parakeet (MLX) on Apple Silicon, faster-whisper elsewhere
 tts = "kokoro"
 voice = "af_heart"
 

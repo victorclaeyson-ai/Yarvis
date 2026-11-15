@@ -307,6 +307,8 @@ class Turn:
             raise failures.exceptions[0] from None
         except asyncio.CancelledError:
             self._silence()  # stopped by the user: cut the voice off immediately
+            if draft.done:  # it already acted: a new request, not more of this one
+                self.unanswered = None
             raise
         finally:
             draft.discard()  # no-op if finished; stops generation if we were interrupted

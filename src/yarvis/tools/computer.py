@@ -28,6 +28,9 @@ OPEN: Final = "/usr/bin/open"
 OSASCRIPT: Final = "/usr/bin/osascript"
 XDG_OPEN: Final = "/usr/bin/xdg-open"
 COMMAND_TIMEOUT_S: Final = 8.0
+MAX_OUTPUT_CHARS: Final = 64_000
+"""Enough for any answer Yarvis asks for (a page's links, every tab); tool results are
+trimmed again before they reach the model."""
 APP_DIRS: Final = (
     Path("/Applications"),
     Path("/Applications/Utilities"),
@@ -57,7 +60,7 @@ async def run_command(argv: Sequence[str]) -> tuple[int, str]:
         process.kill()
         await process.wait()
         raise
-    return process.returncode or 0, output.decode(errors="replace").strip()[:500]
+    return process.returncode or 0, output.decode(errors="replace").strip()[:MAX_OUTPUT_CHARS]
 
 
 class Apps:
@@ -256,6 +259,10 @@ class Media(_Command[MediaArgs]):
         script = f'tell application "{player}" to {_MEDIA_COMMANDS[args.action]}'
         await self._check([OSASCRIPT, "-e", script], f"{player} did not respond.")
         return f"{player}: {args.action}."
+
+    def starts_playback(self, args: MediaArgs) -> bool:
+        """Play, toggle, next and previous (may) start music; pause does not."""
+        return args.action != "pause"
 
     def describe(self, args: MediaArgs) -> str:
         """'pause the music'."""

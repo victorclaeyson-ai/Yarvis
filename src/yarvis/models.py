@@ -5,19 +5,22 @@ Every model is pinned:
 * Files Yarvis downloads itself (Kokoro, the wake word) are pinned by URL, size and
   SHA-256. A file is only moved into place after its hash matches, and redirects to
   non-HTTPS URLs are refused.
+* Parakeet (speech recognition on the Apple GPU) is downloaded the same way, from URLs
+  pinned to an exact Hugging Face commit. Its small ``config.json`` lives in git rather
+  than LFS, so Hugging Face only publishes its git object id: it is checked against that.
 * Whisper models come from Hugging Face through ``faster-whisper``, pinned to an exact
   git commit, so a changed upstream repository cannot change what we load.
 * The Silero VAD model ships inside the ``faster-whisper`` wheel, which is itself pinned by
   hash in ``uv.lock``.
 
-Only ONNX and CTranslate2 formats are used: never pickle.
+Only ONNX, CTranslate2 and safetensors formats are used: never pickle.
 """
 
 from __future__ import annotations
 
 import hashlib
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Final, Protocol
+from typing import TYPE_CHECKING, Final, Literal, Protocol
 
 import httpx2
 
@@ -33,14 +36,39 @@ if TYPE_CHECKING:
 CHUNK_SIZE: Final = 1 << 20  # 1 MiB
 
 
+type HashAlgorithm = Literal["sha256", "git-blob"]
+
+
+class _Hasher(Protocol):
+    def update(self, data: bytes, /) -> None: ...
+
+    def hexdigest(self) -> str: ...
+
+
 @dataclass(frozen=True, slots=True)
 class ModelFile:
-    """A file downloaded from a fixed URL and verified by size and SHA-256."""
+    """A file downloaded from a fixed URL and verified by size and hash.
+
+    The hash is normally SHA-256. ``git-blob`` is the git object id of a file stored in git
+    itself (SHA-1 of a ``blob <size>`` header, a NUL byte and the content), which is all
+    Hugging Face publishes for small files kept outside LFS.
+    """
 
     name: str
     url: str
-    sha256: str
+    digest: str
     size: int
+    algorithm: HashAlgorithm = "sha256"
+
+    def hasher(self) -> _Hasher:
+        """A fresh hash object for this file's algorithm."""
+        if self.algorithm == "sha256":
+            return hashlib.sha256()
+        # Matches what git and Hugging Face publish; the SHA-256-checked weights are what
+        # matter for safety, and the commit-pinned URL already fixes this file.
+        git = hashlib.sha1(usedforsecurity=False)
+        git.update(f"blob {self.size}\0".encode())
+        return git
 
 
 _KOKORO_RELEASE: Final = (
@@ -50,13 +78,13 @@ _KOKORO_RELEASE: Final = (
 KOKORO_MODEL: Final = ModelFile(
     name="kokoro-v1.0.onnx",
     url=f"{_KOKORO_RELEASE}/kokoro-v1.0.onnx",
-    sha256="beb0d1848dee9a49da392cc3df26958d46cfa35d321edf434f52949153f0df3a",
+    digest="beb0d1848dee9a49da392cc3df26958d46cfa35d321edf434f52949153f0df3a",
     size=325_505_369,
 )
 KOKORO_VOICES: Final = ModelFile(
     name="voices-v1.0.bin",
     url=f"{_KOKORO_RELEASE}/voices-v1.0.bin",
-    sha256="bca610b8308e8d99f32e6fe4197e7ec01679264efed0cac9140fe9c29f1fbf7d",
+    digest="bca610b8308e8d99f32e6fe4197e7ec01679264efed0cac9140fe9c29f1fbf7d",
     size=28_214_398,
 )
 KOKORO_FILES: Final = (KOKORO_MODEL, KOKORO_VOICES)
@@ -67,23 +95,43 @@ WAKE_WORD_FILES: Final = (
     ModelFile(
         name="melspectrogram.onnx",
         url=f"{_OWW_RELEASE}/melspectrogram.onnx",
-        sha256="ba2b0e0f8b7b875369a2c89cb13360ff53bac436f2895cced9f479fa65eb176f",
+        digest="ba2b0e0f8b7b875369a2c89cb13360ff53bac436f2895cced9f479fa65eb176f",
         size=1_087_958,
     ),
     ModelFile(
         name="embedding_model.onnx",
         url=f"{_OWW_RELEASE}/embedding_model.onnx",
-        sha256="70d164290c1d095d1d4ee149bc5e00543250a7316b59f31d056cff7bd3075c1f",
+        digest="70d164290c1d095d1d4ee149bc5e00543250a7316b59f31d056cff7bd3075c1f",
         size=1_326_578,
     ),
     ModelFile(
         name="hey_jarvis_v0.1.onnx",
         url=f"{_OWW_RELEASE}/hey_jarvis_v0.1.onnx",
-        sha256="94a13cfe60075b132f6a472e7e462e8123ee70861bc3fb58434a73712ee0d2cb",
+        digest="94a13cfe60075b132f6a472e7e462e8123ee70861bc3fb58434a73712ee0d2cb",
         size=1_271_370,
     ),
 )
 """openWakeWord models (code Apache-2.0; pre-trained models CC BY-NC-SA 4.0)."""
+
+_PARAKEET_REPO: Final = "https://huggingface.co/mlx-community/parakeet-tdt-0.6b-v2/resolve"
+_PARAKEET_COMMIT: Final = "8ae155301e23d820d82aa60d24817c900e69e487"
+
+PARAKEET_FILES: Final = (
+    ModelFile(
+        name="config.json",
+        url=f"{_PARAKEET_REPO}/{_PARAKEET_COMMIT}/config.json",
+        digest="8955c588b5549ef70811f2121c6c8bda33508992",
+        size=36_176,
+        algorithm="git-blob",
+    ),
+    ModelFile(
+        name="model.safetensors",
+        url=f"{_PARAKEET_REPO}/{_PARAKEET_COMMIT}/model.safetensors",
+        digest="b958c37a6baa6874a279108755c8f2818e27bf647d72d54800a234a421341dfe",
+        size=2_471_559_904,
+    ),
+)
+"""NVIDIA Parakeet TDT 0.6B v2 converted to MLX (CC BY 4.0): English speech recognition."""
 
 WHISPER_REVISIONS: Final[dict[SttModel, str]] = {
     "tiny.en": "0d3d19a32d3338f10357c0889762bd8d64bbdeba",
@@ -115,6 +163,11 @@ def kokoro_dir(cache_dir: Path) -> Path:
 def wake_word_dir(cache_dir: Path) -> Path:
     """Directory holding the wake-word models."""
     return cache_dir / "models" / "wakeword"
+
+
+def parakeet_dir(cache_dir: Path) -> Path:
+    """Directory holding the Parakeet files."""
+    return cache_dir / "models" / "parakeet-tdt-0.6b-v2"
 
 
 def whisper_dir(cache_dir: Path) -> Path:
@@ -163,7 +216,7 @@ def download(
     ensure_private_dir(directory)
     target = directory / model.name
     partial = directory / f".{model.name}.part"
-    digest = hashlib.sha256()
+    digest = model.hasher()
     received = 0
     open_url = opener or _https_stream
     try:
@@ -181,8 +234,8 @@ def download(
         if received != model.size:
             msg = f"{model.name}: expected {model.size} bytes, got {received}"
             raise ModelIntegrityError(msg)
-        if digest.hexdigest() != model.sha256:
-            msg = f"{model.name}: SHA-256 mismatch, the download may have been tampered with"
+        if digest.hexdigest() != model.digest:
+            msg = f"{model.name}: hash mismatch, the download may have been tampered with"
             raise ModelIntegrityError(msg)
         partial.replace(target)
     finally:

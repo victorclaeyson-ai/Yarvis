@@ -54,6 +54,7 @@ def services(paths: AppPaths, secrets: SecretStore, audio: FakeAudioProbe) -> Se
         audio=audio,
         console=Console(width=200, color_system=None),
         err_console=Console(width=200, color_system=None, stderr=True),
+        parakeet_ok=lambda: False,  # the same on every CI machine; tests opt in
     )
 
 

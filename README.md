@@ -6,9 +6,9 @@ Your own Jarvis — except it lives on your machine, like a yeti lives off the g
 
 > **Status: early development (Phase 2 of 5).** Talk to Yarvis in its own app window: say
 > "Hey Yarvis", ask, interrupt it mid-sentence. It can now set timers and reminders, drive
-> your browser's tabs, play any song on Spotify, type into apps, and control apps and volume
-> on your Mac. Web answers, calendar and memory are next. Star or watch the repo to follow
-> along.
+> your browser (tabs, pages, links, videos), play any song or your own playlists on Spotify,
+> type into apps, and control apps and volume on your Mac. Web answers, calendar and memory
+> are next. Star or watch the repo to follow along.
 
 ## Why Yarvis
 
@@ -19,9 +19,11 @@ Your own Jarvis — except it lives on your machine, like a yeti lives off the g
   and the conversation stays open; talk over it to interrupt (or say "Hey Yarvis" again on
   speakers); say "thanks" when you're done
   ([how it works](docs/adr/0006-wake-word-and-barge-in.md)).
-- **Private by default** — wake word, speech-to-text and text-to-speech run locally. Audio
-  never leaves your machine and is never stored; only the text of your request goes to the
-  language model. A fully offline mode is on the roadmap.
+- **Private by default** — wake word, speech-to-text and text-to-speech run locally (on
+  Apple Silicon, speech recognition uses NVIDIA's Parakeet on the GPU, which mishears far
+  fewer words than small Whisper models). Audio never leaves your machine and is never
+  stored; only the text of your request goes to the language model. A fully offline mode is
+  on the roadmap.
 - **Actually does things** — timers and reminders that speak up, apps, websites, volume
   and music today; web search and any MCP server (calendar, email, …) next.
 - **Safe to give power to** — a security model that assumes the AI *will* be manipulated:
@@ -57,9 +59,12 @@ uv run yarvis doctor              # checks audio devices, keychain, models
 uv run yarvis app                 # opens the Yarvis window: say "Hey Yarvis"
 ```
 
-The first run downloads the speech models (~500 MB, verified by SHA-256). After that, speech
-recognition and the voice run fully on your machine; only the text of the conversation goes
-to Claude.
+The first run downloads the speech models, verified by SHA-256: the voice (350 MB) and, on
+Apple Silicon, Parakeet speech recognition (2.5 GB; NVIDIA, CC BY 4.0), or Whisper elsewhere
+(500 MB). After that, speech recognition and the voice run fully on your machine; only the
+text of the conversation goes to Claude. While you talk to Yarvis, Spotify and browser
+videos are turned down so it hears you rather than the song (`duck_music = false` turns that
+off), and once Yarvis has started music or a video, say "Hey Yarvis" to talk to it again.
 
 **About the wake word.** "Hey Yarvis" is detected on your computer by
 [openWakeWord](https://github.com/dscripka/openWakeWord)'s "hey jarvis" model (it hears
@@ -69,8 +74,8 @@ models are free for personal, **non-commercial** use (CC BY-NC-SA 4.0), so Yarvi
 them separately (4 MB) instead of bundling them. Prefer press-to-talk? Set
 `wake_word = false` in the config, or start with `--no-wake-word`.
 
-Curious how fast it is on your machine? `yarvis bench` measures each stage (voice, speech
-recognition on CPU and Apple GPU, Claude's first token) and recommends settings.
+Curious how fast it is on your machine? `yarvis bench` measures each stage (voice, each
+speech recognition engine and what it heard, Claude's first token) and recommends settings.
 
 Prefer the terminal? `yarvis run` does the same in your shell. Both accept `--text` (type
 instead of speaking), `--mute` (no voice output) and `--no-wake-word`. `yarvis config init`
@@ -80,9 +85,17 @@ tools are on).
 
 **Things to try:** "Set a pasta timer for nine minutes", "Remind me at six to call mom",
 "Play Feel What You Want by Kristine W", "Spotify volume to forty", "Turn on shuffle",
-"What's playing?", "Open Brave", "Switch to the Gmail tab", "Search for trains to Ghent",
-"Go back", "Type 'see you at eight' in Messages", "Quit Safari" (Yarvis asks first). The
-first time Yarvis controls an app, macOS asks whether your terminal may do so.
+"Play my workout playlist", "What's playing?", "Open Brave", "Open a new tab", "Go to
+YouTube", "Click on the first video", "Pause the video", "Switch to the Gmail tab",
+"Search for trains to Ghent", "Go back", "Type 'see you at eight' in Messages", "Quit
+Safari" (Yarvis asks first). The first time Yarvis controls an app, macOS asks whether your
+terminal may do so.
+
+**Pages in your browser.** To read a page and follow its links (a video, an article),
+Yarvis runs a small, fixed script in the current tab. Browsers only allow that once you turn
+it on: in Brave or Chrome, View → Developer → Allow JavaScript from Apple Events; in Safari,
+Develop → Allow JavaScript from Apple Events. Following a link just opens its https address;
+pressing a button always needs your "yes"; private windows are never read.
 
 **Spotify by name.** To play a specific song, album, artist or playlist, Yarvis searches
 Spotify's catalogue. Create a developer app at
@@ -91,7 +104,9 @@ redirect URI `http://127.0.0.1:8888/callback`, tick "Web API"), then run
 `uv run yarvis key set spotify` and paste its client ID and secret; they go to the keychain.
 Spotify requires the developer account to have Premium (since February 2026). Without it,
 Yarvis opens the search in Spotify instead; volume, shuffle, repeat, skipping and "what's
-playing?" work either way.
+playing?" work either way. For **your own playlists**, run `uv run yarvis spotify login`
+once: Spotify asks you to allow read-only access, and the login stays in the keychain
+(`uv run yarvis key delete spotify-login` disconnects it).
 
 **Typing.** Yarvis pastes text into the app in front, so it works with any keyboard layout.
 Pressing Enter (which sends, in chat apps) always needs your "yes", and Yarvis never types

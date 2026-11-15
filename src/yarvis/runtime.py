@@ -44,6 +44,8 @@ if TYPE_CHECKING:
     from yarvis.llm.base import LLMProvider
     from yarvis.speech.base import VoiceActivityDetector
     from yarvis.tools.base import Tool
+    from yarvis.tools.ducking import Ducker
+    from yarvis.tools.spotify import SpotifyKeys
 
 
 class LoadableSTT(SpeechToText, Protocol):
@@ -97,8 +99,10 @@ class Backends:
     microphone: Callable[[Config], FrameSource]
     speaker: Callable[[Config, int], Sink]
     wake_word: Callable[[Config, Path], LoadableWakeWord]
-    computer: Callable[[Config, SecretStr | None], list[Tool[Any]]]
-    """The tools that act on this computer (given the Spotify credentials, if any)."""
+    computer: Callable[[Config, SpotifyKeys | None], list[Tool[Any]]]
+    """The tools that act on this computer (given the Spotify keys, if any)."""
+    ducker: Callable[[Config], Ducker | None] = lambda _config: None
+    """Turns music down during conversations (None: nothing to turn down)."""
 
     @classmethod
     def real(cls) -> Backends:  # pragma: no cover - exercised on real machines, not in CI
@@ -106,20 +110,17 @@ class Backends:
         from yarvis.audio.microphone import Microphone  # noqa: PLC0415
         from yarvis.audio.speaker import Speaker  # noqa: PLC0415
         from yarvis.llm.anthropic import AnthropicProvider  # noqa: PLC0415
+        from yarvis.speech.choice import make_stt, parakeet_available  # noqa: PLC0415
         from yarvis.speech.kokoro import KokoroTTS  # noqa: PLC0415
         from yarvis.speech.silero import SileroVAD  # noqa: PLC0415
         from yarvis.speech.wakeword import WakeWordDetector  # noqa: PLC0415
-        from yarvis.speech.whisper import WhisperSTT  # noqa: PLC0415
-        from yarvis.tools.desktop import computer_tools  # noqa: PLC0415
-        from yarvis.tools.spotify import SpotifyCatalog  # noqa: PLC0415
+        from yarvis.tools.desktop import computer_tools, music_ducker  # noqa: PLC0415
+        from yarvis.tools.spotify import SpotifyAccount, SpotifyCatalog  # noqa: PLC0415
 
         return cls(
             llm=lambda config, key: AnthropicProvider(key, model=config.llm.model),
-            stt=lambda config, cache: WhisperSTT(
-                config.voice.stt_model,
-                cache_dir=cache,
-                vocabulary=config.voice.vocabulary,
-                device=config.voice.stt_device,
+            stt=lambda config, cache: make_stt(
+                config.voice, cache, parakeet_ok=parakeet_available()
             ),
             tts=lambda config, cache: KokoroTTS(
                 cache_dir=cache, voice=config.voice.voice, speed=config.voice.speech_rate
@@ -132,10 +133,12 @@ class Backends:
             wake_word=lambda config, cache: WakeWordDetector(
                 cache_dir=cache, threshold=config.voice.wake_word_threshold
             ),
+            ducker=music_ducker,
             computer=lambda config, spotify: computer_tools(
                 browser=config.tools.browser,
                 typing=config.tools.typing,
-                spotify=SpotifyCatalog.from_secret(spotify) if spotify else None,
+                spotify=SpotifyCatalog.from_secret(spotify.app) if spotify else None,
+                spotify_account=SpotifyAccount.from_keys(spotify) if spotify else None,
             ),
         )
 
@@ -152,7 +155,7 @@ async def run_assistant(
     voice_output: bool = True,
     on_loading: Callable[[str], None] | None = None,
     controls: AssistantControls | None = None,
-    spotify: SecretStr | None = None,
+    spotify: SpotifyKeys | None = None,
 ) -> None:
     """Assemble the pipeline and run the interactive loop until the user quits."""
     llm = backends.llm(config, api_key)
@@ -261,14 +264,17 @@ async def run_assistant(
             ),
             greeter=greeter,
             announcements=announcements,
+            ducker=backends.ducker(config) if voice_input and config.voice.duck_music else None,
         )
+        if conversation.toolbox is not None:
+            conversation.toolbox.on_playback = assistant.media_started
         if controls is not None:
             controls.attach(assistant)
         await assistant.run()
 
 
 def _tools(
-    config: Config, alarms: Alarms | None, backends: Backends, spotify: SecretStr | None
+    config: Config, alarms: Alarms | None, backends: Backends, spotify: SpotifyKeys | None
 ) -> tuple[list[Tool[Any]], list[str]]:
     """The enabled tools, and what they let Yarvis do (in words, for the system prompt)."""
     tools: list[Tool[Any]] = []

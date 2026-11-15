@@ -116,6 +116,8 @@ async def test_media_controls_the_active_player(apps: Apps) -> None:
     assert tool.describe(MediaArgs(action="pause")) == "pause the music"
     assert tool.describe(MediaArgs(action="next")) == "skip to the next track"
     assert tool.describe(MediaArgs(action="toggle")) == "play or pause the music"
+    assert tool.starts_playback(MediaArgs(action="next"))
+    assert not tool.starts_playback(MediaArgs(action="pause"))
 
 
 async def test_media_falls_back_to_an_installed_player(apps: Apps, tmp_path: Path) -> None:

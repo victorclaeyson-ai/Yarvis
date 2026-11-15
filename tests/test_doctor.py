@@ -203,9 +203,23 @@ def test_missing_models_warn(ctx: DoctorContext) -> None:
     result = check_models(ctx, Config())
     assert result.status is Status.WARN
     assert "Kokoro voice" in result.detail
-    assert "Whisper base.en" in result.detail
+    assert "Whisper small.en" in result.detail
     install_models(ctx.paths)
     assert check_models(ctx, Config()).status is Status.OK
+
+
+def test_apple_silicon_needs_parakeet_not_whisper(ctx: DoctorContext) -> None:
+    mac = replace(ctx, parakeet_installed=True)
+    install_models(ctx.paths)  # Whisper is there, Parakeet is not
+    result = check_models(mac, Config())
+    assert result.status is Status.WARN
+    assert "Parakeet speech recognition" in result.detail
+    assert "Whisper" not in result.detail
+    assert "(~2471 MB)" in result.detail
+    install_models(ctx.paths, whisper=False, wake_word=False, parakeet=True)
+    assert check_models(mac, Config()).status is Status.OK
+    whisper = Config.model_validate({"voice": {"stt": "faster-whisper"}})
+    assert check_models(mac, whisper).status is Status.OK
 
 
 @pytest.mark.parametrize(

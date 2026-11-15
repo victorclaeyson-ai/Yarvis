@@ -30,6 +30,7 @@ logger = logging.getLogger(__name__)
 
 TOOL_TIMEOUT_S: Final = 10.0
 CONFIRMATION_TTL_S: Final = 60.0
+CONFIRMED_AND_DONE: Final = "The user confirmed and it was done: "
 MAX_RESULT_CHARS: Final = 8_000
 WAITING_FOR_USER: Final = (
     "Not done yet: this needs the user's spoken confirmation, and the system is asking them "
@@ -59,6 +60,8 @@ class RoundOutcome:
     results: tuple[ToolResult, ...]
     tainted: bool
     pending: PendingAction | None
+    done: tuple[str, ...] = ()
+    """What was actually done ("play Feel What You Want on Spotify"), in order."""
 
 
 class Toolbox:
@@ -72,12 +75,15 @@ class Toolbox:
         timeout_s: float = TOOL_TIMEOUT_S,
         clock: Callable[[], float] = time.monotonic,
         on_activity: Callable[[str], None] | None = None,
+        on_playback: Callable[[], None] | None = None,
     ) -> None:
         self._tools = {tool.name: tool for tool in tools}
         self._gate = gate
         self._timeout_s = timeout_s
         self._clock = clock
         self._on_activity = on_activity
+        self.on_playback = on_playback
+        """Called when a call starts music or a video (settable once the listener exists)."""
 
     def specs(self) -> tuple[ToolSpec, ...]:
         """What the model is offered."""
@@ -86,13 +92,15 @@ class Toolbox:
     async def run(self, calls: Sequence[ToolCall], *, tainted: bool) -> RoundOutcome:
         """Run one batch of calls (in order). At most one may wait for confirmation."""
         results: list[ToolResult] = []
+        done: list[str] = []
         pending: PendingAction | None = None
         for call in calls:
-            result, parked, untrusted = await self._one(call, tainted=tainted, busy=pending)
+            result, parked, untrusted, ran = await self._one(call, tainted=tainted, busy=pending)
             pending = pending or parked
             tainted = tainted or untrusted
             results.append(result)
-        return RoundOutcome(tuple(results), tainted, pending)
+            done += [ran] if ran else []
+        return RoundOutcome(tuple(results), tainted, pending, tuple(done))
 
     def expired(self, action: PendingAction) -> bool:
         """Whether the user answered too late. The deadline was set with this clock."""
@@ -104,33 +112,31 @@ class Toolbox:
             outcome = await self._execute(action.tool, action.args, action.description)
         except ToolError as exc:
             return f"The user confirmed, but it failed: {exc}"
-        return f"The user confirmed and it was done: {outcome}"
+        return CONFIRMED_AND_DONE + outcome
 
     async def _one(
         self, call: ToolCall, *, tainted: bool, busy: PendingAction | None
-    ) -> tuple[ToolResult, PendingAction | None, bool]:
-        """Returns (result, a parked action if any, whether the result is untrusted)."""
+    ) -> tuple[ToolResult, PendingAction | None, bool, str | None]:
+        """One call: (result, parked action, untrusted result?, what was done if it ran)."""
         prepared = self._prepare(call, tainted=tainted)
         if isinstance(prepared, ToolResult):
-            return prepared, None, False
+            return prepared, None, False, None
         tool, args, verdict = prepared
         description = tool.describe(args)
         if verdict is Verdict.CONFIRM:
             if busy is not None:
-                return (
-                    _error(call, "Another action is already waiting for confirmation."),
-                    None,
-                    False,
-                )
+                busy_error = _error(call, "Another action is already waiting for confirmation.")
+                return busy_error, None, False, None
             action = PendingAction(tool, args, description, self._clock() + CONFIRMATION_TTL_S)
-            return ToolResult(call.id, WAITING_FOR_USER), action, False
+            return ToolResult(call.id, WAITING_FOR_USER), action, False, None
         try:
             content = await self._execute(tool, args, description)
         except ToolError as exc:
-            return _error(call, str(exc)), None, False
+            return _error(call, str(exc)), None, False, None
         if tool.untrusted_output:
-            return ToolResult(call.id, wrap_untrusted(tool.name, content)), None, True
-        return ToolResult(call.id, content), None, False
+            wrapped = wrap_untrusted(tool.name, content)
+            return ToolResult(call.id, wrapped), None, True, description
+        return ToolResult(call.id, content), None, False, description
 
     def _prepare(
         self, call: ToolCall, *, tainted: bool
@@ -159,6 +165,8 @@ class Toolbox:
             async with asyncio.timeout(self._timeout_s):
                 content = await tool.run(args)
         except ToolError:
+            # The message can quote outside content (a page, a song title): not logged.
+            logger.info("Tool %s: did not work", tool.name)
             raise
         except TimeoutError:
             logger.warning("Tool %s timed out", tool.name)
@@ -168,6 +176,9 @@ class Toolbox:
             logger.exception("Tool %s failed", tool.name)
             msg = "It failed unexpectedly."
             raise ToolError(msg) from None
+        logger.info("Tool %s: done", tool.name)
+        if tool.starts_playback(args) and self.on_playback is not None:
+            self.on_playback()
         return content[:MAX_RESULT_CHARS]
 
 

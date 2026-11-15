@@ -466,3 +466,41 @@ async def test_typed_messages_do_not_trigger_follow_up() -> None:
         ears=FakeEars(talker),
     ).run()
     assert calls == []
+
+
+class RecordingDucker:
+    def __init__(self, ui: RecordingUi) -> None:
+        self.ui = ui
+
+    async def duck(self) -> None:
+        self.ui.events.append("music down")
+
+    async def restore(self) -> None:
+        self.ui.events.append("music up")
+
+
+async def test_music_is_turned_down_for_the_whole_conversation() -> None:
+    ui = RecordingUi()
+
+    async def fake_listen(hooks: PauseHooks, *, follow_up: bool = False) -> Utterance | None:
+        return None if follow_up else utterance()
+
+    assistant = Assistant(
+        turn=make_turn(FakeLLM(["It is noon."], ["Typed."])),
+        lines=lines("", "typed", "q"),
+        ui=ui,
+        ears=FakeEars(fake_listen),
+        ducker=RecordingDucker(ui),
+    )
+    await assistant.run()
+    assert ui.events == [
+        "ready:True",
+        "music down",
+        "listening",
+        "reply:It is noon.",
+        "listening",  # the follow-up window: still quiet
+        "music up",  # the conversation is over
+        "ready:True",
+        "reply:Typed.",  # typing needs no quiet
+        "ready:True",
+    ]

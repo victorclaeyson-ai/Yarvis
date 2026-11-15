@@ -18,14 +18,17 @@ from test_wake_and_barge_in import EventUi
 from yarvis.cli.app import Services
 from yarvis.cli.ui import ConsoleUi, format_timings, stdin_lines
 from yarvis.config import Config
+from yarvis.config.models import VoiceConfig
 from yarvis.llm.base import ToolCall
 from yarvis.models import (
     KOKORO_FILES,
+    PARAKEET_FILES,
     WAKE_WORD_FILES,
     WHISPER_REVISIONS,
     ModelFile,
     ModelIntegrityError,
     kokoro_dir,
+    parakeet_dir,
     wake_word_dir,
     whisper_dir,
 )
@@ -36,6 +39,7 @@ from yarvis.security.secrets import KEYRING_SERVICE
 from yarvis.speech.silero import SileroVAD
 from yarvis.tools.computer import Apps
 from yarvis.tools.desktop import computer_tools
+from yarvis.tools.spotify import SpotifyKeys
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Callable
@@ -132,15 +136,20 @@ class FakeBackends:
         self.sink = FakeSink()
         self.wake = FakeWakeWord()
         self.keys: list[str] = []
+        self.stt_engines: list[str] = []
 
     def build(self) -> Backends:
         def make_llm(config: Config, key: SecretStr) -> FakeLLM:
             self.keys.append(key.get_secret_value())
             return self.llm
 
+        def make_stt(config: Config, cache: Path) -> LoadableSTT:
+            self.stt_engines.append(config.voice.stt)
+            return self.stt
+
         return Backends(
             llm=make_llm,
-            stt=lambda config, cache: self.stt,
+            stt=make_stt,
             tts=lambda config, cache: self.tts,
             vad=SileroVAD,
             microphone=lambda config: self.mic,
@@ -238,22 +247,27 @@ async def test_text_and_mute_mode_load_nothing(tmp_path: Path) -> None:
 # --------------------------------------------------------------------------- CLI: run / models
 
 
-def install_models(paths: AppPaths, *, whisper: bool = True, wake_word: bool = True) -> None:
+def install_models(
+    paths: AppPaths, *, whisper: bool = True, wake_word: bool = True, parakeet: bool = False
+) -> None:
     paths.ensure_all()
     sets: list[tuple[Path, tuple[ModelFile, ...]]] = [(kokoro_dir(paths.cache_dir), KOKORO_FILES)]
     if wake_word:
         sets.append((wake_word_dir(paths.cache_dir), WAKE_WORD_FILES))
+    if parakeet:
+        sets.append((parakeet_dir(paths.cache_dir), PARAKEET_FILES))
     for directory, models in sets:
-        directory.mkdir(parents=True)
+        directory.mkdir(parents=True, exist_ok=True)
         for model in models:
             with (directory / model.name).open("wb") as handle:
                 handle.truncate(model.size)  # sparse file with the right size
     if whisper:
+        model = VoiceConfig().stt_model
         snapshot = (
-            whisper_dir(paths.cache_dir) / "models--Systran--faster-whisper-base.en" / "snapshots"
+            whisper_dir(paths.cache_dir) / f"models--Systran--faster-whisper-{model}" / "snapshots"
         )
-        (snapshot / WHISPER_REVISIONS["base.en"]).mkdir(parents=True)
-        (snapshot / WHISPER_REVISIONS["base.en"] / "model.bin").write_bytes(b"x")
+        (snapshot / WHISPER_REVISIONS[model]).mkdir(parents=True, exist_ok=True)
+        (snapshot / WHISPER_REVISIONS[model] / "model.bin").write_bytes(b"x")
 
 
 @pytest.fixture
@@ -310,6 +324,61 @@ def test_run_announces_whisper_download(
         item.unlink()
     services.lines = lambda: lines("q")
     assert "downloading the speech recognition model" in invoke("run").output
+
+
+def test_run_uses_parakeet_on_apple_silicon(
+    invoke: Invoke, services: Services, ready: FakeBackends, paths: AppPaths
+) -> None:
+    services.parakeet_ok = lambda: True
+    install_models(paths, whisper=False, wake_word=False, parakeet=True)
+    services.lines = lambda: lines("", "q")
+    result = invoke("run")
+    assert result.exit_code == 0, result.output
+    assert ready.stt_engines == ["parakeet"]
+    assert "Parakeet" not in result.output  # already downloaded: nothing to ask
+
+
+def test_run_offers_to_download_parakeet(
+    invoke: Invoke, services: Services, ready: FakeBackends
+) -> None:
+    services.parakeet_ok = lambda: True
+    downloaded: list[str] = []
+    services.downloader = recording_downloader(downloaded)
+    services.lines = lambda: lines("q")
+    declined = invoke("run", stdin="n\n")
+    assert declined.exit_code == 0, declined.output
+    assert "GPU (2.5 GB, one time" in declined.output
+    assert "Using Whisper for speech recognition instead" in declined.output
+    assert downloaded == []
+    accepted = invoke("run", "--yes")
+    assert accepted.exit_code == 0, accepted.output
+    assert downloaded == [model.name for model in PARAKEET_FILES]
+    assert ready.stt_engines == ["faster-whisper", "parakeet"]
+
+
+def test_text_mode_needs_no_speech_recognition(
+    invoke: Invoke, services: Services, ready: FakeBackends
+) -> None:
+    services.parakeet_ok = lambda: True
+    services.lines = lambda: lines("q")
+    result = invoke("run", "--text", "--mute")
+    assert result.exit_code == 0, result.output
+    assert "Parakeet" not in result.output
+
+
+def test_models_download_fetches_parakeet(
+    invoke: Invoke, services: Services, paths: AppPaths
+) -> None:
+    install_models(paths, whisper=False)
+    services.parakeet_ok = lambda: True
+    fakes = FakeBackends(FakeLLM())
+    services.backends = fakes.build
+    downloaded: list[str] = []
+    services.downloader = recording_downloader(downloaded)
+    assert invoke("models", "download", "--yes").exit_code == 0
+    assert downloaded == [model.name for model in PARAKEET_FILES]
+    assert not fakes.stt.loaded  # Whisper is not needed
+    assert invoke("models", "download", stdin="n\n").exit_code == 1
 
 
 def test_kokoro_download_flow(
@@ -394,12 +463,12 @@ def test_models_download_includes_the_wake_word(
 
 def test_kokoro_download_failure(invoke: Invoke, services: Services) -> None:
     def failing(model: ModelFile, directory: Path, progress: Callable[[int], None]) -> Path:
-        raise ModelIntegrityError("SHA-256 mismatch")
+        raise ModelIntegrityError("hash mismatch")
 
     services.downloader = failing
     result = invoke("models", "download", "--yes")
     assert result.exit_code == 1
-    assert "SHA-256 mismatch" in result.output
+    assert "hash mismatch" in result.output
 
 
 def test_models_download(invoke: Invoke, services: Services, paths: AppPaths) -> None:
@@ -555,9 +624,9 @@ async def test_computer_tools_are_described_to_the_model(tmp_path: Path) -> None
 
 
 async def test_spotify_credentials_reach_the_computer_tools(tmp_path: Path) -> None:
-    seen: list[SecretStr | None] = []
+    seen: list[SpotifyKeys | None] = []
 
-    def computer(config: Config, spotify: SecretStr | None) -> list[Any]:
+    def computer(config: Config, spotify: SpotifyKeys | None) -> list[Any]:
         seen.append(spotify)
         return []
 
@@ -571,20 +640,20 @@ async def test_spotify_credentials_reach_the_computer_tools(tmp_path: Path) -> N
         backends=backends,
         voice_input=False,
         voice_output=False,
-        spotify=SecretStr("id:secret"),
+        spotify=SpotifyKeys(SecretStr("id:secret")),
     )
-    assert [s.get_secret_value() for s in seen if s] == ["id:secret"]
+    assert [s.app.get_secret_value() for s in seen if s] == ["id:secret"]
 
 
 def test_run_passes_stored_spotify_credentials(
     invoke: Invoke, services: Services, ready: FakeBackends, fake_keyring: FakeKeyring
 ) -> None:
     fake_keyring.store[(KEYRING_SERVICE, "spotify")] = "a" * 32 + ":" + "b" * 32
-    seen: list[SecretStr | None] = []
+    seen: list[SpotifyKeys | None] = []
     real = ready.build
 
     def build() -> Backends:
-        def computer(config: Config, spotify: SecretStr | None) -> list[Any]:
+        def computer(config: Config, spotify: SpotifyKeys | None) -> list[Any]:
             seen.append(spotify)
             return []
 
@@ -594,3 +663,14 @@ def test_run_passes_stored_spotify_credentials(
     services.lines = lambda: lines("hello", "q")
     assert invoke("run", "--text", "--mute").exit_code == 0
     assert seen and seen[0] is not None
+    assert seen[0].login is None and seen[0].save_login is None  # not logged in
+
+    fake_keyring.store[(KEYRING_SERVICE, "spotify-login")] = "r" * 40
+    seen.clear()
+    services.lines = lambda: lines("q")
+    assert invoke("run", "--text", "--mute").exit_code == 0
+    keys = seen[0]
+    assert keys is not None and keys.login is not None and keys.save_login is not None
+    assert keys.login.get_secret_value() == "r" * 40
+    keys.save_login("s" * 40)  # Spotify renewed it: the keychain keeps the new one
+    assert fake_keyring.store[(KEYRING_SERVICE, "spotify-login")] == "s" * 40

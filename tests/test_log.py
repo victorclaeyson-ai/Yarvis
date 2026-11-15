@@ -62,7 +62,7 @@ def test_third_party_logs_are_redacted_and_kept_off_the_console(
         redactor=redactor,
     )
     logging.getLogger("httpx2").info("info noise")
-    logging.getLogger("phonemizer").warning("words count mismatch")
+    logging.getLogger("onnxruntime").warning("a library warning")
     logging.getLogger("httpx2").error("token third-party-secret-value leaked")
     logging.getLogger("yarvis.test").debug("our debug line")
     for handler in ours():
@@ -70,8 +70,14 @@ def test_third_party_logs_are_redacted_and_kept_off_the_console(
     console = screen.getvalue()
     log_file = (tmp_path / LOG_FILE_NAME).read_text()
     assert "info noise" not in console + log_file
-    assert "words count mismatch" not in console
-    assert "words count mismatch" in log_file
+    assert "a library warning" not in console
+    assert "a library warning" in log_file
     assert "third-party-secret-value" not in console + log_file
     assert "[REDACTED]" in console
     assert "our debug line" in console
+
+
+def test_harmless_library_warnings_are_silenced(redactor: Redactor) -> None:
+    configure_logging(redactor=redactor)
+    assert not logging.getLogger("phonemizer").isEnabledFor(logging.WARNING)
+    assert logging.getLogger("phonemizer").isEnabledFor(logging.ERROR)

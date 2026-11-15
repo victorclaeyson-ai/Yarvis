@@ -29,6 +29,8 @@ LOG_FILE_NAME: Final = "yarvis.log"
 MAX_LOG_BYTES: Final = 5 * 1024 * 1024
 LOG_BACKUPS: Final = 3
 _MARKER: Final = "_yarvis_handler"
+QUIET_LIBRARIES: Final = ("phonemizer",)
+"""Libraries whose warnings are harmless noise ("words count mismatch" on every reply)."""
 
 
 def configure_logging(
@@ -49,6 +51,8 @@ def configure_logging(
     logger = logging.getLogger(ROOT_LOGGER)
     logger.setLevel(level)
     logger.propagate = True
+    for noisy in QUIET_LIBRARIES:
+        logging.getLogger(noisy).setLevel(logging.ERROR)
 
     redacting = RedactingFilter(redactor)
 

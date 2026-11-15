@@ -6,6 +6,7 @@ Checks never print secrets; at most they say where a secret was found.
 
 from __future__ import annotations
 
+import importlib.util
 import platform
 import sys
 from dataclasses import dataclass
@@ -16,15 +17,18 @@ from yarvis.audio.devices import AudioBackendError, AudioDevice
 from yarvis.config import Config, ConfigError, load_config
 from yarvis.models import (
     KOKORO_FILES,
+    PARAKEET_FILES,
     WAKE_WORD_FILES,
     WHISPER_APPROX_MB,
     kokoro_dir,
     missing,
+    parakeet_dir,
     wake_word_dir,
     whisper_present,
 )
 from yarvis.paths import is_private
 from yarvis.security.secrets import SecretName, SecretSource
+from yarvis.speech.choice import choose_engine, parakeet_supported
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
@@ -66,6 +70,7 @@ class DoctorContext:
     system: str
     machine: str
     mac_version: str = ""
+    parakeet_installed: bool = False
 
     @classmethod
     def current(cls, *, paths: AppPaths, secrets: SecretStore, audio: AudioProbe) -> DoctorContext:
@@ -79,6 +84,7 @@ class DoctorContext:
             system=platform.system(),
             machine=platform.machine(),
             mac_version=platform.mac_ver()[0],
+            parakeet_installed=importlib.util.find_spec("parakeet_mlx") is not None,
         )
 
 
@@ -269,7 +275,12 @@ def check_models(ctx: DoctorContext, config: Config) -> CheckResult:
     if pending := missing(KOKORO_FILES, kokoro_dir(cache)):
         todo.append("Kokoro voice")
         megabytes += sum(model.size for model in pending) // 1_000_000
-    if not whisper_present(cache, config.voice.stt_model):
+    parakeet_ok = parakeet_supported(ctx.system, ctx.machine, installed=ctx.parakeet_installed)
+    if choose_engine(config.voice, parakeet_ok=parakeet_ok) == "parakeet":
+        if pending := missing(PARAKEET_FILES, parakeet_dir(cache)):
+            todo.append("Parakeet speech recognition")
+            megabytes += sum(model.size for model in pending) // 1_000_000
+    elif not whisper_present(cache, config.voice.stt_model):
         todo.append(f"Whisper {config.voice.stt_model}")
         megabytes += WHISPER_APPROX_MB[config.voice.stt_model]
     if config.voice.wake_word and (pending := missing(WAKE_WORD_FILES, wake_word_dir(cache))):

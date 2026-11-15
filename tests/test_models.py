@@ -10,6 +10,8 @@ import pytest
 
 from yarvis.models import (
     KOKORO_FILES,
+    PARAKEET_FILES,
+    WAKE_WORD_FILES,
     WHISPER_APPROX_MB,
     WHISPER_REVISIONS,
     ModelFile,
@@ -69,7 +71,7 @@ def test_download_verifies_and_installs_privately(tmp_path: Path) -> None:
 @pytest.mark.parametrize(
     ("served", "match"),
     [
-        (PAYLOAD[:-1] + b"X", "SHA-256 mismatch"),
+        (PAYLOAD[:-1] + b"X", "hash mismatch"),
         (PAYLOAD[:-10], "expected"),
         (PAYLOAD + b"extra bytes", "larger than expected"),
     ],
@@ -83,9 +85,27 @@ def test_bad_downloads_never_become_visible(tmp_path: Path, served: bytes, match
 def test_pinned_models_are_complete() -> None:
     assert set(WHISPER_REVISIONS) == set(WHISPER_APPROX_MB)
     assert all(len(revision) == 40 for revision in WHISPER_REVISIONS.values())
-    for model in KOKORO_FILES:
+    for model in (*KOKORO_FILES, *WAKE_WORD_FILES):
         assert model.url.startswith("https://github.com/")
-        assert len(model.sha256) == 64
+        assert len(model.digest) == 64
+        assert model.algorithm == "sha256"
+    for model in PARAKEET_FILES:  # pinned to one commit, never to a branch
+        assert model.url.startswith("https://huggingface.co/mlx-community/")
+        assert "/resolve/8ae155301e23d820d82aa60d24817c900e69e487/" in model.url
+        assert model.url.endswith(f"/{model.name}")
+    weights = PARAKEET_FILES[-1]
+    assert weights.algorithm == "sha256" and len(weights.digest) == 64
+
+
+def test_git_blob_ids_are_checked(tmp_path: Path) -> None:
+    """Small files kept in git are verified against their git object id."""
+    data = b'{"hello": "world"}\n'
+    blob = hashlib.sha1(b"blob %d\0" % len(data) + data, usedforsecurity=False).hexdigest()
+    config = ModelFile("config.json", "https://example.com/c", blob, len(data), "git-blob")
+    assert download(config, tmp_path, opener=opener_for(data)).read_bytes() == data
+    tampered = ModelFile("other.json", "https://example.com/c", blob, len(data), "git-blob")
+    with pytest.raises(ModelIntegrityError, match="hash mismatch"):
+        download(tampered, tmp_path, opener=opener_for(data.replace(b"world", b"evil!")))
 
 
 def test_whisper_present(tmp_path: Path) -> None:

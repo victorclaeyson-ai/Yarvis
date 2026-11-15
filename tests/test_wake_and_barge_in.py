@@ -633,3 +633,84 @@ async def test_hey_yarvis_during_a_conversation_is_greeted_too() -> None:
     ).run()
     assert "said:Good evening, Victor." in ui.events
     assert "reply:Rain." in ui.events
+
+
+# --------------------------------------------------------------------------- timers going off
+
+
+class AlertUi(EventUi):
+    def __init__(self) -> None:
+        super().__init__()
+        self.alerted = asyncio.Event()
+
+    def alert(self, text: str) -> None:
+        super().alert(text)
+        self.alerted.set()
+
+
+async def test_a_due_timer_is_announced_while_waiting() -> None:
+    ui = AlertUi()
+    turn, speaker = make_turn(FakeLLM(), ScriptedSTT(), ui)
+    speaker.finish.set()
+    queue: asyncio.Queue[str] = asyncio.Queue()
+    ears = FakeEars(in_order())
+
+    async def lines() -> AsyncIterator[str]:
+        await ui.alerted.wait()
+        yield "q"
+
+    async def ring() -> None:
+        await asyncio.sleep(0.01)
+        queue.put_nowait("Your 1-minute timer is done.")
+
+    ringing = asyncio.create_task(ring())
+    await Assistant(turn=turn, lines=lines(), ui=ui, ears=ears, announcements=queue).run()
+    await ringing
+    assert ui.events[:3] == ["ready:True", "alert:Your 1-minute timer is done.", "listening"]
+    assert speaker.played[0] == len(CHIME)
+    tts = turn._tts  # pyright: ignore[reportPrivateUsage]
+    assert isinstance(tts, FakeTTS)
+    assert tts.spoken == ["Your 1-minute timer is done."]
+    assert ears.timeouts == [pytest.approx(15, abs=1)]  # the user can answer ("thanks")
+
+
+async def test_a_timer_waits_until_yarvis_has_finished_talking() -> None:
+    ui = AlertUi()
+    turn, speaker = make_turn(FakeLLM(["A long answer."]), ScriptedSTT(), ui)
+    queue: asyncio.Queue[str] = asyncio.Queue()
+
+    async def ring_while_talking() -> None:
+        await speaker.playing.wait()
+        queue.put_nowait("Reminder: call mom.")
+        await asyncio.sleep(0.01)
+        speaker.finish.set()
+
+    ringing = asyncio.create_task(ring_while_talking())
+    await Assistant(
+        turn=turn,
+        lines=_typed("tell me something", "q"),
+        ui=ui,
+        ears=FakeEars(in_order()),
+        announcements=queue,
+    ).run()
+    await ringing
+    assert ui.events.index("reply:A long answer.") < ui.events.index("alert:Reminder: call mom.")
+
+
+async def test_a_typed_line_and_a_timer_at_the_same_moment() -> None:
+    ui = AlertUi()
+    turn, speaker = make_turn(FakeLLM(["Hi."]), ScriptedSTT(), ui)
+    speaker.finish.set()
+    queue: asyncio.Queue[str] = asyncio.Queue()
+
+    async def lines() -> AsyncIterator[str]:
+        queue.put_nowait("Your 2-minute timer is done.")  # rings as the user types
+        yield "hello"
+        await ui.alerted.wait()
+        yield "q"
+
+    await Assistant(
+        turn=turn, lines=lines(), ui=ui, ears=FakeEars(in_order()), announcements=queue
+    ).run()
+    assert "alert:Your 2-minute timer is done." in ui.events  # not lost
+    assert "reply:Hi." in ui.events

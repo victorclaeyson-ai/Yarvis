@@ -102,3 +102,24 @@ def test_error_text_is_not_interpreted_as_markup(invoke: Invoke, paths: AppPaths
     result = invoke("config", "show")
     assert result.exit_code == 1
     assert "vocabulary" in result.output
+
+
+SPOTIFY_ID = "0123456789abcdef0123456789abcdef"
+SPOTIFY_SECRET = "fedcba9876543210fedcba9876543210"  # noqa: S105  # gitleaks:allow - test value
+
+
+def test_key_set_spotify_asks_for_id_and_secret(invoke: Invoke, fake_keyring: FakeKeyring) -> None:
+    result = invoke("key", "set", "spotify", stdin=f"{SPOTIFY_ID}\n{SPOTIFY_SECRET}\n")
+    assert result.exit_code == 0, result.output
+    assert "developer.spotify.com" in result.output
+    assert SPOTIFY_SECRET not in result.output
+    stored = fake_keyring.store[(KEYRING_SERVICE, "spotify")]
+    assert stored == f"{SPOTIFY_ID}:{SPOTIFY_SECRET}"
+    assert "spotify: set (keychain)" in invoke("key", "status").output
+
+
+def test_key_set_spotify_rejects_garbage(invoke: Invoke, fake_keyring: FakeKeyring) -> None:
+    result = invoke("key", "set", "spotify", stdin="not-an-id\nnope\n")
+    assert result.exit_code == 1
+    assert "32 characters" in result.output
+    assert fake_keyring.store == {}

@@ -94,6 +94,16 @@ class ConsoleUi:
         name = _escape(self._name)
         self._console.print(f"[bold magenta]{name}:[/] {_escape(text)}", highlight=False)
 
+    def alert(self, text: str) -> None:
+        """A timer or reminder is due."""
+        self._end_reply()
+        self._console.print(f"\n[bold yellow]⏰ {_escape(text)}[/]", highlight=False)
+
+    def activity(self, text: str) -> None:
+        """Yarvis is doing something."""
+        self._end_reply()
+        self._console.print(f"[dim]• {_escape(text)}[/]", highlight=False)
+
     def nothing_heard(self) -> None:
         """Nothing intelligible was said."""
         self._console.print("[yellow]Didn't catch that.[/]")

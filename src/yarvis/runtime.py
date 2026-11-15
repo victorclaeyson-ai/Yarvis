@@ -10,20 +10,24 @@ import asyncio
 import logging
 from contextlib import AsyncExitStack
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Protocol, Self
+from typing import TYPE_CHECKING, Any, Protocol, Self
 
 import numpy as np
 
 from yarvis.agent.conversation import Conversation
 from yarvis.agent.greetings import Greeter
 from yarvis.agent.prompts import system_prompt
+from yarvis.agent.toolbox import Toolbox
 from yarvis.assistant import Assistant, AssistantControls, TurnTaking
 from yarvis.audio.sounds import chime
 from yarvis.ears import MicrophoneEars, SharedMicrophone, WakeWord, barge_in_mode
 from yarvis.pipeline import Turn
+from yarvis.security.gate import Gate
 from yarvis.speech.base import AudioSink, SpeechToText, TextToSpeech
 from yarvis.speech.endpointing import EndpointerSettings
 from yarvis.speech.turn_taking import DEFAULT_WAKE_NAMES
+from yarvis.tools.desktop import abilities
+from yarvis.tools.timers import Alarms, timer_tools
 
 logger = logging.getLogger(__name__)
 
@@ -39,6 +43,7 @@ if TYPE_CHECKING:
     from yarvis.ears import FrameSource
     from yarvis.llm.base import LLMProvider
     from yarvis.speech.base import VoiceActivityDetector
+    from yarvis.tools.base import Tool
 
 
 class LoadableSTT(SpeechToText, Protocol):
@@ -92,6 +97,8 @@ class Backends:
     microphone: Callable[[Config], FrameSource]
     speaker: Callable[[Config, int], Sink]
     wake_word: Callable[[Config, Path], LoadableWakeWord]
+    computer: Callable[[Config, SecretStr | None], list[Tool[Any]]]
+    """The tools that act on this computer (given the Spotify credentials, if any)."""
 
     @classmethod
     def real(cls) -> Backends:  # pragma: no cover - exercised on real machines, not in CI
@@ -103,6 +110,8 @@ class Backends:
         from yarvis.speech.silero import SileroVAD  # noqa: PLC0415
         from yarvis.speech.wakeword import WakeWordDetector  # noqa: PLC0415
         from yarvis.speech.whisper import WhisperSTT  # noqa: PLC0415
+        from yarvis.tools.desktop import computer_tools  # noqa: PLC0415
+        from yarvis.tools.spotify import SpotifyCatalog  # noqa: PLC0415
 
         return cls(
             llm=lambda config, key: AnthropicProvider(key, model=config.llm.model),
@@ -123,6 +132,11 @@ class Backends:
             wake_word=lambda config, cache: WakeWordDetector(
                 cache_dir=cache, threshold=config.voice.wake_word_threshold
             ),
+            computer=lambda config, spotify: computer_tools(
+                browser=config.tools.browser,
+                typing=config.tools.typing,
+                spotify=SpotifyCatalog.from_secret(spotify) if spotify else None,
+            ),
         )
 
 
@@ -138,15 +152,24 @@ async def run_assistant(
     voice_output: bool = True,
     on_loading: Callable[[str], None] | None = None,
     controls: AssistantControls | None = None,
+    spotify: SecretStr | None = None,
 ) -> None:
     """Assemble the pipeline and run the interactive loop until the user quits."""
     llm = backends.llm(config, api_key)
+    announcements: asyncio.Queue[str] = asyncio.Queue()
+    alarms = Alarms(announcements.put_nowait) if config.tools.timers else None
+    tools, abilities = _tools(config, alarms, backends, spotify)
+    gate = Gate(
+        confirm_external=config.security.confirm_tier2,
+        allow_dangerous=config.security.allow_tier3,
+    )
     conversation = Conversation(
         llm,
         system_prompt=lambda: system_prompt(
-            config.assistant.name, user_name=config.assistant.user_name
+            config.assistant.name, user_name=config.assistant.user_name, abilities=abilities
         ),
         max_tokens=config.llm.max_tokens,
+        toolbox=Toolbox(tools, gate, on_activity=ui.activity) if tools else None,
     )
     stt = backends.stt(config, cache_dir) if voice_input else None
     tts = backends.tts(config, cache_dir) if voice_output else None
@@ -164,6 +187,8 @@ async def run_assistant(
     await warm_up(llm, stt, tts)
 
     async with AsyncExitStack() as stack:
+        if alarms is not None:
+            stack.callback(alarms.close)
         speaker = None
         if tts is not None:
             speaker = await stack.enter_async_context(backends.speaker(config, tts.sample_rate))
@@ -235,10 +260,26 @@ async def run_assistant(
                 follow_up_s=config.voice.follow_up_s,
             ),
             greeter=greeter,
+            announcements=announcements,
         )
         if controls is not None:
             controls.attach(assistant)
         await assistant.run()
+
+
+def _tools(
+    config: Config, alarms: Alarms | None, backends: Backends, spotify: SecretStr | None
+) -> tuple[list[Tool[Any]], list[str]]:
+    """The enabled tools, and what they let Yarvis do (in words, for the system prompt)."""
+    tools: list[Tool[Any]] = []
+    said: list[str] = []
+    if alarms is not None:
+        tools += timer_tools(alarms)
+        said.append("set, list and cancel timers and reminders")
+    if config.tools.computer and (computer := backends.computer(config, spotify)):
+        tools += computer
+        said += abilities(computer)
+    return tools, said
 
 
 def _log_failure(task: asyncio.Task[None]) -> None:

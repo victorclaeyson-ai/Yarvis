@@ -1,9 +1,13 @@
-"""Short-term conversation memory around an LLM provider.
+"""Short-term conversation memory and the agent loop around an LLM provider.
 
 Replies are produced as ``Draft`` objects. A draft starts generating immediately, but it
 only becomes part of the conversation once someone consumes it. That lets the pipeline
 start asking Claude *speculatively* — while the user may still be talking — and throw the
 draft away if they continue, without the abandoned exchange ever entering the history.
+
+With tools, a draft is an agent loop: stream the reply, run any tool calls through the
+``Toolbox`` (and so through the permission gate), send the results back, repeat. A draft
+never runs a tool while it is still speculative: it waits until it is consumed.
 
 Every exchange that is remembered passes through ``Conversation.remember``: the single
 place where long-term memory will hook in later.
@@ -12,19 +16,27 @@ place where long-term memory will hook in later.
 from __future__ import annotations
 
 import asyncio
+import logging
 import time
 from contextlib import aclosing
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Final
 
-from yarvis.llm.base import Message
+from yarvis.agent.confirmation import classify_answer
+from yarvis.llm.base import LLMError, Message, ToolCall
 
 if TYPE_CHECKING:
     from collections.abc import AsyncGenerator, Callable
 
+    from yarvis.agent.toolbox import PendingAction, Toolbox
     from yarvis.llm.base import LLMProvider
+
+logger = logging.getLogger(__name__)
 
 DEFAULT_MAX_MESSAGES = 20
 _EXCHANGE = 2  # a user message plus the assistant's reply
+MAX_TOOL_ROUNDS: Final = 4
+"""Model calls that may use tools in one turn; then it must answer in words."""
+TURN_TIMEOUT_S: Final = 60.0
 
 
 class Draft:
@@ -36,24 +48,106 @@ class Draft:
         self._conversation = conversation
         self._queue: asyncio.Queue[str | BaseException | None] = asyncio.Queue()
         self._consumed = False
-        self._task = asyncio.create_task(self._generate(conversation.messages_for(user_text)))
+        self._live = asyncio.Event()
+        self._last_char = ""  # of the text emitted so far
+        self._task = asyncio.create_task(self._generate())
 
-    async def _generate(self, messages: list[Message]) -> None:
+    async def _generate(self) -> None:
         try:
-            async for delta in self._conversation.llm.stream(
-                messages,
-                system=self._conversation.system_prompt(),
-                max_tokens=self._conversation.max_tokens,
-            ):
-                if self.first_token_at is None:
-                    self.first_token_at = self._conversation.clock()
-                self._queue.put_nowait(delta)
+            async with asyncio.timeout(TURN_TIMEOUT_S):
+                await self._agent_loop()
         except asyncio.CancelledError:
             raise
+        except TimeoutError:
+            self._queue.put_nowait(LLMError("That took too long, so I stopped."))
         except Exception as exc:  # noqa: BLE001 - handed to the consumer, who re-raises it
             self._queue.put_nowait(exc)
         finally:
             self._queue.put_nowait(None)
+
+    async def _agent_loop(self) -> None:
+        conversation = self._conversation
+        toolbox = conversation.toolbox
+        messages = conversation.messages_for(self.user_text)
+        if (pending := conversation.pending) is not None:
+            messages[-1] = Message("user", await self._resolve(pending))
+        tainted = False
+        for round_number in range(MAX_TOOL_ROUNDS + 1):
+            may_use_tools = toolbox is not None and round_number < MAX_TOOL_ROUNDS
+            text, calls = await self._stream(messages, may_use_tools=may_use_tools)
+            if not calls or toolbox is None:
+                return
+            await self._live.wait()  # never act on a reply the user may not want
+            outcome = await toolbox.run(calls, tainted=tainted)
+            tainted = outcome.tainted
+            messages += [
+                Message("assistant", text, tool_calls=tuple(calls)),
+                Message("user", "", tool_results=outcome.results),
+            ]
+            if outcome.pending is not None:
+                conversation.pending = outcome.pending
+                self._say(outcome.pending.question)  # asked by code, not by the model
+                return
+
+    async def _stream(
+        self, messages: list[Message], *, may_use_tools: bool
+    ) -> tuple[str, list[ToolCall]]:
+        conversation = self._conversation
+        toolbox = conversation.toolbox
+        specs = toolbox.specs() if toolbox is not None and may_use_tools else ()
+        parts: list[str] = []
+        calls: list[ToolCall] = []
+        async for event in conversation.llm.stream(
+            messages,
+            system=conversation.system_prompt(),
+            max_tokens=conversation.max_tokens,
+            tools=specs,
+        ):
+            if isinstance(event, ToolCall):
+                calls.append(event)
+                continue
+            if self.first_token_at is None:
+                self.first_token_at = conversation.clock()
+            parts.append(event)
+            self._emit(event, new_round=not parts[:-1])
+        return "".join(parts), calls
+
+    async def _resolve(self, pending: PendingAction) -> str:
+        """The user answered a confirmation question: act on it, tell the model."""
+        await self._live.wait()  # a speculative draft must not decide anything
+        conversation = self._conversation
+        if conversation.pending is pending:
+            conversation.pending = None
+        answer = classify_answer(self.user_text)
+        if conversation.clock() > pending.expires:
+            note = f"The question about whether to {pending.description} expired; nothing was done."
+        elif answer == "yes" and conversation.toolbox is not None:
+            logger.info("Confirmed by the user: %s", pending.tool.name)
+            note = await conversation.toolbox.confirm(pending)
+        elif answer == "yes":  # pragma: no cover - a pending action implies a toolbox
+            note = "Nothing was done."
+        elif answer == "no":
+            note = f"The user declined, so you did not {pending.description}."
+        else:
+            note = f"The user said something else, so you did not {pending.description}."
+        return f"{self.user_text}\n\n[Yarvis system note: {note}]"
+
+    def _say(self, text: str) -> None:
+        self._emit(text, new_round=True)
+
+    def _emit(self, text: str, *, new_round: bool) -> None:
+        """Queue text; text from a new model round is separated from the previous one."""
+        if not text:
+            return
+        if (
+            new_round
+            and self._last_char
+            and not self._last_char.isspace()
+            and not text[0].isspace()
+        ):
+            text = f" {text}"  # "Sure." + "Done." must not become "Sure.Done."
+        self._last_char = text[-1]
+        self._queue.put_nowait(text)
 
     async def deltas(self) -> AsyncGenerator[str]:
         """Consume the reply. From this moment the exchange will be remembered.
@@ -65,6 +159,7 @@ class Draft:
             msg = "a draft can only be consumed once"
             raise RuntimeError(msg)
         self._consumed = True
+        self._live.set()
         heard: list[str] = []
         try:
             while (item := await self._queue.get()) is not None:
@@ -99,6 +194,7 @@ class Conversation:
         max_tokens: int,
         max_messages: int = DEFAULT_MAX_MESSAGES,
         clock: Callable[[], float] = time.monotonic,
+        toolbox: Toolbox | None = None,
     ) -> None:
         if max_messages < _EXCHANGE or max_messages % _EXCHANGE:
             msg = "max_messages must be a positive even number"
@@ -107,6 +203,9 @@ class Conversation:
         self.system_prompt = system_prompt
         self.max_tokens = max_tokens
         self.clock = clock
+        self.toolbox = toolbox
+        self.pending: PendingAction | None = None
+        """An action waiting for the user's "yes" (asked at the end of the last reply)."""
         self._max_messages = max_messages
         self._history: list[Message] = []
 
@@ -118,6 +217,7 @@ class Conversation:
     def reset(self) -> None:
         """Forget the conversation."""
         self._history.clear()
+        self.pending = None
 
     def messages_for(self, user_text: str) -> list[Message]:
         """The messages to send for a new user message."""

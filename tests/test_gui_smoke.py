@@ -23,6 +23,7 @@ from pydantic import SecretStr
 from fakes import FakeLLM, FakeWakeWord
 from test_runtime_and_run import NO_WAKE_WORD, FakeBackends, FakeMic
 from test_speech_engines import frames, speech_clip
+from yarvis.llm.base import ToolCall
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -126,9 +127,27 @@ def test_real_window_end_to_end(tmp_path: Path) -> None:  # pragma: no cover - o
         )
         wait_for(lambda: "Good to hear from you." in log(), 10, "typed message gets a reply")
         wait_for(lambda: pill() == "ONLINE", 10, "back to Ready after typed message")
+
+        # 4. A tool: the action is shown, and the timer goes off a second later.
+        js(
+            "const t = document.getElementById('text'); t.value = 'timer'; t.dispatchEvent(new Event('input'));"
+        )
+        js(
+            "document.getElementById('text').dispatchEvent(new KeyboardEvent('keydown', {key: 'Enter'}))"
+        )
+        wait_for(lambda: "// set a 1-second timer" in log(), 10, "the action is shown")
+        wait_for(lambda: "Timer set." in log(), 10, "the model confirms")
+        wait_for(lambda: "Your 1-second timer is done." in log(), 10, "the timer goes off")
         w.destroy()
 
-    fakes = FakeBackends(FakeLLM(["It is half past two."], ["Good to hear ", "from you."]))
+    fakes = FakeBackends(
+        FakeLLM(
+            ["It is half past two."],
+            ["Good to hear ", "from you."],
+            [ToolCall("t1", "set_timer", {"minutes": 0.02})],
+            ["Timer set."],
+        )
+    )
     threading.Thread(target=driver, daemon=True).start()
     try:
         # This walk-through swaps microphones between steps, so it runs without the wake

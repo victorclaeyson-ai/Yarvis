@@ -101,6 +101,12 @@ class RecordingUi:
     def said(self, text: str) -> None:
         self.events.append(f"said:{text}")
 
+    def alert(self, text: str) -> None:
+        self.events.append(f"alert:{text}")
+
+    def activity(self, text: str) -> None:
+        self.events.append(f"did:{text}")
+
     def listening(self) -> None:
         self.events.append("listening")
 

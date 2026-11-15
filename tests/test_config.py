@@ -158,3 +158,17 @@ def test_follow_up_window() -> None:
     assert parse_config("[voice]\nfollow_up_s = 0").voice.follow_up_s == 0
     with pytest.raises(ConfigError, match="follow_up_s"):
         parse_config("[voice]\nfollow_up_s = 61")
+
+
+def test_tools_are_on_by_default_and_can_be_switched_off() -> None:
+    assert Config().tools.timers and Config().tools.computer
+    config = parse_config("[tools]\ntimers = false\ncomputer = false")
+    assert not config.tools.timers and not config.tools.computer
+
+
+def test_browser_choice() -> None:
+    assert Config().tools.browser == "auto"
+    assert Config().tools.typing
+    assert parse_config('[tools]\nbrowser = "Brave Browser"').tools.browser == "Brave Browser"
+    with pytest.raises(ConfigError, match="browser"):
+        parse_config('[tools]\nbrowser = "Netscape"')

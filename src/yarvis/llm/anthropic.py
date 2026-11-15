@@ -8,15 +8,22 @@ from typing import TYPE_CHECKING, Final
 import anthropic
 import httpx2
 
-from yarvis.llm.base import LLMError
+from yarvis.llm.base import LLMError, ToolCall
 
 if TYPE_CHECKING:
     from collections.abc import AsyncGenerator, Sequence
 
-    from anthropic.types import MessageParam
+    from anthropic.types import (
+        ContentBlockParam,
+        MessageParam,
+        TextBlockParam,
+        ToolParam,
+        ToolResultBlockParam,
+        ToolUseBlockParam,
+    )
     from pydantic import SecretStr
 
-    from yarvis.llm.base import Message
+    from yarvis.llm.base import Message, ToolSpec
 
 DEFAULT_MODEL: Final = "claude-haiku-5-5"
 """Anthropic's lowest-latency model: the right default for a voice assistant."""
@@ -67,26 +74,63 @@ class AnthropicProvider:
         *,
         system: str,
         max_tokens: int,
-    ) -> AsyncGenerator[str]:
-        """Yield reply text as it is generated."""
+        tools: Sequence[ToolSpec] = (),
+    ) -> AsyncGenerator[str | ToolCall]:
+        """Yield reply text as it is generated, then any tool calls."""
         params = [_to_param(message) for message in messages]
+        tool_params: list[ToolParam] = [
+            {"name": t.name, "description": t.description, "input_schema": dict(t.input_schema)}
+            for t in tools
+        ]
         try:
             async with self._client.messages.stream(
                 model=self.model,
                 max_tokens=max_tokens,
                 system=system,
                 messages=params,
+                tools=tool_params or anthropic.omit,
             ) as stream:
-                async for text in stream.text_stream:
-                    yield text
+                async for event in stream:
+                    if event.type == "text":
+                        yield event.text
+                final = await stream.get_final_message()
         except anthropic.APIError as exc:
             raise LLMError(_explain(exc, self.model)) from exc
+        for block in final.content:
+            if block.type == "tool_use":
+                yield ToolCall(id=block.id, name=block.name, arguments=dict(block.input))
 
 
 def _to_param(message: Message) -> MessageParam:
+    if not message.tool_calls and not message.tool_results:
+        if message.role == "user":
+            return {"role": "user", "content": message.text}
+        return {"role": "assistant", "content": message.text}
+    blocks: list[ContentBlockParam] = []
     if message.role == "user":
-        return {"role": "user", "content": message.text}
-    return {"role": "assistant", "content": message.text}
+        for result in message.tool_results:  # results must come first in the message
+            result_block: ToolResultBlockParam = {
+                "type": "tool_result",
+                "tool_use_id": result.call_id,
+                "content": result.content,
+                "is_error": result.is_error,
+            }
+            blocks.append(result_block)
+        if message.text or not blocks:
+            text_block: TextBlockParam = {"type": "text", "text": message.text}
+            blocks.append(text_block)
+        return {"role": "user", "content": blocks}
+    if message.text or not message.tool_calls:
+        blocks.append({"type": "text", "text": message.text})
+    for call in message.tool_calls:
+        use_block: ToolUseBlockParam = {
+            "type": "tool_use",
+            "id": call.id,
+            "name": call.name,
+            "input": dict(call.arguments),
+        }
+        blocks.append(use_block)
+    return {"role": "assistant", "content": blocks}
 
 
 def _explain(exc: anthropic.APIError, model: str) -> str:  # noqa: PLR0911 - a flat mapping reads best

@@ -111,7 +111,7 @@ SPOTIFY_SECRET = "fedcba9876543210fedcba9876543210"  # noqa: S105  # gitleaks:al
 def test_key_set_spotify_asks_for_id_and_secret(invoke: Invoke, fake_keyring: FakeKeyring) -> None:
     result = invoke("key", "set", "spotify", stdin=f"{SPOTIFY_ID}\n{SPOTIFY_SECRET}\n")
     assert result.exit_code == 0, result.output
-    assert "developer.spotify.com" in result.output
+    assert "Create an app at" in result.output  # the setup instructions are shown
     assert SPOTIFY_SECRET not in result.output
     stored = fake_keyring.store[(KEYRING_SERVICE, "spotify")]
     assert stored == f"{SPOTIFY_ID}:{SPOTIFY_SECRET}"

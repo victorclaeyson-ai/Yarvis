@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import importlib
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Protocol, cast
+from typing import TYPE_CHECKING, Final, Protocol, cast
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Mapping, Sequence
@@ -54,6 +54,36 @@ class AudioProbe(Protocol):
     def default_output(self) -> AudioDevice | None:
         """The default playback device, or None if there is none."""
         ...
+
+
+# Words that appear in the names of private listening devices on macOS and Linux
+# ("AirPods Pro", "External Headphones", "WH-1000XM5", "Jabra Evolve2 65 Headset").
+_HEADPHONE_HINTS: Final = (
+    "headphone",
+    "headset",
+    "airpods",
+    "earpods",
+    "earbud",
+    "earphone",
+    "buds",
+    "beats",
+    "wh-1000",
+    "wf-1000",
+    "jabra",
+    "in-ear",
+)
+
+
+def looks_like_headphones(name: str | None) -> bool:
+    """Guess whether an output device keeps the sound away from the microphone.
+
+    Unknown devices count as speakers: the cautious answer, because voice barge-in on
+    speakers would make Yarvis interrupt itself.
+    """
+    if not name:
+        return False
+    lowered = name.lower()
+    return any(hint in lowered for hint in _HEADPHONE_HINTS)
 
 
 def _import_sounddevice() -> ModuleType:

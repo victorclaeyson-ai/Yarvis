@@ -72,7 +72,8 @@ def test_app_ui_events() -> None:
     events: list[dict[str, Any]] = []
     ui = AppUi(events.append)
     ui.notice("Loading")
-    ui.ready(voice=True)
+    ui.ready(voice=True, wake_word=True)
+    ui.woke()
     ui.listening()
     ui.speech_started()
     for value in (0.01, 0.02, 0.03, 5.0):
@@ -80,16 +81,20 @@ def test_app_ui_events() -> None:
     ui.on_transcript("hi")
     ui.on_reply_delta("Hello")
     ui.on_audio_started()
-    timings = TurnTimings(speech_end=1.0, transcribed=1.2, first_token=1.5, first_audio=1.9)
+    timings = TurnTimings(speech_end=1.0, llm_started=1.2, first_token=1.5, first_audio=1.9)
     ui.reply_finished(TurnResult("hi", "Hello", timings))
     ui.nothing_heard()
     ui.error("broken")
     ui.stopped()
+    ui.interrupted()
+    ui.said("Good evening.")
     kinds = [event["type"] for event in events]
     assert kinds == [
-        "notice", "state", "state", "speech", "level", "level", "user", "state",
-        "delta", "state", "done", "notice", "error", "stopped",
+        "notice", "state", "wake", "state", "speech", "level", "level", "user", "state",
+        "delta", "state", "done", "notice", "error", "stopped", "interrupted", "said",
     ]  # fmt: skip
+    assert events[-1] == {"type": "said", "text": "Good evening."}
+    assert events[1] == {"type": "state", "state": "idle", "voice": True, "wake": True}
     levels = [event["value"] for event in events if event["type"] == "level"]
     assert levels == [0.02, 1.0]  # every second frame, clamped
     done = next(event for event in events if event["type"] == "done")

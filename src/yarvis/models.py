@@ -2,9 +2,9 @@
 
 Every model is pinned:
 
-* Files Yarvis downloads itself (Kokoro) are pinned by URL, size and SHA-256. A file is
-  only moved into place after its hash matches, and redirects to non-HTTPS URLs are
-  refused.
+* Files Yarvis downloads itself (Kokoro, the wake word) are pinned by URL, size and
+  SHA-256. A file is only moved into place after its hash matches, and redirects to
+  non-HTTPS URLs are refused.
 * Whisper models come from Hugging Face through ``faster-whisper``, pinned to an exact
   git commit, so a changed upstream repository cannot change what we load.
 * The Silero VAD model ships inside the ``faster-whisper`` wheel, which is itself pinned by
@@ -61,6 +61,30 @@ KOKORO_VOICES: Final = ModelFile(
 )
 KOKORO_FILES: Final = (KOKORO_MODEL, KOKORO_VOICES)
 
+_OWW_RELEASE: Final = "https://github.com/dscripka/openWakeWord/releases/download/v0.5.1"
+
+WAKE_WORD_FILES: Final = (
+    ModelFile(
+        name="melspectrogram.onnx",
+        url=f"{_OWW_RELEASE}/melspectrogram.onnx",
+        sha256="ba2b0e0f8b7b875369a2c89cb13360ff53bac436f2895cced9f479fa65eb176f",
+        size=1_087_958,
+    ),
+    ModelFile(
+        name="embedding_model.onnx",
+        url=f"{_OWW_RELEASE}/embedding_model.onnx",
+        sha256="70d164290c1d095d1d4ee149bc5e00543250a7316b59f31d056cff7bd3075c1f",
+        size=1_326_578,
+    ),
+    ModelFile(
+        name="hey_jarvis_v0.1.onnx",
+        url=f"{_OWW_RELEASE}/hey_jarvis_v0.1.onnx",
+        sha256="94a13cfe60075b132f6a472e7e462e8123ee70861bc3fb58434a73712ee0d2cb",
+        size=1_271_370,
+    ),
+)
+"""openWakeWord models (code Apache-2.0; pre-trained models CC BY-NC-SA 4.0)."""
+
 WHISPER_REVISIONS: Final[dict[SttModel, str]] = {
     "tiny.en": "0d3d19a32d3338f10357c0889762bd8d64bbdeba",
     "base.en": "3d3d5dee26484f91867d81cb899cfcf72b96be6c",
@@ -86,6 +110,11 @@ class Download(Protocol):
 def kokoro_dir(cache_dir: Path) -> Path:
     """Directory holding the Kokoro files."""
     return cache_dir / "models" / "kokoro"
+
+
+def wake_word_dir(cache_dir: Path) -> Path:
+    """Directory holding the wake-word models."""
+    return cache_dir / "models" / "wakeword"
 
 
 def whisper_dir(cache_dir: Path) -> Path:

@@ -7,6 +7,8 @@ import sys
 import threading
 from typing import TYPE_CHECKING
 
+from yarvis.speech.turn_taking import WAKE_PHRASE
+
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator
 
@@ -44,14 +46,20 @@ class ConsoleUi:
         """A neutral status message."""
         self._console.print(f"[dim]{message}[/]", highlight=False)
 
-    def ready(self, *, voice: bool) -> None:
+    def ready(self, *, voice: bool, wake_word: bool = False) -> None:
         """Show the input prompt."""
         hint = "Enter = talk · type to chat · q = quit" if voice else "type a message · q = quit"
+        if wake_word:
+            hint = f"Say “{WAKE_PHRASE}” · {hint}"
         self._console.print(f"\n[dim]{hint}[/]")
         self._console.print("[bold cyan]›[/] ", end="")  # noqa: RUF001
 
+    def woke(self) -> None:
+        """The wake word was heard."""
+        self._console.print()  # the prompt line was waiting for typed input
+
     def listening(self) -> None:
-        """The microphone is open."""
+        """Capturing a request."""
         self._console.print("[red]●[/] listening…")
 
     def speech_started(self) -> None:
@@ -80,6 +88,12 @@ class ConsoleUi:
         if self._show_timings and (line := format_timings(result.timings)):
             self._console.print(f"[dim]⏱ {line}[/]", highlight=False)
 
+    def said(self, text: str) -> None:
+        """A fixed phrase, such as a greeting."""
+        self._end_reply()
+        name = _escape(self._name)
+        self._console.print(f"[bold magenta]{name}:[/] {_escape(text)}", highlight=False)
+
     def nothing_heard(self) -> None:
         """Nothing intelligible was said."""
         self._console.print("[yellow]Didn't catch that.[/]")
@@ -88,6 +102,11 @@ class ConsoleUi:
         """The user stopped the current command."""
         self._end_reply()
         self._console.print("[dim]Stopped.[/]")
+
+    def interrupted(self) -> None:
+        """The user talked over the reply."""
+        self._end_reply()
+        self._console.print("[dim]↳ interrupted[/]")
 
     def error(self, message: str) -> None:
         """Show an error; the conversation continues."""

@@ -130,6 +130,11 @@
   .meter i { width: 4px; height: 9px; background: var(--faint); display: block; transition: background .08s; }
   .meter i.on { background: var(--cyan); box-shadow: 0 0 6px var(--cyan); }
   .meter i.on.hot { background: var(--magenta); box-shadow: 0 0 6px var(--magenta); }
+  .wake { margin-left: 10px; color: var(--cyan); letter-spacing: .1em; text-shadow: 0 0 6px rgba(0, 240, 255, .6); }
+  .wake::before { content: ""; display: inline-block; width: 5px; height: 5px; margin-right: 5px; vertical-align: 1px;
+    border-radius: 50%; background: var(--cyan); box-shadow: 0 0 6px var(--cyan); animation: pulse 2.4s ease-in-out infinite; }
+  .wake[hidden] { display: none; }
+  @keyframes pulse { 50% { opacity: .25; } }
   .models { text-align: right; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
   header .right { display: flex; align-items: center; gap: 12px; }
   .clock {
@@ -244,7 +249,8 @@
   </header>
 
   <div class="telemetry">
-    <div>MIC<span class="meter" id="meter"></span></div>
+    <div>MIC<span class="meter" id="meter"></span><span class="wake" id="wake" hidden
+      title="Listening for “Hey Yarvis” on this computer. No audio leaves it until you say it.">HEY YARVIS</span></div>
     <div class="models" id="models">LLM <b>—</b> · STT <b>—</b> · VOX <b>—</b></div>
   </div>
 
@@ -287,6 +293,7 @@
     body: document.body, tag: $("tag"), core: $("core"), logo: $("logo"), meter: $("meter"),
     models: $("models"), clock: $("clock"), latency: $("latency"), log: $("log"),
     empty: $("empty"), talk: $("talk"), text: $("text"), send: $("send"), hint: $("hint"),
+    wake: $("wake"),
   };
   const STATES = {
     // hue = main neon colour, alt = the accent it is paired with (always magenta <-> cyan)
@@ -299,11 +306,13 @@
   };
   let state = "loading";
   let voice = true;
+  let wake = false;
   let busy = true;
   let current = null;      // { text: span, cursor: span } of the reply being streamed
   let level = 0, levelTarget = 0;
   let name = "Yarvis";
   let flash = 0;
+  let ping = 0; // expanding cyan ring when the wake word is heard
 
   // MIC meter blocks
   const BLOCKS = 10;
@@ -381,7 +390,9 @@
     ui.talk.disabled = next === "loading" || (!canStop && !voice);
     ui.text.disabled = next === "loading";
     ui.send.disabled = busy || !ui.text.value.trim();
-    ui.hint.textContent = voice ? "SPACE talk · ESC stop · ENTER send" : "ENTER send · ESC stop";
+    const keys = voice ? "SPACE talk · ESC stop · ENTER send" : "ENTER send · ESC stop";
+    ui.hint.textContent = wake && voice ? "SAY “HEY YARVIS” · " + keys : keys;
+    ui.wake.hidden = !(wake && voice);
   }
 
   function showModels(details) {
@@ -401,7 +412,15 @@
 
   // ------------------------------------------------------------------ events from Python
   const handlers = {
-    state(e) { if (typeof e.voice === "boolean") voice = e.voice; confirmed(); setState(e.state); },
+    state(e) {
+      if (typeof e.voice === "boolean") voice = e.voice;
+      if (typeof e.wake === "boolean") wake = e.wake;
+      confirmed();
+      setState(e.state);
+    },
+    wake() { ping = 1; glitch(ui.logo); addSystem("hey yarvis"); },
+    interrupted() { finishReply(); addSystem("interrupted"); },
+    said(e) { finishReply(); addLine("assistant", name.toUpperCase(), String(e.text || "")); },
     notice(e) { addSystem(String(e.text || "").toLowerCase()); },
     speech() { glitch(ui.core); },
     level(e) { levelTarget = Math.min(1, Math.sqrt(Math.max(0, Number(e.value) || 0)) * 3.2); },
@@ -547,6 +566,7 @@
     alt = lerp(alt, target.alt, 0.08);
     level = lerp(level, state === "listening" ? levelTarget : 0, 0.3);
     flash = Math.max(0, flash - dt * 1.6);
+    ping = Math.max(0, ping - dt * 1.3);
 
     let targetEnergy = { loading: .15, idle: .18, listening: .3 + level * .9, thinking: .5, speaking: .7, error: .3 }[state] ?? .2;
     energy = lerp(energy, targetEnergy, 0.1);
@@ -628,6 +648,15 @@
     }
     ctx.restore();
 
+    if (ping > 0) {
+      ctx.save();
+      ctx.globalAlpha = ping * 0.8;
+      ctx.strokeStyle = "#00f0ff";
+      ctx.lineWidth = 2 + ping * 4;
+      neon("#00f0ff", 26);
+      ctx.beginPath(); ctx.arc(CX, CY, R * (1.15 + (1 - ping) * 0.95), 0, Math.PI * 2); ctx.stroke();
+      ctx.restore();
+    }
     if (flash > 0) {
       ctx.save();
       ctx.globalAlpha = flash * 0.5;

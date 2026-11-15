@@ -23,6 +23,10 @@ class EndpointEvent(StrEnum):
 
     NONE = "none"
     SPEECH_STARTED = "speech_started"
+    PAUSE = "pause"
+    """The user went quiet; they may be done. Good moment to start work speculatively."""
+    RESUME = "resume"
+    """The user spoke again after a ``PAUSE``: discard speculative work."""
     END_OF_TURN = "end_of_turn"
     NO_SPEECH = "no_speech"
     MAX_DURATION = "max_duration"
@@ -37,6 +41,8 @@ class EndpointerSettings:
     negative_threshold: float = 0.35
     min_speech_ms: int = 160
     end_of_turn_ms: int = 700
+    pause_ms: int = 224
+    """Silence after which a ``PAUSE`` is reported (must be shorter than ``end_of_turn_ms``)."""
     pre_roll_ms: int = 320
     keep_trailing_ms: int = 160
     no_speech_timeout_ms: int = 8_000
@@ -71,11 +77,20 @@ class Endpointer:
         self._waited = 0
         self._candidate = 0
         self._silence = 0
+        self._paused = False
+        self._required_silence = s.frames(s.end_of_turn_ms)
 
     @property
     def speaking(self) -> bool:
         """Whether speech has started and not yet ended."""
         return self._state is _State.SPEAKING
+
+    def require_silence_ms(self, milliseconds: int) -> None:
+        """Change how much silence ends *this* pause (e.g. wait longer mid-sentence).
+
+        Reset to ``end_of_turn_ms`` whenever the user speaks again.
+        """
+        self._required_silence = self.settings.frames(milliseconds)
 
     @property
     def trailing_silence_ms(self) -> int:
@@ -117,11 +132,21 @@ class Endpointer:
     def _push_speaking(self, frame: AudioArray, probability: float) -> EndpointEvent:
         s = self.settings
         self._utterance.append(frame)
-        self._silence = 0 if probability >= s.negative_threshold else self._silence + 1
-        if self._silence >= s.frames(s.end_of_turn_ms):
+        if probability >= s.negative_threshold:
+            self._silence = 0
+            self._required_silence = s.frames(s.end_of_turn_ms)
+            if self._paused:
+                self._paused = False
+                return EndpointEvent.RESUME
+        else:
+            self._silence += 1
+        if self._silence >= self._required_silence:
             self._state = _State.DONE
             return EndpointEvent.END_OF_TURN
         if len(self._utterance) >= s.frames(s.max_utterance_ms):
             self._state = _State.DONE
             return EndpointEvent.MAX_DURATION
+        if not self._paused and self._silence == s.frames(s.pause_ms):
+            self._paused = True
+            return EndpointEvent.PAUSE
         return EndpointEvent.NONE

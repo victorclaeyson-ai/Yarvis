@@ -20,12 +20,12 @@ import numpy as np
 import pytest
 from pydantic import SecretStr
 
-from fakes import FakeLLM
-from test_runtime_and_run import FakeBackends, FakeMic
-from yarvis.config import Config
+from fakes import FakeLLM, FakeWakeWord
+from test_runtime_and_run import NO_WAKE_WORD, FakeBackends, FakeMic
+from test_speech_engines import frames, speech_clip
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator, Callable
+    from collections.abc import Callable
     from pathlib import Path
 
     from yarvis.speech.base import AudioArray
@@ -52,13 +52,9 @@ def test_real_window_end_to_end(tmp_path: Path) -> None:  # pragma: no cover - o
     class SlowNoiseMic(FakeMic):
         """Real-time paced background noise: never contains speech."""
 
-        def __aiter__(self) -> AsyncIterator[AudioArray]:
-            async def gen() -> AsyncIterator[AudioArray]:
-                while True:
-                    await asyncio.sleep(0.032)
-                    yield np.random.default_rng().normal(0, 0.002, 512).astype(np.float32)
-
-            return gen()
+        async def __anext__(self) -> AudioArray:
+            await asyncio.sleep(0.032)
+            return np.random.default_rng().normal(0, 0.002, 512).astype(np.float32)
 
     results: list[str] = []
 
@@ -102,9 +98,7 @@ def test_real_window_end_to_end(tmp_path: Path) -> None:  # pragma: no cover - o
 
         # 1. Click talk: full voice turn.
         js("document.getElementById('talk').click()")
-        wait_for(
-            lambda: "hey yarvis what time is it" in log(), 10, "voice turn: transcript appears"
-        )
+        wait_for(lambda: "what time is it" in log(), 10, "voice turn: transcript appears")
         wait_for(lambda: "It is half past two." in log(), 10, "voice turn: reply appears")
         wait_for(lambda: pill() == "ONLINE", 10, "voice turn: back to Ready")
         timing = js("document.getElementById('latency').textContent")
@@ -137,7 +131,97 @@ def test_real_window_end_to_end(tmp_path: Path) -> None:  # pragma: no cover - o
     fakes = FakeBackends(FakeLLM(["It is half past two."], ["Good to hear ", "from you."]))
     threading.Thread(target=driver, daemon=True).start()
     try:
-        appwin.run_app(Config(), api_key=SecretStr("k"), cache_dir=tmp_path, backends=fakes.build())
+        # This walk-through swaps microphones between steps, so it runs without the wake
+        # word (which keeps one stream open for the whole session).
+        appwin.run_app(
+            NO_WAKE_WORD, api_key=SecretStr("k"), cache_dir=tmp_path, backends=fakes.build()
+        )
+    finally:
+        webview.create_window = real_create
+    failures = [r for r in results if r.startswith("FAIL")]
+    assert results, "the driver never ran"
+    assert not failures, "\n".join(results)
+
+
+class WakeMic(FakeMic):
+    """Real-time paced noise; says "Hey Yarvis, what time is it..." once ``speak`` is set."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.speak = threading.Event()
+        self._said = False
+
+    async def __anext__(self) -> AudioArray:
+        await asyncio.sleep(0.032)
+        if self.speak.is_set() and not self._said:
+            self._said = True
+            trigger = np.full(512, 0.01, np.float32)
+            trigger[0] = FakeWakeWord.TRIGGER
+            self._pending = [trigger, *frames(speech_clip())]
+        if self._pending:
+            return self._pending.pop(0)
+        return np.random.default_rng().normal(0, 0.002, 512).astype(np.float32)
+
+
+def test_real_window_wake_word(tmp_path: Path) -> None:  # pragma: no cover - opt-in
+    webview = pytest.importorskip("webview")
+    import yarvis.app.window as appwin
+    from yarvis.config import Config
+
+    captured: dict[str, Any] = {}
+    real_create = webview.create_window
+
+    def capture(*args: Any, **kwargs: Any) -> Any:
+        window = real_create(*args, **kwargs)
+        captured["window"] = window
+        return window
+
+    webview.create_window = capture
+    fakes = FakeBackends(FakeLLM(["It is half past two."]))
+    mic = WakeMic()
+    fakes.mic = mic
+    results: list[str] = []
+
+    def driver() -> None:
+        while "window" not in captured:
+            time.sleep(0.05)
+        w = captured["window"]
+        w.events.loaded.wait(15)
+
+        def js(code: str) -> Any:
+            return w.evaluate_js(code)
+
+        def log() -> str:
+            return js(
+                "Array.from(document.querySelectorAll('#log .line .txt'))"
+                ".map(e => e.textContent).join(' | ')"
+            )
+
+        def wait_for(predicate: Callable[[], bool], timeout: float, label: str) -> None:
+            end = time.time() + timeout
+            while time.time() < end:
+                if predicate():
+                    results.append(f"OK   {label}")
+                    return
+                time.sleep(0.1)
+            results.append(f"FAIL {label}  (log={log()!r})")
+
+        pill = "document.getElementById('tag').textContent"
+        wait_for(lambda: js(pill) == "ONLINE", 20, "app becomes Ready")
+        wait_for(lambda: not js("document.getElementById('wake').hidden"), 5, "wake badge shown")
+        wait_for(lambda: "HEY YARVIS" in js("document.getElementById('hint').textContent"), 5,
+                 "hint mentions the wake word")  # fmt: skip
+        mic.speak.set()
+        wait_for(lambda: "hey yarvis" in log(), 10, "wake word shows in the log")
+        wait_for(lambda: "what time is it" in log(), 15, "request transcribed")
+        wait_for(lambda: "It is half past two." in log(), 10, "reply appears")
+        wait_for(lambda: js(pill) == "ONLINE", 15, "back to Ready")
+        w.destroy()
+
+    threading.Thread(target=driver, daemon=True).start()
+    try:
+        short = Config.model_validate({"voice": {"follow_up_s": 3}})  # quick back to Ready
+        appwin.run_app(short, api_key=SecretStr("k"), cache_dir=tmp_path, backends=fakes.build())
     finally:
         webview.create_window = real_create
     failures = [r for r in results if r.startswith("FAIL")]

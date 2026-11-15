@@ -14,7 +14,15 @@ from typing import TYPE_CHECKING
 
 from yarvis.audio.devices import AudioBackendError, AudioDevice
 from yarvis.config import Config, ConfigError, load_config
-from yarvis.models import KOKORO_FILES, WHISPER_APPROX_MB, kokoro_dir, missing, whisper_present
+from yarvis.models import (
+    KOKORO_FILES,
+    WAKE_WORD_FILES,
+    WHISPER_APPROX_MB,
+    kokoro_dir,
+    missing,
+    wake_word_dir,
+    whisper_present,
+)
 from yarvis.paths import is_private
 from yarvis.security.secrets import SecretName, SecretSource
 
@@ -264,6 +272,9 @@ def check_models(ctx: DoctorContext, config: Config) -> CheckResult:
     if not whisper_present(cache, config.voice.stt_model):
         todo.append(f"Whisper {config.voice.stt_model}")
         megabytes += WHISPER_APPROX_MB[config.voice.stt_model]
+    if config.voice.wake_word and (pending := missing(WAKE_WORD_FILES, wake_word_dir(cache))):
+        todo.append("wake word")
+        megabytes += max(1, sum(model.size for model in pending) // 1_000_000)
     if not todo:
         return CheckResult("Speech models", Status.OK, "downloaded")
     return CheckResult(

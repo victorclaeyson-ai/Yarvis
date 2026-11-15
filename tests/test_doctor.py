@@ -215,3 +215,12 @@ def test_macos_version(ctx: DoctorContext, version: str, status: Status) -> None
     result = check_platform(replace(ctx, mac_version=version))
     assert result.status is status
     assert f"macOS {version}" in result.detail
+
+
+def test_missing_wake_word_model_warns_only_when_enabled(ctx: DoctorContext) -> None:
+    install_models(ctx.paths, wake_word=False)
+    result = check_models(ctx, Config())
+    assert result.status is Status.WARN
+    assert "wake word" in result.detail
+    off = Config.model_validate({"voice": {"wake_word": False}})
+    assert check_models(ctx, off).status is Status.OK

@@ -2,3 +2,19 @@ Yarvis
 Copyright 2026 Victor Claeys
 
 This product is licensed under the Apache License, Version 2.0 (see LICENSE).
+
+Models used at runtime
+----------------------
+Yarvis does not include any model files. They are downloaded on first use from their
+upstream sources (pinned by size and SHA-256, or by exact commit) and stored in the user's
+cache folder, except Silero VAD, which comes inside the faster-whisper package:
+
+- Kokoro-82M text-to-speech (Apache 2.0), via kokoro-onnx (MIT).
+- Whisper speech recognition (MIT), via faster-whisper / CTranslate2 (MIT).
+- Silero VAD (MIT).
+- openWakeWord pre-trained models: melspectrogram, embedding_model and hey_jarvis, by
+  David Scripka (https://github.com/dscripka/openWakeWord). These models are licensed
+  under CC BY-NC-SA 4.0 and may only be used for non-commercial purposes.
+
+Yarvis's wake-word inference (src/yarvis/speech/wakeword.py) follows the openWakeWord
+reference implementation, Copyright David Scripka, licensed under the Apache License 2.0.

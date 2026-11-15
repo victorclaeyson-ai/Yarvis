@@ -24,6 +24,7 @@ DEFAULT_CONFIG_TOML: Final = """\
 
 [assistant]
 name = "Yarvis"
+# user_name = "Victor"      # what Yarvis calls you ("Good evening, Victor.")
 language = "en"
 
 [llm]
@@ -34,11 +35,21 @@ max_tokens = 1024
 [voice]
 stt = "auto"                # picks the fastest local engine for your platform
 stt_model = "base.en"       # "tiny.en" (fastest), "base.en", "small.en" (most accurate)
+stt_device = "cpu"          # "mps" = Apple GPU (experimental); `yarvis bench` compares them
 vocabulary = ["Yarvis"]     # names and places to recognise, e.g. ["Yarvis", "Zedelgem", "Leuven"]
 tts = "kokoro"
 voice = "bm_george"         # British male. Try "af_heart", "am_michael", "bf_emma"
 speech_rate = 1.0
-end_of_turn_ms = 700        # silence that ends your turn; lower = faster, may cut you off
+end_of_turn_ms = 900        # silence that ends a sentence that sounds finished
+thinking_pause_ms = 2000    # ...and one that sounds unfinished ("and", "um", "the")
+follow_up_s = 15            # keep the conversation open after a reply (0 = off);
+                            # "thanks" or "that's all" ends it sooner
+speculative = true          # start working during pauses: much faster, costs a few extra tokens
+wake_word = true            # "Hey Yarvis", detected on this computer (the mic stays open)
+wake_word_threshold = 0.5   # higher = fewer accidental wake-ups, lower = wakes more easily
+wake_chime = true           # short sound when Yarvis wakes up
+barge_in = "auto"           # interrupt it mid-sentence: "voice" (headphones), "wake_word",
+                            # "auto" (voice on headphones, wake word on speakers) or "off"
 # input_device = "MacBook Air Microphone"
 # output_device = "MacBook Air Speakers"
 

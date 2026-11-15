@@ -20,6 +20,8 @@ class PortAudioError(Exception):
 
 
 class FakeStream:
+    device = 3
+
     def __init__(self, **kwargs: Any) -> None:
         self.kwargs = kwargs
         self.callback = kwargs["callback"]
@@ -39,10 +41,16 @@ class FakeStream:
 class FakeSoundDevice(ModuleType):
     PortAudioError = PortAudioError
 
-    def __init__(self, *, fail: bool = False) -> None:
+    def __init__(self, *, fail: bool = False, names: dict[int, str] | None = None) -> None:
         super().__init__("sounddevice")
         self.fail = fail
+        self.names = names or {}
         self.streams: list[FakeStream] = []
+
+    def query_devices(self, device: int) -> dict[str, Any]:
+        if device not in self.names:
+            raise ValueError(f"no device {device}")
+        return {"name": self.names[device]}
 
     def _open(self, **kwargs: Any) -> FakeStream:
         if self.fail:
@@ -199,3 +207,28 @@ async def test_speaker_open_errors_are_reported() -> None:
     with pytest.raises(AudioBackendError, match="cannot open the speaker"):
         async with Speaker(sample_rate=24_000, loader=lambda: FakeSoundDevice(fail=True)):
             pass
+
+
+async def test_microphone_flush_drops_queued_frames() -> None:
+    sd = FakeSoundDevice()
+    async with Microphone(loader=lambda: sd) as microphone:
+        callback = sd.streams[0].callback
+        for value in (0.1, 0.2):
+            await asyncio.to_thread(callback, np.full((512, 1), value, np.float32), 512, None, None)
+        await asyncio.sleep(0.01)
+        microphone.flush()
+        await asyncio.to_thread(callback, np.full((512, 1), 0.3, np.float32), 512, None, None)
+        frame = await asyncio.wait_for(anext(microphone), 1)
+        assert frame[0] == pytest.approx(0.3)
+
+
+async def test_speaker_reports_the_device_it_plays_on() -> None:
+    sd = FakeSoundDevice(names={3: "AirPods Pro"})
+    async with Speaker(sample_rate=24_000, loader=lambda: sd) as speaker:
+        assert speaker.device_name == "AirPods Pro"
+
+
+async def test_speaker_device_name_is_optional() -> None:
+    sd = FakeSoundDevice()  # PortAudio cannot name the device
+    async with Speaker(sample_rate=24_000, loader=lambda: sd) as speaker:
+        assert speaker.device_name is None

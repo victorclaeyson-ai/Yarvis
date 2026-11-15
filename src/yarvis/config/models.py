@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from typing import Annotated, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, StringConstraints
+from pydantic import BaseModel, ConfigDict, Field, StringConstraints, model_validator
 
 LogLevel = Literal["DEBUG", "INFO", "WARNING", "ERROR"]
 
@@ -21,6 +21,13 @@ class AssistantConfig(_Section):
     """Identity and language of the assistant."""
 
     name: str = Field(default="Yarvis", min_length=1, max_length=32)
+    user_name: str | None = Field(
+        default=None,
+        min_length=1,
+        max_length=40,
+        pattern=r"^[^\W\d_][^\W\d_ .'-]*(?:[ .'-][^\W\d_]+)*$",
+        description="What Yarvis calls you, e.g. in greetings. Stays on this computer.",
+    )
     language: str = Field(default="en", pattern=r"^[a-z]{2}(-[A-Z]{2})?$")
 
 
@@ -38,6 +45,7 @@ class LLMConfig(_Section):
 
 
 SttModel = Literal["tiny.en", "base.en", "small.en"]
+BargeIn = Literal["auto", "voice", "wake_word", "off"]
 VocabularyWord = Annotated[
     str, StringConstraints(strip_whitespace=True, min_length=1, max_length=40)
 ]
@@ -51,6 +59,10 @@ class VoiceConfig(_Section):
 
     stt: Literal["auto", "faster-whisper"] = "auto"
     stt_model: SttModel = "base.en"
+    stt_device: Literal["cpu", "mps"] = Field(
+        default="cpu",
+        description="'mps' runs Whisper on the Apple GPU (experimental; try `yarvis bench`).",
+    )
     vocabulary: tuple[VocabularyWord, ...] = Field(
         default=("Yarvis",),
         max_length=50,
@@ -60,13 +72,61 @@ class VoiceConfig(_Section):
     voice: str = Field(default="bm_george", pattern=r"^[a-z]{2}_[a-z]+$")
     speech_rate: float = Field(default=1.0, ge=0.5, le=2.0)
     end_of_turn_ms: int = Field(
-        default=700,
+        default=900,
         ge=200,
         le=3000,
-        description="Silence that ends your turn. Lower is faster but may cut you off.",
+        description="Silence that ends a sentence that sounds finished.",
+    )
+    thinking_pause_ms: int = Field(
+        default=2000,
+        ge=500,
+        le=6000,
+        description="Silence allowed when your sentence sounds unfinished ('and…', 'um').",
+    )
+    follow_up_s: float = Field(
+        default=15.0,
+        ge=0,
+        le=60,
+        description=(
+            "After a spoken reply, keep listening this long without the wake word (0 = off). "
+            "Say 'thanks' or 'that's all' to end the conversation sooner."
+        ),
+    )
+    speculative: bool = Field(
+        default=True,
+        description="Start transcribing and asking Claude during pauses (much faster replies).",
+    )
+    wake_word: bool = Field(
+        default=True,
+        description=(
+            "Wake up on 'Hey Yarvis'. Detection runs on this computer and no audio leaves it "
+            "until you say it, but the microphone stays open while Yarvis runs."
+        ),
+    )
+    wake_word_threshold: float = Field(
+        default=0.5,
+        ge=0.1,
+        le=0.95,
+        description="Higher means fewer accidental wake-ups; lower means it wakes more easily.",
+    )
+    wake_chime: bool = Field(default=True, description="Play a short sound when woken.")
+    barge_in: BargeIn = Field(
+        default="auto",
+        description=(
+            "Interrupting Yarvis while it talks. 'voice': just start talking (needs headphones, "
+            "or it hears itself). 'wake_word': say 'Hey Yarvis' (works on speakers). 'auto' "
+            "picks by output device."
+        ),
     )
     input_device: str | int | None = None
     output_device: str | int | None = None
+
+    @model_validator(mode="after")
+    def _thinking_pause_is_longer(self) -> VoiceConfig:
+        if self.thinking_pause_ms < self.end_of_turn_ms:
+            msg = "thinking_pause_ms must be at least end_of_turn_ms"
+            raise ValueError(msg)
+        return self
 
 
 class SecurityConfig(_Section):

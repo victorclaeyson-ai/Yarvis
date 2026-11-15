@@ -4,8 +4,8 @@ The PortAudio callback runs on a native thread; it copies each block and hands i
 event loop with ``call_soon_threadsafe``. If the consumer falls behind, the oldest frames
 are dropped (fresh audio matters more than old audio) and counted.
 
-The stream is opened only while Yarvis is actually listening, so the operating system's
-microphone indicator is truthful.
+The operating system's microphone indicator is always truthful: the stream is open exactly
+while Yarvis can hear (only while listening, or the whole session when the wake word is on).
 """
 
 from __future__ import annotations
@@ -78,6 +78,11 @@ class Microphone:
 
     async def __anext__(self) -> AudioArray:
         return await self._queue.get()
+
+    def flush(self) -> None:
+        """Drop queued frames, e.g. audio recorded while Yarvis itself was talking."""
+        while not self._queue.empty():
+            self._queue.get_nowait()
 
     def _callback(self, indata: AudioArray, frames: int, time: object, status: object) -> None:
         """PortAudio thread: copy the block and pass it to the event loop."""

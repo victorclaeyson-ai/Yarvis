@@ -12,6 +12,9 @@ from yarvis.llm.base import LLMError
 from yarvis.pipeline import Turn, TurnTimings
 
 if TYPE_CHECKING:
+    from collections.abc import AsyncGenerator, Sequence
+
+    from yarvis.llm.base import Message
     from yarvis.speech.base import AudioArray
 
 
@@ -23,15 +26,8 @@ def make_turn(
     speaker: FakeSpeaker | None = None,
 ) -> tuple[Turn, RecordingObserver]:
     observer = RecordingObserver()
-    conversation = Conversation(llm, system_prompt=lambda: "S", max_tokens=64)
-    turn = Turn(
-        conversation,
-        stt=stt,
-        tts=tts,
-        speaker=speaker,
-        observer=observer,
-        clock=TickingClock(),
-    )
+    conversation = Conversation(llm, system_prompt=lambda: "S", max_tokens=64, clock=TickingClock())
+    turn = Turn(conversation, stt=stt, tts=tts, speaker=speaker, observer=observer)
     return turn, observer
 
 
@@ -147,3 +143,224 @@ async def test_errors_also_silence_the_speaker() -> None:
     with pytest.raises(LLMError):
         await turn.from_text("hi")
     assert speaker.stopped == 1
+
+
+# --------------------------------------------------------------------------- speculation
+
+
+async def test_speculation_is_used_at_end_of_turn() -> None:
+    llm = FakeLLM(["Quarter past two."])
+    stt, tts, speaker = FakeSTT("what time is it"), FakeTTS(), FakeSpeaker()
+    turn, observer = make_turn(llm, stt=stt, tts=tts, speaker=speaker)
+    audio = np.zeros(16_000, np.float32)
+
+    speculation = turn.speculate(audio)
+    assert await speculation.transcript() == "what time is it"
+    assert observer.transcripts == []  # nothing shown until the turn is confirmed
+
+    result = await turn.from_audio(
+        audio, speech_end=1.0, turn_detected=1.7, speculation=speculation
+    )
+    assert result is not None
+    assert result.reply == "Quarter past two."
+    assert result.timings.speculative
+    assert stt.received == [16_000]  # transcribed once, during the pause
+    assert len(llm.calls) == 1
+    assert observer.transcripts == ["what time is it"]
+    assert [m.text for m in turn._conversation.history] == ["what time is it", "Quarter past two."]  # pyright: ignore[reportPrivateUsage]
+
+
+async def test_discarded_speculation_leaves_no_trace() -> None:
+    llm = FakeLLM(["Half a thought."])
+    turn, observer = make_turn(llm, stt=FakeSTT("what time"), tts=FakeTTS(), speaker=FakeSpeaker())
+    speculation = turn.speculate(np.zeros(8_000, np.float32))
+    await speculation.transcript()
+    await asyncio.sleep(0)  # let the draft start
+    speculation.discard()
+    await asyncio.sleep(0)
+    assert turn._conversation.history == ()  # pyright: ignore[reportPrivateUsage]
+    assert observer.transcripts == []
+    assert observer.deltas == []
+
+
+async def test_discarding_before_transcription_finishes() -> None:
+    class SlowSTT(FakeSTT):
+        async def transcribe(self, audio: AudioArray) -> str:
+            await asyncio.sleep(60)
+            return "never"  # pragma: no cover
+
+    turn, _ = make_turn(FakeLLM(), stt=SlowSTT(), tts=FakeTTS(), speaker=FakeSpeaker())
+    speculation = turn.speculate(np.zeros(10, np.float32))
+    speculation.discard()
+    with pytest.raises(asyncio.CancelledError):
+        await speculation.transcript()
+
+
+async def test_speculation_with_empty_transcript() -> None:
+    llm = FakeLLM(["unused"])
+    turn, _ = make_turn(llm, stt=FakeSTT("   "), tts=FakeTTS(), speaker=FakeSpeaker())
+    audio = np.zeros(10, np.float32)
+    speculation = turn.speculate(audio)
+    assert (
+        await turn.from_audio(audio, speech_end=0.0, turn_detected=0.5, speculation=speculation)
+        is None
+    )
+    assert speculation.draft is None
+    assert llm.calls == []
+
+
+# --------------------------------------------------------------------------- wake word
+
+
+async def test_the_wake_phrase_never_reaches_claude() -> None:
+    llm = FakeLLM(["Noon."], ["Still noon."])
+    stt = FakeSTT("so yeah. Hey Yarvis, what time is it?")
+    turn, observer = make_turn(llm, stt=stt)
+    audio = np.zeros(16_000, np.float32)
+
+    woken = await turn.from_audio(audio, speech_end=1.0, turn_detected=1.7, woken=True)
+    assert woken is not None and woken.transcript == "what time is it?"
+
+    speculation = turn.speculate(audio, woken=True)
+    assert await speculation.transcript() == "what time is it?"
+    result = await turn.from_audio(
+        audio, speech_end=1.0, turn_detected=1.7, speculation=speculation, woken=True
+    )
+    assert result is not None
+    sent = [message.text for message in llm.calls[1][0]]
+    assert sent[-1] == "what time is it?"
+    assert observer.transcripts == ["what time is it?", "what time is it?"]
+
+
+async def test_without_the_wake_word_only_a_leading_address_is_removed() -> None:
+    turn, _ = make_turn(FakeLLM(["Hi."]), stt=FakeSTT("so yeah. Hey Yarvis, hi"))
+    result = await turn.from_audio(np.zeros(100, np.float32), speech_end=1.0, turn_detected=1.7)
+    assert result is not None and result.transcript == "so yeah. Hey Yarvis, hi"
+
+
+async def test_only_the_wake_phrase_means_nothing_to_answer() -> None:
+    llm = FakeLLM(["never"])
+    turn, _ = make_turn(llm, stt=FakeSTT("Hey Yarvis."))
+    speculation = turn.speculate(np.zeros(100, np.float32), woken=True)
+    assert await speculation.transcript() == ""
+    assert speculation.draft is None  # nothing was sent to Claude
+    result = await turn.from_audio(
+        np.zeros(100, np.float32),
+        speech_end=1.0,
+        turn_detected=1.7,
+        speculation=speculation,
+        woken=True,
+    )
+    assert result is None
+    assert llm.calls == []
+
+
+async def test_chime_plays_only_with_a_speaker_and_a_sound() -> None:
+    speaker = FakeSpeaker()
+    conversation = Conversation(FakeLLM(), system_prompt=lambda: "S", max_tokens=8)
+    observer = RecordingObserver()
+    with_chime = Turn(
+        conversation,
+        stt=None,
+        tts=None,
+        speaker=speaker,
+        observer=observer,
+        chime=np.ones(5, np.float32),
+    )
+    await with_chime.chime()
+    assert speaker.played == [5]
+    silent = Turn(conversation, stt=None, tts=None, speaker=speaker, observer=observer)
+    await silent.chime()
+    muted = Turn(
+        conversation,
+        stt=None,
+        tts=None,
+        speaker=None,
+        observer=observer,
+        chime=np.ones(5, np.float32),
+    )
+    await muted.chime()
+    assert speaker.played == [5]
+
+
+async def test_unanswered_until_the_first_word_is_spoken() -> None:
+    llm = FakeLLM(["Noon."], ["Rain."])
+    speaker = FakeSpeaker()
+    turn, _ = make_turn(llm, stt=FakeSTT("in Ghent?"), tts=FakeTTS(), speaker=speaker)
+    assert turn.unanswered is None
+    result = await turn.from_audio(
+        np.zeros(100, np.float32),
+        speech_end=1.0,
+        turn_detected=1.7,
+        preface="What's the weather tomorrow",
+    )
+    assert result is not None
+    assert result.transcript == "What's the weather tomorrow in Ghent?"
+    assert turn.unanswered is None  # it was spoken
+
+    class StuckLLM(FakeLLM):
+        async def stream(
+            self, messages: Sequence[Message], *, system: str, max_tokens: int
+        ) -> AsyncGenerator[str]:
+            await asyncio.Event().wait()
+            yield ""  # pragma: no cover
+
+    muted, observer = make_turn(StuckLLM(), stt=FakeSTT("hi"))
+    task = asyncio.create_task(muted.from_text("hello"))
+    await asyncio.sleep(0.01)  # the LLM never answers, so the turn is stuck "thinking"
+    assert observer.transcripts == ["hello"]
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert muted.unanswered == "hello"  # stopped before a single word
+
+
+async def test_fixed_phrases_are_prepared_once_and_played_in_full() -> None:
+    tts, speaker = FakeTTS(), FakeSpeaker()
+    turn, observer = make_turn(FakeLLM(), tts=tts, speaker=speaker)
+    await turn.prepare(["Good evening.", "Yes?"])
+    await turn.prepare(["Yes?"])
+    assert tts.spoken == ["Good evening.", "Yes?"]
+    await turn.say("Yes?")
+    await turn.say("Go ahead.")  # not prepared: synthesized on the spot, then kept
+    await turn.say("Go ahead.")
+    assert tts.spoken == ["Good evening.", "Yes?", "Go ahead."]
+    assert speaker.played == [4, 9, 9]
+    assert speaker.drained == 3
+    assert observer.deltas == []  # not part of any reply
+
+
+async def test_saying_is_silent_without_a_voice() -> None:
+    turn, _ = make_turn(FakeLLM())
+    await turn.prepare(["Yes?"])
+    await turn.say("Yes?")
+
+
+async def test_stopping_a_phrase_silences_the_speaker() -> None:
+    class SlowSpeaker(FakeSpeaker):
+        async def drain(self) -> None:
+            await asyncio.Event().wait()
+
+    speaker = SlowSpeaker()
+    turn, _ = make_turn(FakeLLM(), tts=FakeTTS(), speaker=speaker)
+    task = asyncio.create_task(turn.say("Good evening."))
+    await asyncio.sleep(0.01)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert speaker.stopped == 1
+
+
+async def test_a_transcript_of_only_the_wake_phrase_is_flagged() -> None:
+    turn, _ = make_turn(FakeLLM(["Hi."]), stt=FakeSTT("Hey Yarvis."))
+    audio = np.zeros(100, np.float32)
+    assert await turn.from_audio(audio, speech_end=1.0, turn_detected=1.7) is None
+    assert turn.only_wake_phrase
+    stt = turn._stt  # pyright: ignore[reportPrivateUsage]
+    assert isinstance(stt, FakeSTT)
+    stt.text = "  "
+    assert await turn.from_audio(audio, speech_end=1.0, turn_detected=1.7) is None
+    assert not turn.only_wake_phrase  # just noise
+    stt.text = "Hey Yarvis, hi"
+    assert await turn.from_audio(audio, speech_end=1.0, turn_detected=1.7) is not None
+    assert not turn.only_wake_phrase

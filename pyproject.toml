@@ -52,6 +52,7 @@ dev = [
     "pytest>=9.2",
     "pytest-asyncio>=1.5",
     "pytest-cov>=7.1",
+    "pytest-timeout>=2.3",
     "ruff>=0.17",
 ]
 
@@ -125,6 +126,7 @@ addopts = [
     "--cov=yarvis",
     "--cov-report=term-missing",
 ]
+timeout = 60  # a hanging async test fails instead of blocking CI
 asyncio_mode = "auto"
 asyncio_default_fixture_loop_scope = "function"
 filterwarnings = ["error"]

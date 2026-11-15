@@ -2,14 +2,16 @@
 
 from __future__ import annotations
 
+import logging
 from typing import TYPE_CHECKING, Final
 
 import anthropic
+import httpx2
 
 from yarvis.llm.base import LLMError
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator, Sequence
+    from collections.abc import AsyncGenerator, Sequence
 
     from anthropic.types import MessageParam
     from pydantic import SecretStr
@@ -20,6 +22,12 @@ DEFAULT_MODEL: Final = "claude-haiku-5-5"
 """Anthropic's lowest-latency model: the right default for a voice assistant."""
 
 REQUEST_TIMEOUT_SECONDS: Final = 30.0
+
+KEEPALIVE_SECONDS: Final = 300.0
+"""Keep the HTTPS connection open between questions. The HTTP client's default (5 s) meant
+almost every question paid for a fresh TLS handshake (~0.2-0.5 s)."""
+
+logger = logging.getLogger(__name__)
 
 
 class AnthropicProvider:
@@ -37,7 +45,21 @@ class AnthropicProvider:
             api_key=api_key.get_secret_value(),
             max_retries=1,  # a voice user would rather hear an error than wait
             timeout=REQUEST_TIMEOUT_SECONDS,
+            http_client=anthropic.DefaultAsyncHttpxClient(
+                limits=httpx2.Limits(
+                    max_connections=10,
+                    max_keepalive_connections=4,
+                    keepalive_expiry=KEEPALIVE_SECONDS,
+                ),
+            ),
         )
+
+    async def warm_up(self) -> None:
+        """Open (or refresh) the HTTPS connection with a free, tiny request."""
+        try:
+            await self._client.models.list(limit=1)
+        except anthropic.APIError as exc:
+            logger.debug("Warm-up request failed: %s", type(exc).__name__)
 
     async def stream(
         self,
@@ -45,7 +67,7 @@ class AnthropicProvider:
         *,
         system: str,
         max_tokens: int,
-    ) -> AsyncIterator[str]:
+    ) -> AsyncGenerator[str]:
         """Yield reply text as it is generated."""
         params = [_to_param(message) for message in messages]
         try:

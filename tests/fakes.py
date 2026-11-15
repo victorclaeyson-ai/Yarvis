@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Protocol
 
@@ -12,10 +13,12 @@ import numpy as np
 from yarvis.audio.devices import AudioBackendError, AudioDevice
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator, Sequence
+    from collections.abc import AsyncGenerator, Awaitable, Callable, Sequence
 
     from typer.testing import Result
 
+    from yarvis.ears import Interruption
+    from yarvis.listen import PauseHooks, Utterance
     from yarvis.llm.base import Message
     from yarvis.speech.base import AudioArray
 
@@ -103,10 +106,14 @@ class FakeLLM:
         self.replies = list(replies)
         self.error = error
         self.calls: list[tuple[list[Message], str, int]] = []
+        self.warm_ups = 0
+
+    async def warm_up(self) -> None:
+        self.warm_ups += 1
 
     async def stream(
         self, messages: Sequence[Message], *, system: str, max_tokens: int
-    ) -> AsyncIterator[str]:
+    ) -> AsyncGenerator[str]:
         self.calls.append((list(messages), system, max_tokens))
         deltas = self.replies.pop(0) if self.replies else []
         for delta in deltas:
@@ -138,7 +145,8 @@ class FakeTTS:
 
 
 class FakeSpeaker:
-    def __init__(self) -> None:
+    def __init__(self, device_name: str | None = None) -> None:
+        self.device_name = device_name
         self.played: list[int] = []
         self.drained = 0
         self.stopped = 0
@@ -185,3 +193,83 @@ class Invoke(Protocol):
     """Runs the CLI in-process with test services."""
 
     def __call__(self, *args: str, stdin: str | None = None) -> Result: ...
+
+
+class ListenFn(Protocol):
+    def __call__(
+        self, hooks: PauseHooks, *, follow_up: bool = False
+    ) -> Awaitable[Utterance | None]: ...
+
+
+class FakeEars:
+    """``Ears`` driven by test callables; records what the assistant asked for."""
+
+    def __init__(
+        self,
+        listen: ListenFn | None = None,
+        *,
+        wake: Callable[[], Awaitable[Sequence[AudioArray]]] | None = None,
+        interruption: Callable[[], Awaitable[Interruption]] | None = None,
+    ) -> None:
+        self._listen = listen
+        self._wake = wake
+        self._interruption = interruption
+        self.prefixes: list[Sequence[AudioArray] | None] = []
+        self.timeouts: list[float | None] = []
+        self.sessions = 0
+
+    @property
+    def wake_word(self) -> bool:
+        return self._wake is not None
+
+    @property
+    def barge_in(self) -> bool:
+        return self._interruption is not None
+
+    @asynccontextmanager
+    async def session(self) -> AsyncGenerator[None]:
+        self.sessions += 1
+        yield
+
+    async def listen(
+        self,
+        hooks: PauseHooks,
+        *,
+        follow_up: bool = False,
+        prefix: Sequence[AudioArray] | None = None,
+        timeout_s: float | None = None,
+    ) -> Utterance | None:
+        self.prefixes.append(prefix)
+        self.timeouts.append(timeout_s)
+        if self._listen is None:
+            return None
+        return await self._listen(hooks, follow_up=follow_up)
+
+    async def wake(self) -> Sequence[AudioArray]:
+        assert self._wake is not None
+        return await self._wake()
+
+    async def interruption(self) -> Interruption:
+        assert self._interruption is not None
+        return await self._interruption()
+
+
+class FakeWakeWord:
+    """Detects the wake word in any frame whose first sample is ``TRIGGER``."""
+
+    TRIGGER = 0.5
+
+    def __init__(self) -> None:
+        self.loaded = False
+        self.resets = 0
+        self.heard = 0
+
+    def load(self) -> None:
+        self.loaded = True
+
+    def reset(self) -> None:
+        self.resets += 1
+
+    def detected(self, frame: AudioArray) -> bool:
+        self.heard += 1
+        return bool(frame.size) and float(frame[0]) == self.TRIGGER

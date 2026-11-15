@@ -1834,6 +1834,19 @@ wheels = [
 ]
 
 [[package]]
+name = "pyobjc-framework-eventkit"
+version = "13.0"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "pyobjc-core" },
+    { name = "pyobjc-framework-cocoa" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/76/2c/c6c311619c099ae622f8c6815854888154db0439785619013ad9ba10453c/pyobjc_framework_eventkit-13.0.tar.gz", hash = "sha256:77d8cd18ff038b6e88bb54461cd769cb1e45ae36eecc780adf51fc53adc397b2", size = 33168, upload-time = "2026-10-30T10:46:28.952Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/a0/2f/3e993e3b98f186e7c123cd6a8fdfacc140c8a0ea2ff41c27ec33ee7b1138/pyobjc_framework_eventkit-13.0-py2.py3-none-any.whl", hash = "sha256:c897d7054bfdaf35e11ef4b920d43ddbee241da94b19735191793ca5c9199d73", size = 6926, upload-time = "2026-10-30T10:37:40.861Z" },
+]
+
+[[package]]
 name = "pyobjc-framework-quartz"
 version = "13.0"
 source = { registry = "https://pypi.org/simple" }
@@ -2487,6 +2500,7 @@ dependencies = [
     { name = "parakeet-mlx", marker = "platform_machine == 'arm64' and sys_platform == 'darwin'" },
     { name = "platformdirs" },
     { name = "pydantic" },
+    { name = "pyobjc-framework-eventkit", marker = "sys_platform == 'darwin'" },
     { name = "pywebview" },
     { name = "rich" },
     { name = "sounddevice" },
@@ -2518,6 +2532,7 @@ requires-dist = [
     { name = "parakeet-mlx", marker = "platform_machine == 'arm64' and sys_platform == 'darwin'", specifier = ">=0.7" },
     { name = "platformdirs", specifier = ">=4.3" },
     { name = "pydantic", specifier = ">=2.11" },
+    { name = "pyobjc-framework-eventkit", marker = "sys_platform == 'darwin'", specifier = ">=13.0" },
     { name = "pywebview", specifier = ">=6.2" },
     { name = "rich", specifier = ">=14" },
     { name = "sounddevice", specifier = ">=0.5" },

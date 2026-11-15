@@ -25,7 +25,7 @@ from urllib.parse import quote_plus, urlsplit
 from pydantic import Field, model_validator
 
 from yarvis.tools.base import Arguments, Tier, Tool, ToolError
-from yarvis.tools.computer import osascript, safe_url
+from yarvis.tools.computer import osascript, safe_url, short_url
 
 if TYPE_CHECKING:
     from yarvis.tools.computer import Apps, Runner
@@ -610,11 +610,15 @@ class BrowserOpen(_BrowserTool[OpenArgs]):
             return f"Opened a new tab in {browser}."
         return f"Opened {urlsplit(url).hostname} in {browser}."
 
+    def sends_data_out(self, args: OpenArgs) -> bool:
+        """An address can carry data to its site; an empty tab cannot."""
+        return args.url is not None
+
     def describe(self, args: OpenArgs) -> str:
         """'open kuleuven.be' / 'open a new tab'."""
         if args.url is None:
             return "open a new tab"
-        return f"open {urlsplit(args.url).hostname or args.url}"
+        return f"open {short_url(args.url)}"
 
 
 class BrowserSearch(_BrowserTool[SearchArgs]):

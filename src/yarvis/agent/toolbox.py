@@ -123,7 +123,7 @@ class Toolbox:
         self, call: ToolCall, *, tainted: bool, busy: PendingAction | None
     ) -> tuple[ToolResult, PendingAction | None, bool, str | None]:
         """One call: (result, parked action, untrusted result?, what was done if it ran)."""
-        prepared = self._prepare(call, tainted=tainted)
+        prepared = await self._prepare(call, tainted=tainted)
         if isinstance(prepared, ToolResult):
             return prepared, None, False, None
         tool, args, verdict = prepared
@@ -143,10 +143,10 @@ class Toolbox:
             return ToolResult(call.id, wrapped), None, True, description
         return ToolResult(call.id, content), None, False, description
 
-    def _prepare(
+    async def _prepare(
         self, call: ToolCall, *, tainted: bool
     ) -> ToolResult | tuple[Tool[Any], Arguments, Verdict]:
-        """Find the tool, validate the arguments and ask the gate."""
+        """Find the tool, validate and resolve the arguments, and ask the gate."""
         tool = self._tools.get(call.name)
         if tool is None:
             return _error(call, f"There is no tool called {call.name!r}.")
@@ -158,16 +158,36 @@ class Toolbox:
                 for error in exc.errors(include_input=False, include_url=False)
             )
             return _error(call, f"Invalid arguments: {problems}")
-        decision = self._gate.check(tool, tainted=tainted)
+        try:
+            args = await self._resolve(tool, args)
+        except ToolError as exc:
+            return _error(call, str(exc))
+        decision = self._gate.check(tool, tainted=tainted, sends_out=tool.sends_data_out(args))
         if decision.verdict is Verdict.DENY:
             return _error(call, f"Refused: {decision.reason}")
         return tool, args, decision.verdict
+
+    async def _resolve(self, tool: Tool[Any], args: Arguments) -> Arguments:
+        """``Tool.prepare``, with the same time limit and error handling as running it."""
+        try:
+            async with asyncio.timeout(tool.timeout_s or self._timeout_s):
+                return await tool.prepare(args)
+        except ToolError:
+            raise
+        except TimeoutError:
+            logger.warning("Tool %s timed out while preparing", tool.name)
+            msg = "It took too long and was stopped."
+            raise ToolError(msg) from None
+        except Exception:
+            logger.exception("Tool %s failed while preparing", tool.name)
+            msg = "It failed unexpectedly."
+            raise ToolError(msg) from None
 
     async def _execute(self, tool: Tool[Any], args: Arguments, description: str) -> str:
         if self._on_activity is not None:
             self._on_activity(description)
         try:
-            async with asyncio.timeout(self._timeout_s):
+            async with asyncio.timeout(tool.timeout_s or self._timeout_s):
                 content = await tool.run(args)
         except ToolError:
             # The message can quote outside content (a page, a song title): not logged.

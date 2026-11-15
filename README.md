@@ -5,11 +5,11 @@
 Your own Jarvis — except it lives on your machine, like a yeti lives off the grid.
 
 > **Status: early development (Phase 2 of 5).** Talk to Yarvis in its own app window: say
-> "Hey Yarvis", ask, interrupt it mid-sentence. It can now look things up on the web, tell
-> you the weather, set timers and reminders, drive your browser (tabs, pages, links,
-> videos), play any song or your own playlists on Spotify, type into apps, and control apps
-> and volume on your Mac. Calendar, email and memory are next. Star or watch the repo to
-> follow along.
+> "Hey Yarvis", ask, interrupt it mid-sentence. It can now read your calendars and email
+> (and send, after your "yes"), look things up on the web, tell you the weather, set timers
+> and reminders, drive your browser (tabs, pages, links, videos), play any song or your own
+> playlists on Spotify, type into apps, and control apps and volume on your Mac. Memory and
+> an offline mode are next. Star or watch the repo to follow along.
 
 ## Why Yarvis
 
@@ -25,17 +25,17 @@ Your own Jarvis — except it lives on your machine, like a yeti lives off the g
   fewer words than small Whisper models). Audio never leaves your machine and is never
   stored; only the text of your request goes to the language model. A fully offline mode is
   on the roadmap.
-- **Actually does things** — searches the web, checks the weather, sets timers and
-  reminders that speak up, drives apps, websites, volume and music; any MCP server
-  (calendar, email, …) next.
+- **Actually does things** — reads your calendars and email and sends mail, searches the
+  web, checks the weather, sets timers and reminders that speak up, drives apps, websites,
+  volume and music; any MCP server next.
 - **Safe to give power to** — a security model that assumes the AI *will* be manipulated:
   every action passes a permission gate in code, consequential ones need your spoken "yes"
   (the question is built by code, so you hear exactly what will happen), and content from
   outside can never skip that step
   ([how it works](docs/adr/0007-tools-and-the-permission-gate.md)). A
   [prompt-injection test suite](docs/adr/0009-web-search-weather-and-injection-tests.md)
-  plants the same attack in every page, tab title, song title, place name and search result
-  and checks that it never gets through.
+  plants the same attack in every page, tab title, song title, place name, search result,
+  email and calendar invitation, and checks that it never gets through.
 - **Has a body** — an optional ESP32 desk satellite with mic, speaker and LED ring.
 
 Read the full [design document](docs/DESIGN.md).
@@ -94,7 +94,9 @@ writes a commented config file (your name and where you live, voice, speed, mode
 vocabulary for names, end-of-turn timing, how long a conversation stays open, wake word,
 interruptions, and which tools are on).
 
-**Things to try:** "What's the weather tomorrow?", "Who won the Belgian Grand Prix?",
+**Things to try:** "What's on my calendar tomorrow?", "Any new email?", "Read the one from
+Thomas", "Reply that I'll be there at seven", "Put dentist on Thursday at three in my
+calendar", "What's the weather tomorrow?", "Who won the Belgian Grand Prix?",
 "Is the Albert Heijn in Leuven open on Sunday?", "Set a pasta timer for nine minutes", "Remind me at six to call mom",
 "Play Feel What You Want by Kristine W", "Spotify volume to forty", "Turn on shuffle",
 "Play my workout playlist", "What's playing?", "Open Brave", "Open a new tab", "Go to
@@ -102,6 +104,20 @@ YouTube", "Click on the first video", "Pause the video", "Switch to the Gmail ta
 "Search for trains to Ghent", "Go back", "Type 'see you at eight' in Messages", "Quit
 Safari" (Yarvis asks first). The first time Yarvis controls an app, macOS asks whether your
 terminal may do so.
+
+**Calendar and email.** Yarvis uses the accounts your Mac already has, so it needs no
+Google or Microsoft developer setup and never sees your passwords. Add your accounts in
+System Settings → Internet Accounts (Google, Microsoft Exchange for Outlook.com and work or
+school accounts, iCloud) with Mail, Contacts and Calendars turned on, and let the Mail app
+sync once. The first time, macOS asks whether your terminal may see your calendars and
+control Mail and Contacts. Reading is instant; sending an email, replying or adding an event
+always needs your "yes", and Yarvis reads back exactly who it goes to ("Should I email Thomas
+Peeters (thomas@example.com), from you@gmail.com, …?"). Emails and invitations are written by
+other people, so they are treated like web pages: they can't make Yarvis do anything without
+your "yes", nor quietly open a link that would carry your data away
+([how it works](docs/adr/0010-calendar-and-email-through-the-mac.md)). Like the rest of the
+conversation, the text of the emails Yarvis reads goes to Claude. Turn either off with
+`[tools] calendar = false` or `mail = false`.
 
 **Web search and the weather.** For anything that may have changed (news, scores, opening
 hours), Claude searches the web itself through Anthropic's

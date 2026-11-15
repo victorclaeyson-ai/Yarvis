@@ -43,7 +43,9 @@ type Runner = Callable[[Sequence[str]], Awaitable[tuple[int, str]]]
 """Runs a command (argument list) and returns (exit code, output)."""
 
 
-async def run_command(argv: Sequence[str]) -> tuple[int, str]:
+async def run_command(
+    argv: Sequence[str], *, timeout_s: float = COMMAND_TIMEOUT_S
+) -> tuple[int, str]:
     """Run a program (no shell) with a minimal environment; return (exit code, output)."""
     env = {"PATH": "/usr/bin:/bin", "HOME": str(Path.home()), "LANG": "en_US.UTF-8"}
     process = await asyncio.create_subprocess_exec(
@@ -54,7 +56,7 @@ async def run_command(argv: Sequence[str]) -> tuple[int, str]:
         env=env,
     )
     try:
-        async with asyncio.timeout(COMMAND_TIMEOUT_S):
+        async with asyncio.timeout(timeout_s):
             output, _ = await process.communicate()
     except TimeoutError:
         process.kill()
@@ -296,10 +298,29 @@ class OpenWebsite(_Command[UrlArgs]):
         await self._check([self._opener, url], "The browser would not open it.")
         return f"Opened {urlsplit(url).hostname}."
 
+    def sends_data_out(self, args: UrlArgs) -> bool:
+        """The address itself can carry data to its site."""
+        return True
+
     def describe(self, args: UrlArgs) -> str:
-        """'open example.com'."""
-        host = urlsplit(args.url).hostname or args.url
-        return f"open {host}"
+        """'open example.com' / 'open example.com/watch?v=abc'."""
+        return f"open {short_url(args.url)}"
+
+
+_SHORT_URL_CHARS: Final = 60
+
+
+def short_url(url: str) -> str:
+    """An address as said to the user: the site, then the rest, cut short.
+
+    The rest is kept because it can carry data ("evil.example/?notes=..."): a confirmation
+    that only said "open evil.example" would hide what is being sent.
+    """
+    parts = urlsplit(url)
+    host = parts.hostname or url[:_SHORT_URL_CHARS]
+    rest = f"{parts.path}?{parts.query}" if parts.query else parts.path.rstrip("/")
+    said = host + rest
+    return said if len(said) <= _SHORT_URL_CHARS else said[: _SHORT_URL_CHARS - 1] + "…"
 
 
 def safe_url(url: str) -> str:

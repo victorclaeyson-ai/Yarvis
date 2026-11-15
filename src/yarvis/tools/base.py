@@ -46,6 +46,8 @@ class Tool[A: Arguments](ABC):
     Args: ClassVar[type[Arguments]]
     untrusted_output: ClassVar[bool] = False
     """True if results contain outside content (web pages, messages): the turn is tainted."""
+    timeout_s: ClassVar[float | None] = None
+    """How long one call may take; None: the toolbox's default."""
 
     def spec(self) -> ToolSpec:
         """The tool as the model sees it."""
@@ -54,6 +56,26 @@ class Tool[A: Arguments](ABC):
     def parse(self, raw: Mapping[str, Any]) -> A:
         """Validate the model's arguments (raises ``pydantic.ValidationError``)."""
         return cast("A", self.Args.model_validate(dict(raw)))
+
+    async def prepare(self, args: A) -> A:
+        """Resolve what the call refers to, before the gate and the confirmation question.
+
+        "Email Thomas" becomes the address in the user's contacts, so the question read back
+        ("Should I email Thomas Peeters, thomas@example.com, ...?") and what runs after the
+        user's "yes" are exactly the same. Must not change anything.
+
+        Raises:
+            ToolError: If it cannot be resolved (no such contact, several matches).
+        """
+        return args
+
+    def sends_data_out(self, args: A) -> bool:
+        """Whether this call can carry text to a destination the model chose (a URL).
+
+        After the turn has read outside content, such calls need the user's "yes" even when
+        harmless otherwise: an email could ask to open ``https://evil.example/?notes=...``.
+        """
+        return False
 
     @abstractmethod
     async def run(self, args: A) -> str:

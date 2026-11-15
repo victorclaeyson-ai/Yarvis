@@ -186,6 +186,17 @@ class ToolsConfig(_Section):
     weather: bool = Field(
         default=True, description="Weather forecasts from Open-Meteo (free, no account)."
     )
+    calendar: bool = Field(
+        default=True,
+        description="Read your calendars and add events, through the Mac's accounts (macOS).",
+    )
+    mail: bool = Field(
+        default=True,
+        description=(
+            "Read your email and send it, through the Mac's Mail app (macOS). Sending always "
+            "needs your confirmation."
+        ),
+    )
 
 
 class SecurityConfig(_Section):

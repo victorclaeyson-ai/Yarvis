@@ -115,6 +115,13 @@ listening, but only for what sounds meant for it (its name, or a command like "o
 Spotify"); other talk in the room is dropped on your computer and never reaches Claude. That
 filter can also miss a real request that doesn't sound like one, so it's off by default.
 
+**Tell it about yourself.** `yarvis profile edit` opens a short "about me" file: who you
+are, what you're working on, how you like to be spoken to, and your own rules ("always read
+an email back to me before sending it"). Yarvis knows it at every question, and an edit
+counts from your next one ([how it works](docs/adr/0014-about-me-profile.md)). It is sent to
+Claude with your requests, so keep it to about a page and never put keys in it;
+`yarvis profile show` prints exactly what is sent.
+
 **Add abilities: MCP servers.** Any [MCP](https://modelcontextprotocol.io) server can give
 Yarvis new tools, but only the ones you list, each with a tier: 0 runs freely (read only),
 1 runs and is shown (reversible), 2 asks you first, 3 never runs. In the config:

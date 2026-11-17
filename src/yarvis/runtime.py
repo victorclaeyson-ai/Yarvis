@@ -138,6 +138,8 @@ class Backends:
     """Starts the configured MCP servers for as long as Yarvis runs."""
     skills: Callable[[Config], list[Tool[Any]]] = lambda _config: []
     """The Agent Skills the user added."""
+    profile: Callable[[], str] = lambda: ""
+    """What the user wrote about themselves, read again before every request."""
 
     @classmethod
     def real(cls) -> Backends:  # pragma: no cover - exercised on real machines, not in CI
@@ -146,6 +148,7 @@ class Backends:
         from yarvis.audio.speaker import Speaker  # noqa: PLC0415
         from yarvis.llm.anthropic import AnthropicProvider  # noqa: PLC0415
         from yarvis.paths import AppPaths  # noqa: PLC0415
+        from yarvis.profile import ProfileReader, profile_path  # noqa: PLC0415
         from yarvis.security.secrets import SecretStore  # noqa: PLC0415
         from yarvis.speech.choice import (  # noqa: PLC0415
             cloud_key,
@@ -198,6 +201,7 @@ class Backends:
             skills=lambda config: (
                 user_skills(SkillLibrary.of(paths)) if config.tools.skills else []
             ),
+            profile=ProfileReader(profile_path(paths)),
             computer=lambda config, spotify: computer_tools(
                 browser=config.tools.browser,
                 typing=config.tools.typing,
@@ -237,7 +241,9 @@ async def run_assistant(
         engines = [engine for engine in (stt, tts, wake_word) if engine is not None]
         mcp = await _load(stack, engines, backends.mcp(config), on_loading)
         tools, abilities = _tools(config, alarms, backends, spotify, mcp)
-        conversation = _conversation(config, llm, tools, abilities, on_activity=ui.activity)
+        conversation = _conversation(
+            config, llm, tools, abilities, profile=backends.profile, on_activity=ui.activity
+        )
         if on_loading is not None:
             on_loading("Warming up…")
         await warm_up(llm, stt, tts)
@@ -352,6 +358,7 @@ def _conversation(
     tools: list[Tool[Any]],
     abilities: list[str],
     *,
+    profile: Callable[[], str],
     on_activity: Callable[[str], None],
 ) -> Conversation:
     """The conversation with Claude, its tools behind the permission gate."""
@@ -367,6 +374,7 @@ def _conversation(
             location=config.assistant.location,
             abilities=abilities,
             web_search=_web_search(config) and bool(tools),
+            profile=profile(),
         ),
         max_tokens=config.llm.max_tokens,
         toolbox=Toolbox(tools, gate, on_activity=on_activity) if tools else None,

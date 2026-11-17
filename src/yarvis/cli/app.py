@@ -19,6 +19,7 @@ from rich.table import Table
 from yarvis import __version__, spotify_login
 from yarvis.bench import SttCandidate, recommendation, run_bench
 from yarvis.cli.extensions import mcp_app, skills_app
+from yarvis.cli.profile import profile_app
 from yarvis.cli.services import Services, fail, load_config_or_exit, services_of
 from yarvis.cli.ui import ConsoleUi
 from yarvis.config import Config, ConfigError, load_config, write_default_config
@@ -78,6 +79,7 @@ app.add_typer(models_app, name="models")
 app.add_typer(spotify_app, name="spotify")
 app.add_typer(mcp_app, name="mcp")
 app.add_typer(skills_app, name="skills")
+app.add_typer(profile_app, name="profile")
 
 
 def _version_callback(value: bool) -> None:

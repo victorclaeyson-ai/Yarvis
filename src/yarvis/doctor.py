@@ -27,6 +27,7 @@ from yarvis.models import (
     whisper_present,
 )
 from yarvis.paths import is_private
+from yarvis.profile import ProfileError, load_profile, profile_path
 from yarvis.security.secrets import SecretName, SecretSource
 from yarvis.speech.choice import (
     choose_engine,
@@ -113,6 +114,7 @@ def run_doctor(ctx: DoctorContext) -> list[CheckResult]:
         check_models(ctx, config),
         check_mcp(ctx, config),
         check_skills(ctx, config),
+        check_profile(ctx),
     ]
 
 
@@ -415,3 +417,20 @@ def check_skills(ctx: DoctorContext, config: Config) -> CheckResult:
     if not skills:
         return CheckResult(label, Status.OK, "none", hint="Add one: yarvis skills add <folder>")
     return CheckResult(label, Status.OK, ", ".join(skill.name for skill in skills))
+
+
+def check_profile(ctx: DoctorContext) -> CheckResult:
+    """The user's profile, if written, should be usable (short, no secrets)."""
+    label = "Profile"
+    try:
+        text = load_profile(profile_path(ctx.paths))
+    except ProfileError as exc:
+        return CheckResult(label, Status.WARN, f"not used: {exc}", hint="Run: yarvis profile edit")
+    if not text:
+        return CheckResult(
+            label,
+            Status.OK,
+            "not written yet",
+            hint="Tell Yarvis about yourself: yarvis profile edit",
+        )
+    return CheckResult(label, Status.OK, f"{len(text):,} characters, sent with every request")

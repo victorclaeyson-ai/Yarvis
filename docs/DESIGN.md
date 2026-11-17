@@ -235,6 +235,7 @@ The gate is a single small module (`yarvis/security/gate.py`) with exhaustive te
 | Raw audio | No (in-memory ring buffer only; opt-in debug recording) | — | Never (except to a paired satellite), unless AssemblyAI is set up: then the speech of each request, streamed for transcription (EU data zone by default) |
 | Transcripts | Short-term in memory; optional history | Local SQLite | Only the current conversation text, to the configured LLM |
 | Memories | Yes, if enabled | Local SQLite, file mode `0600` | Relevant snippets in LLM context |
+| Profile (`profile.md`, written by the user) | Yes | Config folder, file mode `0600` | With every request, to the configured LLM (ADR 0014); never used if it looks like it holds a key |
 | Config | Yes | `~/.config/yarvis/` (Linux), `~/Library/Application Support/yarvis/` (macOS) | No |
 | Logs | Yes, redacted, rotated | Platform log dir | No telemetry. Ever. |
 

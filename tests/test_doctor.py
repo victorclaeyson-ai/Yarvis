@@ -59,7 +59,7 @@ def test_healthy_machine_passes(ctx: DoctorContext, fake_keyring: FakeKeyring) -
     fake_keyring.store[(KEYRING_SERVICE, "anthropic")] = VALID_KEY
     install_models(ctx.paths)
     results = run_doctor(ctx)
-    assert [result.status for result in results] == [Status.OK] * 12
+    assert [result.status for result in results] == [Status.OK] * 13
     assert not has_failures(results)
 
 

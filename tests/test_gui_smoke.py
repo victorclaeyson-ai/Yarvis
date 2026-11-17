@@ -87,9 +87,18 @@ def test_real_window_end_to_end(tmp_path: Path) -> None:  # pragma: no cover - o
             return False
 
         wait_for(lambda: pill() == "ONLINE", 20, "app becomes Ready")
-        models = js("document.getElementById('models').textContent")
-        ok = "haiku" in models and "STT small.en" in models
-        results.append(("OK   " if ok else "FAIL ") + f"models shown: {models!r}")
+        # The wide HUD: connections, hearing and today's numbers in the side columns.
+        wait_for(lambda: js("document.querySelectorAll('#connlist li').length") >= 10, 5,
+                 "a row per connection")  # fmt: skip
+        listed = js("document.getElementById('connlist').textContent")
+        ok = "Claude" in listed and "haiku-5-5" in listed and "Whisper small.en" in listed
+        results.append(("OK   " if ok else "FAIL ") + f"connections listed: {listed[:120]!r}")
+        hearing = js("document.getElementById('h-speech').textContent")
+        results.append(("OK   " if "Whisper" in hearing else "FAIL ") + f"hearing: {hearing!r}")
+        wait_for(lambda: "TURNS" in js("document.getElementById('todayrows').textContent"), 5,
+                 "today's numbers shown")  # fmt: skip
+        wide = js("getComputedStyle(document.querySelector('.side')).display !== 'none'")
+        results.append(("OK   " if wide else "FAIL ") + "the side columns show in a wide window")
         api_ok = js(
             "typeof window.pywebview.api.talk === 'function' && typeof window.pywebview.api.stop === 'function'"
         )
@@ -106,6 +115,10 @@ def test_real_window_end_to_end(tmp_path: Path) -> None:  # pragma: no cover - o
         results.append(
             ("OK   " if "TO FIRST WORD" in timing else "FAIL ") + f"timing shown: {timing!r}"
         )
+        wait_for(lambda: "P50" in js("document.getElementById('p50').textContent"), 5,
+                 "the median shows after a spoken turn")  # fmt: skip
+        wait_for(lambda: "TODAY" in js("document.getElementById('cost').textContent"), 5,
+                 "today's cost shows")  # fmt: skip
 
         # 2. Space key, then stop with Space while listening.
         fakes.mic = SlowNoiseMic()
@@ -138,6 +151,22 @@ def test_real_window_end_to_end(tmp_path: Path) -> None:  # pragma: no cover - o
         wait_for(lambda: "// set a 1-second timer" in log(), 10, "the action is shown")
         wait_for(lambda: "Timer set." in log(), 10, "the model confirms")
         wait_for(lambda: "Your 1-second timer is done." in log(), 10, "the timer goes off")
+        wait_for(lambda: js("document.getElementById('timercount').textContent") == "0", 5,
+                 "the timer leaves the dashboard")  # fmt: skip
+
+        # 5. The compact window: a status button and panel instead of side columns.
+        w.resize(480, 820)
+        wait_for(lambda: js("getComputedStyle(document.querySelector('.side')).display") == "none",
+                 5, "a narrow window hides the side columns")  # fmt: skip
+        wait_for(lambda: js("document.querySelectorAll('#dots .dot').length") >= 10, 5,
+                 "a dot per connection")  # fmt: skip
+        js("document.getElementById('links').click()")
+        wait_for(lambda: js("getComputedStyle(document.getElementById('panel')).display") == "block",
+                 5, "status panel opens")  # fmt: skip
+        wait_for(lambda: "TOTAL" in js("document.getElementById('today').textContent"), 5,
+                 "the panel shows today's numbers")  # fmt: skip
+        js("document.dispatchEvent(new KeyboardEvent('keydown', {key: 'Escape'}))")
+        wait_for(lambda: js("document.body.dataset.panel") == "", 5, "Esc closes it")
         w.destroy()
 
     fakes = FakeBackends(

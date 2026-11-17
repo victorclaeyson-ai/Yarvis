@@ -5,7 +5,7 @@ from typing import TYPE_CHECKING
 
 import pytest
 
-from fakes import ASSEMBLYAI_KEY, MIC, SPEAKER, VALID_KEY, FakeAudioProbe, FakeKeyring
+from fakes import ASSEMBLYAI_KEY, MIC, POSIX_ONLY, SPEAKER, VALID_KEY, FakeAudioProbe, FakeKeyring
 from test_runtime_and_run import install_models
 from yarvis.config import Config, parse_config, write_default_config
 from yarvis.doctor import (
@@ -55,6 +55,7 @@ def test_current_context_describes_this_machine(
     assert ctx.system
 
 
+@POSIX_ONLY  # a Mac, simulated on the real file system
 def test_healthy_machine_passes(ctx: DoctorContext, fake_keyring: FakeKeyring) -> None:
     fake_keyring.store[(KEYRING_SERVICE, "anthropic")] = VALID_KEY
     install_models(ctx.paths)
@@ -89,6 +90,7 @@ def test_missing_config_uses_defaults(ctx: DoctorContext) -> None:
     assert config == Config()
 
 
+@POSIX_ONLY  # a Mac, simulated on the real file system
 def test_valid_config_is_ok(ctx: DoctorContext) -> None:
     write_default_config(ctx.paths.config_file)
     result, _ = check_config(ctx)
@@ -113,6 +115,7 @@ def test_world_readable_config_warns(ctx: DoctorContext) -> None:
     assert "chmod 600" in result.hint
 
 
+@POSIX_ONLY  # a Mac, simulated on the real file system
 def test_relaxed_security_warns(ctx: DoctorContext) -> None:
     write_default_config(ctx.paths.config_file)
     ctx.paths.config_file.write_text("[security]\nallow_tier3 = true\n")
@@ -137,10 +140,12 @@ def test_on_windows_the_user_profile_is_private(
     windows = replace(windows, paths=shared)
     shared.data_dir.mkdir(parents=True, mode=0o755)
     write_default_config(shared.config_file)
-    monkeypatch.setenv("HOME", str(tmp_path))  # the paths are inside the user's profile
+    for home in ("HOME", "USERPROFILE"):  # macOS and Linux read HOME, Windows USERPROFILE
+        monkeypatch.setenv(home, str(tmp_path))  # the paths are inside the user's profile
     assert check_storage(windows).status is Status.OK
     assert check_config(windows)[0].status is Status.OK
-    monkeypatch.setenv("HOME", str(tmp_path / "someone-else"))
+    for home in ("HOME", "USERPROFILE"):
+        monkeypatch.setenv(home, str(tmp_path / "someone-else"))
     result = check_storage(windows)
     assert result.status is Status.WARN
     assert result.detail.count(str(shared.data_dir)) == 1  # listed once

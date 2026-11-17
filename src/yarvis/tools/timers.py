@@ -70,6 +70,8 @@ class Alarms:
     announce: Callable[[str], None]
     now: Callable[[], datetime] = local_now
     sleep: Callable[[float], Awaitable[None]] = asyncio.sleep
+    on_change: Callable[[list[Alarm]], None] | None = None
+    """Told the running alarms whenever one is set, cancelled or goes off (the dashboard)."""
     _alarms: dict[int, Alarm] = field(default_factory=dict[int, Alarm])
     _tasks: dict[int, asyncio.Task[None]] = field(default_factory=dict[int, asyncio.Task[None]])
     _next_id: int = 1
@@ -101,6 +103,7 @@ class Alarms:
             msg = f"There is no timer or reminder number {alarm_id}."
             raise ToolError(msg)
         self._tasks.pop(alarm_id).cancel()
+        self._changed()
         return alarm
 
     def close(self) -> None:
@@ -109,6 +112,7 @@ class Alarms:
             task.cancel()
         self._tasks.clear()
         self._alarms.clear()
+        self._changed()
 
     def _add(
         self, kind: Literal["timer", "reminder"], label: str, due: datetime, seconds: float | None
@@ -121,7 +125,12 @@ class Alarms:
         self._alarms[alarm.id] = alarm
         self._tasks[alarm.id] = asyncio.create_task(self._wait(alarm))
         logger.info("%s %d set for %s", kind.capitalize(), alarm.id, f"{due:%H:%M:%S}")
+        self._changed()
         return alarm
+
+    def _changed(self) -> None:
+        if self.on_change is not None:
+            self.on_change(self.active())
 
     async def _wait(self, alarm: Alarm) -> None:
         while (left := (alarm.due - self.now()).total_seconds()) > 0:
@@ -129,6 +138,7 @@ class Alarms:
         self._alarms.pop(alarm.id, None)
         self._tasks.pop(alarm.id, None)
         logger.info("%s %d is due", alarm.kind.capitalize(), alarm.id)
+        self._changed()
         self.announce(alarm.announcement())
 
 

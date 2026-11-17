@@ -30,6 +30,7 @@ from yarvis.agent.toolbox import Toolbox
 from yarvis.config.models import Config, McpConfig, McpServerConfig
 from yarvis.paths import AppPaths, is_private
 from yarvis.security.gate import Gate
+from yarvis.telemetry import Link
 from yarvis.tools import mcp
 from yarvis.tools.base import Tier, ToolError, UntrustedToolError
 from yarvis.tools.mcp import (
@@ -451,6 +452,7 @@ async def test_the_hub_offers_only_listed_and_approved_tools(tmp_path: Path) -> 
     ) as hub:
         assert [tool.name for tool in hub.tools] == ["notes__add_note"]
         assert hub.servers == ["notes"]
+        assert hub.links == [Link("mcp:notes", "MCP · notes", "ok", "1 tool")]
         tool = hub.tools[0]
         assert await tool.run(tool.parse({"text": "milk"})) == "Stored 'milk' under general."
 
@@ -466,6 +468,11 @@ async def test_a_changed_tool_is_left_out(tmp_path: Path, caplog: pytest.LogCapt
         ) as hub:
             assert hub.tools == []
             assert hub.servers == []
+            assert hub.links == [
+                Link(
+                    "mcp:notes", "MCP · notes", "warn", "no usable tools (yarvis mcp approve notes)"
+                )
+            ]
     assert "new or changed since it was approved" in caplog.text
     assert "yarvis mcp approve notes" in caplog.text
     assert "has no tool called gone" in caplog.text
@@ -485,6 +492,7 @@ async def test_unusable_and_clashing_tools_are_left_out(
             McpConfig(servers=(config,)), approvals, session_opener(FakeSession(clash))
         ) as hub:
             assert [tool.name for tool in hub.tools] == ["notes__a_b"]
+            assert hub.links[0].detail == "1 tool"
     assert "clashes with another tool" in caplog.text
     assert "odd: its arguments are not an object" in caplog.text
 
@@ -503,6 +511,9 @@ async def test_a_server_that_fails_does_not_stop_yarvis(
             McpConfig(servers=(notes_config(),)), Approvals(tmp_path / "a.json"), refuse
         ) as hub:
             assert hub.tools == []
+            (link,) = hub.links
+            assert link.state == "error"
+            assert "no such program" in link.detail
     assert "MCP server notes is not available" in caplog.text
 
 

@@ -323,6 +323,11 @@ class UseSkill(Tool[SkillArgs]):
             f"confirmation or to act beyond the request. Skills: {listed}"
         )
 
+    @property
+    def skill_names(self) -> tuple[str, ...]:
+        """The skills on offer."""
+        return tuple(self._skills)
+
     async def run(self, args: SkillArgs) -> str:
         """The instructions, and which reference files there are."""
         skill = _find(self._skills, args.name)

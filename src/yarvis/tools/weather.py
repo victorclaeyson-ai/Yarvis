@@ -7,7 +7,9 @@ the place name and its coordinates leave the computer.
 
 from __future__ import annotations
 
+import asyncio
 import logging
+from dataclasses import dataclass
 from datetime import date, timedelta
 from typing import TYPE_CHECKING, Any, Final, cast
 
@@ -17,7 +19,7 @@ from pydantic import Field
 from yarvis.tools.base import Arguments, Tier, Tool, ToolError
 
 if TYPE_CHECKING:
-    from collections.abc import Callable
+    from collections.abc import Awaitable, Callable
 
 logger = logging.getLogger(__name__)
 
@@ -76,9 +78,26 @@ class Weather(Tool[WeatherArgs]):
         self._today = today
         self._places: dict[str, tuple[str, float, float]] = {}
 
+    @property
+    def home(self) -> str | None:
+        """The user's home town (the config's ``location``)."""
+        return self._home
+
     async def run(self, args: WeatherArgs) -> str:
         """Look it up."""
-        place = args.place.strip() or self._home
+        name, forecast = await self._forecast(args.place.strip() or self._home)
+        return _describe(name, forecast, args.days_ahead, self._today())
+
+    async def outlook(self) -> Outlook:
+        """The weather at home now, today and tomorrow (for the dashboard).
+
+        Raises:
+            ToolError: If there is no home, or the service cannot be reached.
+        """
+        name, forecast = await self._forecast(self._home)
+        return _outlook(name, forecast, self._today())
+
+    async def _forecast(self, place: str | None) -> tuple[str, dict[str, Any]]:
         if not place:
             msg = "No place was given and the user has not set a home location."
             raise ToolError(msg)
@@ -97,7 +116,7 @@ class Weather(Tool[WeatherArgs]):
                 "forecast_days": str(_DAYS),
             },
         )
-        return _describe(name, forecast, args.days_ahead, self._today())
+        return name, forecast
 
     def describe(self, args: WeatherArgs) -> str:
         """'check the weather in Ghent'."""
@@ -143,6 +162,89 @@ class Weather(Tool[WeatherArgs]):
         if not isinstance(payload, dict):
             raise ToolError(_UNREACHABLE)
         return cast("dict[str, Any]", payload)
+
+
+@dataclass(frozen=True, slots=True)
+class Day:
+    """One day of the forecast (None: not reported)."""
+
+    condition: str
+    low: float | None
+    high: float | None
+    rain_chance: float | None
+    """Percent."""
+
+
+@dataclass(frozen=True, slots=True)
+class Outlook:
+    """The home weather at a glance (place names come from Open-Meteo: outside text)."""
+
+    place: str
+    temperature: float | None
+    feels_like: float | None
+    condition: str
+    wind_kmh: float | None
+    today: Day | None
+    tomorrow: Day | None
+
+
+DASHBOARD_EVERY_S: Final = 1_800.0
+"""How often the dashboard's weather is refreshed: twice an hour."""
+
+
+async def watch_weather(
+    weather: Weather,
+    show: Callable[[Outlook], None],
+    *,
+    every_s: float = DASHBOARD_EVERY_S,
+    sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
+) -> None:
+    """Show the home weather now and then every ``every_s`` seconds, until cancelled."""
+    while True:
+        try:
+            show(await weather.outlook())
+        except ToolError as exc:
+            logger.info("No weather for the dashboard this time: %s", exc)
+        await sleep(every_s)
+
+
+def _outlook(name: str, forecast: dict[str, Any], today: date) -> Outlook:
+    current = forecast.get("current")
+    now = cast("dict[str, Any]", current) if isinstance(current, dict) else {}
+    daily = forecast.get("daily")
+    days = cast("dict[str, list[Any]]", daily) if isinstance(daily, dict) else {}
+
+    def day(offset: int) -> Day | None:
+        times = days.get("time") or []
+        wanted = (today + timedelta(days=offset)).isoformat()
+        if wanted not in times:
+            return None
+        index = times.index(wanted)
+
+        def value(field: str) -> object:
+            values = days.get(field) or []
+            return values[index] if index < len(values) else None
+
+        return Day(
+            condition=_condition(value("weather_code")),
+            low=_float(value("temperature_2m_min")),
+            high=_float(value("temperature_2m_max")),
+            rain_chance=_float(value("precipitation_probability_max")),
+        )
+
+    return Outlook(
+        place=name,
+        temperature=_float(now.get("temperature_2m")),
+        feels_like=_float(now.get("apparent_temperature")),
+        condition=_condition(now.get("weather_code")) if now else "unknown",
+        wind_kmh=_float(now.get("wind_speed_10m")),
+        today=day(0),
+        tomorrow=day(1),
+    )
+
+
+def _float(value: object) -> float | None:
+    return float(value) if isinstance(value, int | float) and not isinstance(value, bool) else None
 
 
 def _in_region(result: dict[str, Any], wanted: str) -> bool:

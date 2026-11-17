@@ -1,13 +1,13 @@
 from __future__ import annotations
 
 import hashlib
-import stat
 from contextlib import contextmanager
 from typing import TYPE_CHECKING
 
 import httpx2
 import pytest
 
+from fakes import posix_mode
 from yarvis.models import (
     KOKORO_FILES,
     PARAKEET_FILES,
@@ -63,7 +63,7 @@ def test_download_verifies_and_installs_privately(tmp_path: Path) -> None:
     )
     assert path.read_bytes() == PAYLOAD
     assert sum(progress) == len(PAYLOAD)
-    assert stat.S_IMODE(path.stat().st_mode) == 0o600
+    assert posix_mode(path) in {0o600, None}
     assert is_present(model_for(PAYLOAD), tmp_path)
     assert missing((model_for(PAYLOAD),), tmp_path) == []
 

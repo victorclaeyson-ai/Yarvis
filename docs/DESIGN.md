@@ -32,7 +32,7 @@
 
 | Area | Target (v1) | How we measure |
 |---|---|---|
-| Voice-to-voice latency (p50) | **≤ 800 ms** (stretch: 600 ms) | `benchmarks/latency.py`, end of user speech → first audio sample out |
+| Voice-to-voice latency (p50) | **≤ 800 ms** (stretch: 600 ms) | `yarvis bench`, and every real spoken turn (end of user speech → first audio out), shown on the dashboard and in `yarvis usage` (ADR 0015) |
 | Voice-to-voice latency (p95) | ≤ 1500 ms | same |
 | Barge-in reaction | ≤ 150 ms from user speech onset to TTS stop | same harness, synthetic overlap |
 | Wake word | < 1 false accept / 10 h of background audio, > 95 % true accept | recorded test corpus |
@@ -236,6 +236,8 @@ The gate is a single small module (`yarvis/security/gate.py`) with exhaustive te
 | Transcripts | Short-term in memory; optional history | Local SQLite | Only the current conversation text, to the configured LLM |
 | Memories | Yes, if enabled | Local SQLite, file mode `0600` | Relevant snippets in LLM context |
 | Profile (`profile.md`, written by the user) | Yes | Config folder, file mode `0600` | With every request, to the configured LLM (ADR 0014); never used if it looks like it holds a key |
+| Usage numbers (`usage.json`: tokens, searches, seconds, estimated cost and latency per day; never what was said) | Yes, one year | Data folder, file mode `0600` | No (ADR 0015); `yarvis usage clear` deletes them |
+| Home town (the config's `location`) | Yes, in the config | Config folder | To Open-Meteo, for the weather: when asked, and twice an hour for the dashboard (ADR 0015) |
 | Config | Yes | `~/.config/yarvis/` (Linux), `~/Library/Application Support/yarvis/` (macOS) | No |
 | Logs | Yes, redacted, rotated | Platform log dir | No telemetry. Ever. |
 
@@ -321,6 +323,7 @@ yarvis/
 | **0 · Foundations** | Repo, tooling, CI, config, secrets, logging, event bus, `yarvis doctor` | CI green on macOS + Linux; `doctor` checks mic, speaker, models, keys |
 | **1 · Voice loop** | Audio I/O, wake word, VAD, STT, Claude streaming, TTS, barge-in, latency harness | Natural conversation with barge-in; p50 latency measured and published |
 | **2 · Tools & security core** | Permission gate, taint tracking, confirmations, built-in tools, MCP client + pinning, Agent Skills | Injection suite passing; calendar and email work end to end (through the Mac, ADR 0010); MCP client with pinning and skills (ADR 0013) — done |
+| **2.5 · Polish & reach** | One-line install and `yarvis init`, routines and a morning brief, email drafts, a dashboard with every connection, cost and speed (ADR 0015), examples, demo video | A stranger installs Yarvis with one command and talks to it within five minutes |
 | **3 · Memory & offline** | Memory store, recall, Ollama offline mode, Dutch voice | Fully offline demo; memory forget/export works |
 | **4 · Satellite** | ESP32-S3 firmware, pairing, secure audio streaming, LED states | Satellite pairs in < 1 minute; link passes security review |
 | **5 · Launch** | Demo video, docs site, install polish, launch posts | Public release v1.0 |

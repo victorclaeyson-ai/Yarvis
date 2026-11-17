@@ -1,10 +1,10 @@
 from __future__ import annotations
 
-import stat
 from typing import TYPE_CHECKING
 
 import pytest
 
+from fakes import posix_mode
 from yarvis.config import (
     DEFAULT_CONFIG_TOML,
     Config,
@@ -82,7 +82,7 @@ def test_config_is_immutable() -> None:
 def test_write_default_config_is_private(tmp_path: Path) -> None:
     path = tmp_path / "cfg" / "config.toml"
     write_default_config(path)
-    assert stat.S_IMODE(path.stat().st_mode) == 0o600
+    assert posix_mode(path) in {0o600, None}
     assert load_config(path) == Config()
     with pytest.raises(FileExistsError):
         write_default_config(path)

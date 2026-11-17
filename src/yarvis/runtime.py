@@ -22,14 +22,18 @@ from yarvis.assistant import Assistant, AssistantControls, TurnTaking
 from yarvis.audio.sounds import chime
 from yarvis.ears import MicrophoneEars, SharedMicrophone, WakeWord, barge_in_mode
 from yarvis.listen import AudioTap
+from yarvis.llm.anthropic import DEFAULT_MODEL
 from yarvis.pipeline import Turn
 from yarvis.security.gate import Gate
 from yarvis.speech.base import AudioSink, SpeechToText, TextToSpeech
+from yarvis.speech.choice import describe as describe_stt
 from yarvis.speech.endpointing import EndpointerSettings
 from yarvis.speech.turn_taking import DEFAULT_WAKE_NAMES
+from yarvis.telemetry import Reports, Setup, Telemetry, starting_links
 from yarvis.tools.desktop import abilities
+from yarvis.tools.skills import UseSkill
 from yarvis.tools.timers import Alarms, timer_tools
-from yarvis.tools.weather import Weather
+from yarvis.tools.weather import Weather, watch_weather
 
 logger = logging.getLogger(__name__)
 
@@ -46,9 +50,11 @@ if TYPE_CHECKING:
     from yarvis.ears import FrameSource
     from yarvis.llm.base import LLMProvider
     from yarvis.speech.base import VoiceActivityDetector
+    from yarvis.telemetry import Dashboard, Link
     from yarvis.tools.base import Tool
     from yarvis.tools.ducking import Ducker
     from yarvis.tools.spotify import SpotifyKeys
+    from yarvis.usage import UsageBook
 
 
 class LoadableSTT(SpeechToText, Protocol):
@@ -104,11 +110,17 @@ class McpTools(Protocol):
         """The servers they come from."""
         ...
 
+    @property
+    def links(self) -> Sequence[Link]:
+        """How every configured server is doing, for the dashboard."""
+        ...
+
 
 @dataclass(frozen=True, slots=True)
 class _NoMcpTools:
     tools: tuple[Tool[Any], ...] = ()
     servers: tuple[str, ...] = ()
+    links: tuple[Link, ...] = ()
 
 
 @asynccontextmanager
@@ -140,6 +152,8 @@ class Backends:
     """The Agent Skills the user added."""
     profile: Callable[[], str] = lambda: ""
     """What the user wrote about themselves, read again before every request."""
+    usage: Callable[[], UsageBook | None] = lambda: None
+    """Where the day's numbers are kept (None: in memory only)."""
 
     @classmethod
     def real(cls) -> Backends:  # pragma: no cover - exercised on real machines, not in CI
@@ -168,6 +182,7 @@ class Backends:
         from yarvis.tools.mcp_launch import Launcher  # noqa: PLC0415
         from yarvis.tools.skills import SkillLibrary, user_skills  # noqa: PLC0415
         from yarvis.tools.spotify import SpotifyAccount, SpotifyCatalog  # noqa: PLC0415
+        from yarvis.usage import UsageBook  # noqa: PLC0415
 
         paths = AppPaths.default()
         launcher = Launcher(
@@ -202,6 +217,7 @@ class Backends:
                 user_skills(SkillLibrary.of(paths)) if config.tools.skills else []
             ),
             profile=ProfileReader(profile_path(paths)),
+            usage=lambda: UsageBook.of(paths),
             computer=lambda config, spotify: computer_tools(
                 browser=config.tools.browser,
                 typing=config.tools.typing,
@@ -224,23 +240,48 @@ async def run_assistant(
     on_loading: Callable[[str], None] | None = None,
     controls: AssistantControls | None = None,
     spotify: SpotifyKeys | None = None,
+    dashboard: Dashboard | None = None,
 ) -> None:
-    """Assemble the pipeline and run the interactive loop until the user quits."""
+    """Assemble the pipeline and run the interactive loop until the user quits.
+
+    The day's usage is counted and kept whatever the interface; ``dashboard`` shows it.
+    """
     llm = backends.llm(config, api_key)
     announcements: asyncio.Queue[str] = asyncio.Queue()
-    alarms = Alarms(announcements.put_nowait) if config.tools.timers else None
+    alarms = (
+        Alarms(announcements.put_nowait, on_change=dashboard.timers if dashboard else None)
+        if config.tools.timers
+        else None
+    )
     stt = backends.stt(config, cache_dir) if voice_input else None
     tts = backends.tts(config, cache_dir) if voice_output else None
     wake_word = (
         backends.wake_word(config, cache_dir) if voice_input and config.voice.wake_word else None
     )
 
+    telemetry = _telemetry(backends, dashboard, llm, stt)
+
     async with AsyncExitStack() as stack:
+        stack.callback(telemetry.close)
         if alarms is not None:
             stack.callback(alarms.close)
         engines = [engine for engine in (stt, tts, wake_word) if engine is not None]
         mcp = await _load(stack, engines, backends.mcp(config), on_loading)
         tools, abilities = _tools(config, alarms, backends, spotify, mcp)
+        setup = Setup(
+            model=config.llm.model or DEFAULT_MODEL,
+            hearing=describe_stt(config.voice) if stt is not None else None,
+            cloud_hearing=isinstance(stt, AudioTap),
+            voice=config.voice.voice if tts is not None else None,
+            wake_word=wake_word is not None,
+            spotify=any(tool.name.startswith("spotify_") for tool in tools),
+            spotify_login=spotify is not None and spotify.login is not None,
+            personal=any(tool.name.startswith(("calendar_", "mail_")) for tool in tools),
+            skills=sum(len(t.skill_names) for t in tools if isinstance(t, UseSkill)),
+            profile=bool(backends.profile()),
+            mcp=mcp.links,
+        )
+        _show_dashboard(stack, telemetry, starting_links(config, setup), tools, dashboard)
         conversation = _conversation(
             config, llm, tools, abilities, profile=backends.profile, on_activity=ui.activity
         )
@@ -259,6 +300,7 @@ async def run_assistant(
             observer=ui,
             chime=chime(tts.sample_rate) if tts is not None and config.voice.wake_chime else None,
             names=(config.assistant.name, *DEFAULT_WAKE_NAMES),
+            on_finished=telemetry.turn_finished,
         )
 
         greeter = Greeter(config.assistant.user_name) if wake_word is not None else None
@@ -418,6 +460,33 @@ def _tools(
             "hours, facts you are unsure of"
         )
     return tools, said
+
+
+def _telemetry(
+    backends: Backends, dashboard: Dashboard | None, *parts: LLMProvider | LoadableSTT | None
+) -> Telemetry:
+    """Counts the day's usage; the cloud clients among ``parts`` report to it."""
+    telemetry = Telemetry(backends.usage(), dashboard=dashboard)
+    for part in parts:
+        if isinstance(part, Reports):
+            part.report_to(telemetry)
+    return telemetry
+
+
+def _show_dashboard(
+    stack: AsyncExitStack,
+    telemetry: Telemetry,
+    links: Sequence[Link],
+    tools: Sequence[Tool[Any]],
+    dashboard: Dashboard | None,
+) -> None:
+    """Show the connections and today's numbers; keep the home weather fresh (if any)."""
+    telemetry.start(links)
+    weather = next((tool for tool in tools if isinstance(tool, Weather)), None)
+    if dashboard is None or weather is None or not weather.home:
+        return
+    task = asyncio.create_task(watch_weather(weather, dashboard.weather))
+    stack.callback(task.cancel)
 
 
 def _web_search(config: Config) -> bool:

@@ -9,16 +9,20 @@ from __future__ import annotations
 
 import logging
 from collections import OrderedDict
+from dataclasses import dataclass
 from typing import TYPE_CHECKING, Final
 
 import anthropic
 import httpx2
 
 from yarvis.llm.base import LLMError, ToolCall, WebSearch
+from yarvis.telemetry import CLAUDE, short_model
+from yarvis.usage import ClaudeUsage, estimated_tokens
 
 if TYPE_CHECKING:
     from collections.abc import AsyncGenerator, Sequence
 
+    from anthropic.lib.streaming import AsyncMessageStream
     from anthropic.types import (
         ContentBlock,
         ContentBlockParam,
@@ -30,9 +34,11 @@ if TYPE_CHECKING:
         ToolUseBlockParam,
         WebSearchTool20250305Param,
     )
+    from anthropic.types import Message as ApiMessage
     from pydantic import SecretStr
 
     from yarvis.llm.base import Message, ToolSpec
+    from yarvis.telemetry import Reporter
 
 DEFAULT_MODEL: Final = "claude-haiku-5-5"
 """Anthropic's lowest-latency model: the right default for a voice assistant."""
@@ -68,6 +74,7 @@ class AnthropicProvider:
         # Turns that searched and then called our tools: the API needs them back exactly
         # as sent (search results are encrypted), keyed by their first tool call.
         self._turns: OrderedDict[str, list[ContentBlock]] = OrderedDict()
+        self._reporter: Reporter | None = None
         self._client = client or anthropic.AsyncAnthropic(
             api_key=api_key.get_secret_value(),
             max_retries=1,  # a voice user would rather hear an error than wait
@@ -80,6 +87,10 @@ class AnthropicProvider:
                 ),
             ),
         )
+
+    def report_to(self, reporter: Reporter) -> None:
+        """Report every request's usage, and whether Claude answers, to ``reporter``."""
+        self._reporter = reporter
 
     async def warm_up(self) -> None:
         """Open (or refresh) the HTTPS connection with a free, tiny request."""
@@ -113,17 +124,24 @@ class AnthropicProvider:
                     messages=params,
                     tools=tool_params or anthropic.omit,
                 ) as stream:
-                    async for event in stream:
-                        if event.type == "text":
-                            yield event.text
-                        elif (
-                            event.type == "content_block_stop"
-                            and event.content_block.type == "server_tool_use"
-                            and event.content_block.name == "web_search"
-                        ):
-                            logger.info("Claude searched the web")
-                            yield WebSearch(str(event.content_block.input.get("query", "")))
-                    final = await stream.get_final_message()
+                    seen = _Seen()
+                    try:
+                        async for event in stream:
+                            if event.type == "text":
+                                seen.chars += len(event.text)
+                                yield event.text
+                            elif (
+                                event.type == "content_block_stop"
+                                and event.content_block.type == "server_tool_use"
+                                and event.content_block.name == "web_search"
+                            ):
+                                logger.info("Claude searched the web")
+                                seen.searches += 1
+                                yield WebSearch(str(event.content_block.input.get("query", "")))
+                        final = await stream.get_final_message()
+                        seen.complete = True
+                    finally:
+                        self._report(stream, seen)
                 turn += final.content
                 if final.stop_reason != "pause_turn":
                     break
@@ -131,12 +149,38 @@ class AnthropicProvider:
                 paused: MessageParam = {"role": "assistant", "content": list(turn)}
                 params = [*params, paused]
         except anthropic.APIError as exc:
-            raise LLMError(_explain(exc, self.model)) from exc
+            message = _explain(exc, self.model)
+            if self._reporter is not None:
+                self._reporter.health(CLAUDE, "error", message)
+            raise LLMError(message) from exc
+        if self._reporter is not None:
+            self._reporter.health(CLAUDE, "ok", short_model(self.model))
         calls = [block for block in turn if block.type == "tool_use"]
         if calls and any(block.type not in {"text", "tool_use"} for block in turn):
             self._keep(calls[0].id, turn)
         for block in calls:
             yield ToolCall(id=block.id, name=block.name, arguments=dict(block.input))
+
+    def _report(self, stream: AsyncMessageStream, seen: _Seen) -> None:
+        """Count what one request used, even if it was cut off (a dropped draft)."""
+        if self._reporter is None or (snapshot := _snapshot(stream)) is None:
+            return  # nothing arrived: nothing to count
+        usage = snapshot.usage
+        output = usage.output_tokens
+        searches = usage.server_tool_use.web_search_requests if usage.server_tool_use else 0
+        if not seen.complete:  # the final counts never came: estimate from what did
+            output = max(output, estimated_tokens(seen.chars))
+            searches = max(searches, seen.searches)
+        self._reporter.claude(
+            ClaudeUsage(
+                model=snapshot.model or self.model,
+                input_tokens=usage.input_tokens,
+                output_tokens=output,
+                cache_write_tokens=usage.cache_creation_input_tokens or 0,
+                cache_read_tokens=usage.cache_read_input_tokens or 0,
+                web_searches=searches,
+            )
+        )
 
     def _keep(self, call_id: str, turn: list[ContentBlock]) -> None:
         self._turns[call_id] = turn
@@ -149,6 +193,23 @@ class AnthropicProvider:
             if kept is not None:  # it searched first: send it back exactly as received
                 return {"role": "assistant", "content": kept}
         return _to_param(message)
+
+
+def _snapshot(stream: AsyncMessageStream) -> ApiMessage | None:
+    """The message as received so far (None before its start arrived)."""
+    try:
+        return stream.current_message_snapshot
+    except AssertionError:  # the SDK's way of saying "nothing yet" (None under -O)
+        return None
+
+
+@dataclass(slots=True)
+class _Seen:
+    """What one streamed response delivered, for the estimate if it is cut off."""
+
+    chars: int = 0
+    searches: int = 0
+    complete: bool = False
 
 
 def _tool_param(name: str, description: str, schema: dict[str, object]) -> ToolParam:

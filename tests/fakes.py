@@ -3,17 +3,21 @@
 from __future__ import annotations
 
 import asyncio
+import stat
+import sys
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Protocol
 
 import keyring.errors
 import numpy as np
+import pytest
 
 from yarvis.audio.devices import AudioBackendError, AudioDevice
 
 if TYPE_CHECKING:
     from collections.abc import AsyncGenerator, Awaitable, Callable, Sequence
+    from pathlib import Path
 
     from typer.testing import Result
 
@@ -21,6 +25,26 @@ if TYPE_CHECKING:
     from yarvis.listen import PauseHooks, Utterance
     from yarvis.llm.base import Message, ToolCall, ToolSpec, WebSearch
     from yarvis.speech.base import AudioArray
+    from yarvis.telemetry import LinkState
+    from yarvis.usage import ClaudeUsage
+
+POSIX_ONLY = pytest.mark.skipif(
+    sys.platform == "win32", reason="about POSIX permission bits, which Windows does not have"
+)
+
+
+def posix_mode(path: Path) -> int | None:
+    """The permission bits of ``path``; None on Windows, which has none (every file is 0o666)."""
+    return None if sys.platform == "win32" else stat.S_IMODE(path.stat().st_mode)
+
+
+def symlink_or_skip(link: Path, target: Path) -> None:
+    """Make ``link`` point to ``target``, or skip: on Windows that takes Developer Mode."""
+    try:
+        link.symlink_to(target)
+    except OSError as exc:  # WinError 1314: a required privilege is not held
+        pytest.skip(f"symbolic links cannot be created here ({exc.strerror})")
+
 
 VALID_KEY = "sk-ant-test-0123456789abcdefghij"  # gitleaks:allow
 ASSEMBLYAI_KEY = "test" * 8
@@ -132,6 +156,26 @@ class FakeLLM:
             yield delta
         if self.error is not None:
             raise self.error
+
+
+@dataclass
+class RecordingReporter:
+    """A ``telemetry.Reporter`` that keeps every report."""
+
+    claude_calls: list[ClaudeUsage] = field(default_factory=list["ClaudeUsage"])
+    speech_calls: list[tuple[str, float]] = field(default_factory=list[tuple[str, float]])
+    health_calls: list[tuple[str, LinkState, str]] = field(
+        default_factory=list[tuple[str, "LinkState", str]]
+    )
+
+    def claude(self, usage: ClaudeUsage) -> None:
+        self.claude_calls.append(usage)
+
+    def speech(self, model: str, seconds: float) -> None:
+        self.speech_calls.append((model, seconds))
+
+    def health(self, key: str, state: LinkState, detail: str) -> None:
+        self.health_calls.append((key, state, detail))
 
 
 class FakeSTT:

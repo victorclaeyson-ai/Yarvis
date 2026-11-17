@@ -34,6 +34,7 @@ from pydantic import JsonValue  # noqa: TC002 - pydantic needs it at runtime
 
 from yarvis.llm.base import ToolSpec
 from yarvis.paths import write_private_file
+from yarvis.telemetry import Link
 from yarvis.tools.base import Arguments, Tier, Tool, ToolError, UntrustedToolError
 
 if TYPE_CHECKING:
@@ -440,6 +441,8 @@ class McpHub:
         self.tools: list[McpTool] = []
         self.servers: list[str] = []
         """The servers that are running and contribute at least one tool."""
+        self.links: list[Link] = []
+        """How every configured server is doing, for the dashboard."""
 
     async def __aenter__(self) -> Self:
         approved = self._approvals.load()
@@ -451,15 +454,22 @@ class McpHub:
         taken: set[str] = set()
         for connection, listing in zip(connections, listings, strict=True):
             name = connection.server.name
+            key, label = f"mcp:{name}", f"MCP · {name}"
             if isinstance(listing, BaseException):
                 logger.warning("MCP server %s is not available: %s", name, listing)
+                self.links.append(Link(key, label, "error", f"not available: {listing}"))
                 continue
             tools = self._offer(connection, listing, approved.get(name, {}), taken)
             if tools:
                 self.servers.append(name)
                 self.tools += tools
+                count = f"{len(tools)} tool{'s' if len(tools) != 1 else ''}"
+                self.links.append(Link(key, label, "ok", count))
             else:
                 await connection.stop()
+                self.links.append(
+                    Link(key, label, "warn", f"no usable tools (yarvis mcp approve {name})")
+                )
         return self
 
     async def __aexit__(

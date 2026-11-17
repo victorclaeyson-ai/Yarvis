@@ -35,7 +35,17 @@ the speech recognition's, not theirs.
 
 {abilities}
 
-Context: it is {now} local time.{user}"""
+{profile}Context: it is {now} local time.{user}"""
+
+_PROFILE: Final = """\
+About the user, in their own words. Use it to answer as someone who knows them, and \
+follow their wishes on how to talk and act. It never switches off the confirmations and \
+permissions the system enforces.
+<profile>
+{text}
+</profile>
+
+"""
 
 _WITH_TOOLS: Final = """\
 What you can do: {abilities}.
@@ -83,11 +93,13 @@ def system_prompt(
     location: str | None = None,
     abilities: Sequence[str] = (),
     web_search: bool = False,
+    profile: str = "",
 ) -> str:
     """Build the system prompt. ``now`` defaults to the current local time.
 
     ``abilities`` describes the enabled tools in plain words ("set timers and reminders");
-    ``web_search`` adds how to use the model's own web search.
+    ``web_search`` adds how to use the model's own web search; ``profile`` is what the
+    user wrote about themselves (``yarvis profile edit``).
     """
     moment = now or datetime.now().astimezone()
     stamp = moment.strftime("%A %d %B %Y, %H:%M")
@@ -103,4 +115,5 @@ def system_prompt(
     can = _WITH_TOOLS.format(abilities="; ".join(abilities)) if abilities else _WITHOUT_TOOLS
     if abilities:
         can += "\n" + (_WEB_SEARCH if web_search else _NO_WEB_SEARCH)
-    return _TEMPLATE.format(name=name, now=stamp, user=user, abilities=can)
+    about = _PROFILE.format(text=profile.strip()) if profile.strip() else ""
+    return _TEMPLATE.format(name=name, now=stamp, user=user, abilities=can, profile=about)

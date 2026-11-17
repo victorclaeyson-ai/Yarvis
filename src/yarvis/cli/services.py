@@ -56,6 +56,12 @@ def run_app(
     )
 
 
+def _open_editor(path: Path) -> None:  # pragma: no cover - opens a real editor
+    from yarvis.cli.profile import open_in_editor  # noqa: PLC0415 - avoids an import cycle
+
+    open_in_editor(path)
+
+
 def mcp_launcher(paths: AppPaths, secrets: SecretStore) -> Opener:
     """Starts or reaches the configured MCP servers (their folders and logs in ``paths``)."""
     return Launcher(secrets.get_extra, work_dir=paths.data_dir / "mcp", log_dir=paths.log_dir)
@@ -88,6 +94,8 @@ class Services:
     """Runs the Spotify consent flow in the browser; returns a refresh token."""
     mcp_opener: Callable[[AppPaths, SecretStore], Opener] = mcp_launcher
     """Connects to MCP servers (``yarvis mcp approve``)."""
+    open_editor: Callable[[Path], None] = field(default_factory=lambda: _open_editor)
+    """Opens a file in the computer's text editor (``yarvis profile edit``)."""
 
     @classmethod
     def default(cls) -> Services:

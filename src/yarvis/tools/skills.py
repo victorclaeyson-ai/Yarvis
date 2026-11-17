@@ -28,6 +28,7 @@ import logging
 import os
 import re
 import shutil
+import textwrap
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Final, cast
@@ -53,7 +54,10 @@ MAX_SKILLS_LISTED: Final = 30
 TEXT_SUFFIXES: Final = frozenset({".md", ".txt", ".csv", ".json", ".yaml", ".yml"})
 SKIPPED_FOLDERS: Final = frozenset({"scripts", ".git", "__pycache__", "node_modules"})
 _NAME: Final = re.compile(r"^(?!.*--)[a-z0-9](?:[a-z0-9-]{0,62}[a-z0-9])?$")
-_FRONT_MATTER: Final = re.compile(r"\A---\r?\n(.*?)\r?\n---\r?\n?(.*)\Z", re.DOTALL)
+_FRONT_MATTER: Final = re.compile(
+    r"\A---[ \t]*\r?\n(.*?)\r?\n[ \t]*---[ \t]*(?:\r?\n(.*))?\Z", re.DOTALL
+)
+_BOM: Final = "\ufeff"
 
 
 class SkillError(Exception):
@@ -90,7 +94,14 @@ def read_skill(folder: Path) -> Skill:
     if len(raw) > MAX_SKILL_BYTES:
         msg = f"{SKILL_FILE} is larger than {MAX_SKILL_BYTES // 1000} kB"
         raise SkillError(msg)
-    meta, instructions = _front_matter(raw.decode("utf-8", errors="strict"))
+    try:
+        text = raw.decode("utf-8", errors="strict")
+    except UnicodeDecodeError:
+        msg = (
+            f"{SKILL_FILE} must be saved as UTF-8 text (in Notepad: File, Save as, Encoding: UTF-8)"
+        )
+        raise SkillError(msg) from None
+    meta, instructions = _front_matter(text)
     name = _text(meta, "name", limit=64)
     if not _NAME.match(name):
         msg = "the name may only hold lowercase letters, digits and single hyphens"
@@ -117,9 +128,29 @@ def read_skill(folder: Path) -> Skill:
 
 
 def _front_matter(text: str) -> tuple[dict[str, object], str]:
-    match = _FRONT_MATTER.match(text.lstrip("﻿"))
+    """Split ``SKILL.md`` into its YAML front matter and its instructions.
+
+    Forgiving about what pasting brings along (a byte-order mark, blank lines, the same
+    indentation on every line); precise about what is wrong otherwise.
+    """
+    text = textwrap.dedent(text.lstrip(_BOM)).strip()
+    if not text:
+        msg = f"{SKILL_FILE} is empty (was it saved?)"
+        raise SkillError(msg)
+    match = _FRONT_MATTER.match(text)
     if match is None:
-        msg = f"{SKILL_FILE} must start with YAML front matter between --- lines"
+        first = text.splitlines()[0].strip()
+        if first.startswith("```"):
+            msg = f"remove the ``` lines: {SKILL_FILE} itself must start with ---"
+        elif first.startswith("\\"):
+            msg = (
+                f"its first line is {first[:40]!r}: remove the backslashes that copying from a "
+                "chat or web page added (the line must be exactly ---)"
+            )
+        elif first == "---":
+            msg = "the front matter has no closing --- line"
+        else:
+            msg = f"{SKILL_FILE} must start with a --- line, not {first[:40]!r}"
         raise SkillError(msg)
     try:
         meta: object = yaml.safe_load(match.group(1))
@@ -129,9 +160,8 @@ def _front_matter(text: str) -> tuple[dict[str, object], str]:
     if not isinstance(meta, dict):
         msg = "the front matter must be a mapping (name: ..., description: ...)"
         raise SkillError(msg)
-    return {str(key): value for key, value in cast("dict[object, object]", meta).items()}, (
-        match.group(2)
-    )
+    meta_map = {str(key): value for key, value in cast("dict[object, object]", meta).items()}
+    return meta_map, match.group(2) or ""
 
 
 def _text(meta: dict[str, object], field: str, *, limit: int) -> str:

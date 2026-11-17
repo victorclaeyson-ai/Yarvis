@@ -48,3 +48,17 @@ a long one. Turbo on the Apple GPU (MLX) takes about 0.7 s on an M1 Max.
   multilingual phase.
 - `yarvis bench` measures Parakeet next to Whisper on the CPU and GPU, with what each
   heard, so the choice can be checked on any Mac.
+
+## Addendum: Parakeet on every computer (2026-11-16)
+
+On a Windows PC, Whisper `small.en` on the processor misheard most requests. The same
+Parakeet TDT 0.6B v2 model, exported to ONNX (Ilya Stupakov's export, CC BY 4.0), runs with
+[onnx-asr](https://github.com/istupakov/onnx-asr) (MIT; NumPy and ONNX Runtime, which Yarvis
+already uses) many times faster than real time on an ordinary desktop processor, so no
+graphics card or CUDA is needed.
+
+- `stt = "auto"` now means Parakeet everywhere: MLX on an Apple Silicon Mac, ONNX elsewhere.
+- The ONNX files (full precision, 2.5 GB) are pinned to one commit, the weights by SHA-256 and
+  the small config and vocabulary by git object id, like the MLX build. onnx-asr finds them
+  in place and loads them offline; it ships the audio preprocessing itself.
+- Whisper remains the fallback if Parakeet cannot load, and a choice.

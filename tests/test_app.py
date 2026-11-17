@@ -7,13 +7,14 @@ from typing import TYPE_CHECKING, Any
 
 import pytest
 
-from fakes import VALID_KEY, FakeKeyring, Invoke
+from fakes import ASSEMBLYAI_KEY, VALID_KEY, FakeKeyring, Invoke
 from test_runtime_and_run import install_models
 from yarvis.app.bridge import AppApi, AppUi, CommandQueue, EventPump, script_for
-from yarvis.app.window import AppError, index_html
+from yarvis.app.window import AppError, index_html, uses_cloud_stt
 from yarvis.assistant import AssistantControls
+from yarvis.config import Config
 from yarvis.pipeline import TurnResult, TurnTimings
-from yarvis.security.secrets import KEYRING_SERVICE
+from yarvis.security.secrets import KEYRING_SERVICE, SecretName, SecretStore
 
 if TYPE_CHECKING:
     from yarvis.cli.app import Services
@@ -253,3 +254,11 @@ def test_app_command_reports_gui_failures(
 
 def test_app_command_needs_a_key(invoke: Invoke) -> None:
     assert invoke("app").exit_code == 1
+
+
+def test_the_window_says_when_assemblyai_hears(fake_keyring: FakeKeyring) -> None:
+    secrets = SecretStore(backend=fake_keyring, environ={})
+    assert not uses_cloud_stt(Config(), secrets)
+    secrets.set(SecretName.ASSEMBLYAI, ASSEMBLYAI_KEY)
+    assert uses_cloud_stt(Config(), secrets)
+    assert not uses_cloud_stt(Config.model_validate({"voice": {"cloud_stt": False}}), secrets)

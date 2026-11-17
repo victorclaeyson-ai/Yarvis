@@ -34,19 +34,20 @@ provider = "anthropic"      # "anthropic" ("ollama" for fully offline arrives in
 max_tokens = 1024
 
 [voice]
-stt = "auto"                # Parakeet on Apple Silicon (most accurate), Whisper elsewhere
+cloud_stt = true            # AssemblyAI, if you stored its key (`yarvis key set assemblyai`)
+cloud_region = "eu"         # AssemblyAI servers: "eu" (EU only, never used for training), "global"
+stt = "auto"                # On this computer (and backup): Parakeet, or Whisper if it cannot run
 stt_model = "small.en"      # Whisper: "tiny.en" (fastest), "base.en", "small.en" (most accurate)
 stt_device = "cpu"          # Whisper on "mps" = Apple GPU (experimental); see `yarvis bench`
-vocabulary = ["Yarvis"]     # Whisper: names to spell right, e.g. ["Yarvis", "Zedelgem", "Leuven"]
+vocabulary = ["Yarvis"]     # Names to spell right, e.g. ["Yarvis", "Zedelgem", "Leuven"]
 tts = "kokoro"
 voice = "bm_george"         # British male. Try "af_heart", "am_michael", "bf_emma"
 speech_rate = 1.0
 end_of_turn_ms = 900        # silence that ends a sentence that sounds finished
 thinking_pause_ms = 2000    # ...and one that sounds unfinished ("and", "um", "the")
-stay_open_s = 300           # after a request, keep listening for the next one (0 = off);
-                            # only what's meant for Yarvis counts ("open Spotify", "Yarvis, ..."),
-                            # other talk is ignored on this computer; "thanks" ends it sooner
-follow_up_s = 15            # when Yarvis asks you something, any answer counts this long
+follow_up_s = 15            # after an answer, anything you say this long goes to Yarvis
+stay_open_s = 0             # then keep listening this long, only for what sounds meant for
+                            # Yarvis ("open Spotify", "Yarvis, ..."); 0 = off, say "Hey Yarvis"
 speculative = true          # start working during pauses: much faster, costs a few extra tokens
 wake_word = true            # "Hey Yarvis", detected on this computer (the mic stays open)
 wake_word_threshold = 0.5   # higher = fewer accidental wake-ups, lower = wakes more easily

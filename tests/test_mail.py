@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from typing import TYPE_CHECKING, Any
@@ -9,20 +10,24 @@ from typing import TYPE_CHECKING, Any
 import pytest
 
 from yarvis.tools.base import Tier, ToolError
-from yarvis.tools.computer import OPEN, OSASCRIPT
+from yarvis.tools.computer import OPEN, OSASCRIPT, PGREP
 from yarvis.tools.mail import (
     Account,
     ListArgs,
     Listing,
     MacMail,
     MailList,
+    MailMark,
     MailRead,
     MailReply,
     MailSend,
+    MailTrash,
+    MarkArgs,
     Message,
     NumberArgs,
     ReplyArgs,
     SendArgs,
+    TrashArgs,
     mail_tools,
 )
 
@@ -69,15 +74,17 @@ class FakeApps:
         if argv[0] == OPEN:
             self.calls.append(("start", list(argv[1:])))
             return 0, ""
+        if argv[0] == PGREP:
+            self.calls.append(("running?", list(argv[1:])))
+            return (0, "501") if (self.running.pop(0) if self.running else True) else (1, "")
         assert argv[0] == OSASCRIPT
-        if argv[-1].endswith(" is running"):
-            self.calls.append(("running?", [argv[-1]]))
-            return 0, "true" if (self.running.pop(0) if self.running else True) else "false"
         script = [argv[i + 1] for i in range(1, len(argv) - 1, 2) if argv[i] == "-e"]
         values = list(argv[1 + 2 * len(script) :])
         text = "\n".join(script)
         kind = (
             "contacts" if 'application "Contacts"' in text
+            else "trash" if "delete (first message" in text
+            else "mark" if "flagged status" in text
             else "send" if "outgoing message" in text
             else "read" if "content of m" in text
             else "list" if "date received" in text
@@ -393,5 +400,94 @@ async def test_replies_keep_an_existing_re_and_need_an_address() -> None:
 
 def test_mail_tools_share_one_list_and_take_their_time() -> None:
     found: list[Tool[Any]] = mail_tools(MacMail(FakeApps()))
-    assert [tool.name for tool in found] == ["mail_list", "mail_read", "mail_send", "mail_reply"]
+    assert [tool.name for tool in found] == [
+        "mail_list", "mail_read", "mail_send", "mail_reply", "mail_mark", "mail_trash",
+    ]  # fmt: skip
     assert all((tool.timeout_s or 0) > 30 for tool in found)  # Mail may have to start
+
+
+# --------------------------------------------------------------------------- trashing
+
+
+async def test_trashing_asks_first_and_names_the_emails() -> None:
+    apps = FakeApps()
+    mail = MacMail(apps, now=lambda: NOW, pause=no_wait)
+    listing = Listing()
+    trash = MailTrash(mail, listing)
+    assert trash.tier is Tier.EXTERNAL  # an email could try to hide a security alert
+    assert trash.describe(TrashArgs(numbers=[1, 3])) == "move email 1, 3 to the trash"
+    await MailList(mail, listing).run(ListArgs(unread_only=False))
+    one = await trash.prepare(TrashArgs(numbers=[2]))
+    assert trash.describe(one) == "move the email from KU Leuven, “Exam schedule”, to the trash"
+    assert await trash.run(one) == "Moved 1 email to the trash."
+    assert apps.values("trash") == [["Exchange", "INBOX", "7"]]
+    two = await trash.prepare(TrashArgs(numbers=[1, 3, 1]))
+    assert trash.describe(two) == (
+        "move 2 emails to the trash: from Thomas Peeters, “Dinner Friday?”; from Mom, “Photos”"
+    )
+    await trash.run(two)
+    assert apps.values("trash")[1:] == [["Google", "INBOX", "11"], ["Google 2", "INBOX", "5"]]
+
+
+async def test_trashing_is_pinned_to_the_listed_emails() -> None:
+    apps = FakeApps(
+        list=(0, listed(("Google", 9, "no-reply@accounts.google.com", "Alert", 60, False)))
+    )
+    mail = MacMail(apps, pause=no_wait)
+    listing = Listing()
+    trash = MailTrash(mail, listing)
+    with pytest.raises(ToolError, match="list the emails first"):
+        await trash.prepare(TrashArgs(numbers=[1]))
+    await MailList(mail, listing).run(ListArgs())
+    sneaky = TrashArgs.model_validate(
+        {
+            "numbers": [1],
+            "pinned": [{"account": "Google", "mailbox": "INBOX", "id": 1, "said": "x"}],
+        }
+    )
+    ready = await trash.prepare(sneaky)
+    assert [p.id for p in ready.pinned] == [9]  # what the model slipped in is replaced
+    assert trash.describe(ready) == (
+        "move the email from no-reply@accounts.google.com, “Alert”, to the trash"
+    )
+    with pytest.raises(ToolError, match="not resolved"):
+        await trash.run(TrashArgs(numbers=[1]))
+    assert "pinned" not in json.dumps(TrashArgs.model_json_schema())
+
+
+# --------------------------------------------------------------------------- starring
+
+
+async def test_emails_are_starred_and_marked_read() -> None:
+    apps = FakeApps()
+    mail = MacMail(apps, now=lambda: NOW, pause=no_wait)
+    listing = Listing()
+    mark = MailMark(mail, listing)
+    assert mark.tier is Tier.REVERSIBLE  # one more word undoes it; the email stays put
+    await MailList(mail, listing).run(ListArgs(unread_only=False))
+    star = MarkArgs(numbers=[1], starred=True)
+    assert mark.describe(star) == "star email 1"
+    assert await mark.run(star) == "Done, for 1 email."
+    assert apps.values("mark") == [["Google", "INBOX", "11", "flagged", "true"]]
+    both = MarkArgs(numbers=[2, 3, 2], starred=False, read=True)
+    assert mark.describe(both) == "unstar emails 2, 3 and mark them as read"
+    assert await mark.run(both) == "Done, for 2 emails."
+    assert apps.values("mark")[1:] == [
+        ["Exchange", "INBOX", "7", "flagged", "false"],
+        ["Exchange", "INBOX", "7", "read", "true"],
+        ["Google 2", "INBOX", "5", "flagged", "false"],
+        ["Google 2", "INBOX", "5", "read", "true"],
+    ]
+    unread = MarkArgs(numbers=[1], read=False)
+    assert mark.describe(unread) == "mark email 1 as unread"
+    await mark.run(unread)
+    assert apps.values("mark")[-1] == ["Google", "INBOX", "11", "read", "false"]
+
+
+async def test_marking_needs_something_to_do_and_a_listed_email() -> None:
+    mark = MailMark(MacMail(FakeApps(), pause=no_wait), Listing())
+    assert mark.describe(MarkArgs(numbers=[1])) == "leave email 1 as they are"
+    with pytest.raises(ToolError, match="star them or mark them read"):
+        await mark.run(MarkArgs(numbers=[1]))
+    with pytest.raises(ToolError, match="list the emails first"):
+        await mark.run(MarkArgs(numbers=[1], starred=True))

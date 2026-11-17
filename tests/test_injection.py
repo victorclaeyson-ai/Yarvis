@@ -284,6 +284,8 @@ TRUSTED_OUTPUT = {
     "calendar_add": "echoes the event the user confirmed",
     "mail_send": "echoes the addresses the user confirmed",
     "mail_reply": "echoes the address the user confirmed",
+    "mail_trash": "only a count",
+    "mail_mark": "only a count",
 }
 
 
@@ -300,6 +302,7 @@ def test_every_tool_says_whether_its_output_is_outside_content(tmp_path: Path) -
             assert tool.name in TRUSTED_OUTPUT, f"{tool.name}: is its output outside content?"
     assert {t.name for t in tools if t.tier >= Tier.EXTERNAL} <= {
         "quit_app", "browser_press", "press_enter", "calendar_add", "mail_send", "mail_reply",
+        "mail_trash",
     }  # fmt: skip
 
 

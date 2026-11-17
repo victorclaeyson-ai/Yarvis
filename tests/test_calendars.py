@@ -474,7 +474,7 @@ def test_calendar_and_mail_come_with_the_mac() -> None:
         t.name for t in personal_tools(config, platform="darwin", run=FakeRunner(), store=store)
     ]
     assert names == ["calendar_events", "calendar_add", "mail_list", "mail_read", "mail_send",
-                     "mail_reply"]  # fmt: skip
+                     "mail_reply", "mail_mark", "mail_trash"]  # fmt: skip
     assert personal_tools(config, platform="linux") == []
     off = Config.model_validate({"tools": {"calendar": False, "mail": False}})
     assert personal_tools(off, platform="darwin", run=FakeRunner(), store=store) == []

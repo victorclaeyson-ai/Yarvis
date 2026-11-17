@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 from typing import TYPE_CHECKING
 
-from fakes import VALID_KEY, FakeKeyring, Invoke
+from fakes import ASSEMBLYAI_KEY, VALID_KEY, FakeKeyring, Invoke
 from yarvis import __version__
 from yarvis.cli.app import Services
 from yarvis.security.secrets import KEYRING_SERVICE
@@ -67,6 +67,18 @@ def test_key_set_stores_hidden_input(invoke: Invoke, fake_keyring: FakeKeyring) 
     assert result.exit_code == 0
     assert VALID_KEY not in result.output
     assert fake_keyring.store[(KEYRING_SERVICE, "anthropic")] == VALID_KEY
+
+
+def test_key_set_assemblyai_explains_what_is_sent(
+    invoke: Invoke, fake_keyring: FakeKeyring
+) -> None:
+    key = ASSEMBLYAI_KEY
+    result = invoke("key", "set", "assemblyai", stdin=f"{key}\n")
+    assert result.exit_code == 0, result.output
+    assert "https://www.assemblyai.com/dashboard/signup" in result.output
+    assert "never the wake word" in result.output
+    assert key not in result.output
+    assert fake_keyring.store[(KEYRING_SERVICE, "assemblyai")] == key
 
 
 def test_key_set_rejects_garbage(invoke: Invoke, fake_keyring: FakeKeyring) -> None:

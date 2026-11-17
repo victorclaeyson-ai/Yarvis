@@ -6,7 +6,7 @@ import asyncio
 import logging
 import time
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Protocol
+from typing import TYPE_CHECKING, Protocol, runtime_checkable
 
 import numpy as np
 
@@ -66,6 +66,26 @@ class _EndpointerControl:
         self._endpointer.require_silence_ms(milliseconds)
 
 
+@runtime_checkable
+class AudioTap(Protocol):
+    """Receives the user's speech while they talk (streaming speech recognition).
+
+    ``begin``, then ``feed`` for every later frame, then ``end``: once per utterance.
+    """
+
+    def begin(self, audio: AudioArray) -> None:
+        """Speech started; ``audio`` is what was captured so far (with its pre-roll)."""
+        ...
+
+    def feed(self, frame: AudioArray) -> None:
+        """The next frame of the same utterance."""
+        ...
+
+    def end(self, audio: AudioArray | None) -> None:
+        """The utterance is complete (``audio``, as it will be transcribed) or abandoned."""
+        ...
+
+
 @dataclass(frozen=True, slots=True)
 class PauseHooks:
     """Callbacks for speculative work during pauses (see ``pipeline.Speculation``)."""
@@ -93,12 +113,14 @@ async def listen(
     on_speech_start: Callable[[], None] | None = None,
     on_level: Callable[[float], None] | None = None,
     hooks: PauseHooks | None = None,
+    tap: AudioTap | None = None,
     clock: Callable[[], float] = time.monotonic,
 ) -> Utterance | None:
     """Consume ``frames`` until the user finishes a sentence.
 
     ``on_level`` receives the RMS level of every frame (for a live level meter); ``hooks``
-    are told about pauses so speculative work can start early.
+    are told about pauses so speculative work can start early; ``tap`` receives the speech
+    as it is spoken.
 
     Returns:
         The utterance, or None if nobody spoke before the timeout.
@@ -113,13 +135,17 @@ async def listen(
         on_speech_start=on_speech_start,
         on_level=on_level,
         hooks=hooks,
+        tap=tap,
         clock=clock,
     )
     iterator = aiter(frames)
-    while (frame := await read_frame(iterator)) is not None:
-        finished, utterance = session.push(frame)
-        if finished:
-            return utterance
+    try:
+        while (frame := await read_frame(iterator)) is not None:
+            finished, utterance = session.push(frame)
+            if finished:
+                return utterance
+    finally:
+        session.close()
     return None
 
 
@@ -178,6 +204,7 @@ class _Session:
         on_speech_start: Callable[[], None] | None,
         on_level: Callable[[float], None] | None,
         hooks: PauseHooks | None,
+        tap: AudioTap | None = None,
         clock: Callable[[], float],
     ) -> None:
         self._endpointer = Endpointer(settings)
@@ -185,6 +212,8 @@ class _Session:
         self._on_speech_start = on_speech_start
         self._on_level = on_level
         self._hooks = hooks
+        self._tap = tap
+        self._tapping = False
         self._clock = clock
         self._check_signal = SignalCheck(settings.frame_ms, clock)
         vad.reset()
@@ -195,6 +224,7 @@ class _Session:
         if self._on_level is not None:
             self._on_level(float(np.sqrt(np.mean(np.square(frame)))))
         event = self._endpointer.push(frame, self._vad.probability(frame))
+        self._stream(event, frame)
         if event in (EndpointEvent.END_OF_TURN, EndpointEvent.MAX_DURATION):
             now = self._clock()
             logger.info("End of turn (%s)", event.value)
@@ -203,12 +233,32 @@ class _Session:
                 speech_end=now - self._endpointer.trailing_silence_ms / 1000,
                 turn_detected=now,
             )
+            self._end_tap(utterance.audio)
             return True, utterance
         if event is EndpointEvent.NO_SPEECH:
             logger.info("No speech before the timeout")
             return True, None
         self._notify(event)
         return False, None
+
+    def close(self) -> None:
+        """Listening stopped: an utterance still streaming was abandoned."""
+        self._end_tap(None)
+
+    def _stream(self, event: EndpointEvent, frame: AudioArray) -> None:
+        """Pass the speech to the tap: everything from the start of the utterance on."""
+        if self._tap is None:
+            return
+        if event is EndpointEvent.SPEECH_STARTED:
+            self._tapping = True
+            self._tap.begin(self._endpointer.utterance())
+        elif self._tapping:
+            self._tap.feed(frame)
+
+    def _end_tap(self, audio: AudioArray | None) -> None:
+        if self._tap is not None and self._tapping:
+            self._tapping = False
+            self._tap.end(audio)
 
     def _notify(self, event: EndpointEvent) -> None:
         if event is EndpointEvent.SPEECH_STARTED:

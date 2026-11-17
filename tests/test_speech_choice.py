@@ -1,48 +1,61 @@
-"""Choosing the speech recognizer (Parakeet on Apple Silicon, Whisper elsewhere)."""
+"""Choosing the speech recognizer (Parakeet: MLX on Apple Silicon, ONNX elsewhere)."""
 
 from __future__ import annotations
 
 import asyncio
 import logging
 import threading
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Literal
 
 import numpy as np
 import pytest
+from pydantic import SecretStr
 
-from fakes import FakeSTT
+from fakes import ASSEMBLYAI_KEY, FakeKeyring, FakeSTT
+from yarvis.config import Config
 from yarvis.config.models import VoiceConfig
-from yarvis.models import PARAKEET_FILES, parakeet_dir
+from yarvis.models import PARAKEET_FILES, PARAKEET_ONNX_FILES, parakeet_dir
+from yarvis.security.secrets import SecretName, SecretStore
+from yarvis.speech.assemblyai import AssemblyAISTT
 from yarvis.speech.choice import (
     FallbackSTT,
     choose_engine,
+    cloud_key,
     describe,
     make_stt,
     parakeet_available,
+    parakeet_build,
+    parakeet_package,
     parakeet_supported,
+    spoken_names,
 )
-from yarvis.speech.parakeet import ParakeetModelMissingError, ParakeetSTT
+from yarvis.speech.parakeet import OnnxParakeet, ParakeetModelMissingError, ParakeetSTT
 from yarvis.speech.whisper import WhisperSTT
 
 if TYPE_CHECKING:
     from pathlib import Path
 
+    import numpy.typing as npt
+
     from yarvis.speech.base import AudioArray
 
 
 @pytest.mark.parametrize(
-    ("system", "machine", "installed", "supported"),
+    ("system", "machine", "build", "package"),
     [
-        ("Darwin", "arm64", True, True),
-        ("Darwin", "arm64", False, False),  # the package is missing
-        ("Darwin", "x86_64", True, False),  # an Intel Mac has no MLX
-        ("Linux", "aarch64", True, False),
+        ("Darwin", "arm64", "mlx", "parakeet_mlx"),  # the Apple GPU
+        ("Darwin", "x86_64", "onnx", "onnx_asr"),  # an Intel Mac has no MLX: the CPU
+        ("Windows", "AMD64", "onnx", "onnx_asr"),
+        ("Linux", "aarch64", "onnx", "onnx_asr"),
     ],
 )
-def test_parakeet_needs_apple_silicon(
-    system: str, machine: str, installed: bool, supported: bool
+def test_parakeet_runs_everywhere_in_one_build_or_the_other(
+    system: str, machine: str, build: str, package: str
 ) -> None:
-    assert parakeet_supported(system, machine, installed=installed) is supported
+    assert parakeet_build(system, machine) == build
+    assert parakeet_package(parakeet_build(system, machine)) == package
+    assert parakeet_supported(system, machine, installed=True)
+    assert not parakeet_supported(system, machine, installed=False)  # the package is missing
 
 
 def test_parakeet_available_checks_this_machine() -> None:
@@ -60,12 +73,15 @@ def test_choose_engine(caplog: pytest.LogCaptureFixture) -> None:
     assert choose_engine(voice(stt="parakeet"), parakeet_ok=True) == "parakeet"
     with caplog.at_level(logging.WARNING):
         assert choose_engine(voice(stt="parakeet"), parakeet_ok=False) == "faster-whisper"
-    assert "Apple Silicon" in caplog.text
+    assert "Parakeet is not installed" in caplog.text
 
 
 def test_describe() -> None:
     assert describe(voice(stt="parakeet")) == "parakeet"
     assert describe(voice(stt="faster-whisper", stt_model="base.en")) == "whisper base.en"
+    cloud = describe(voice(stt="parakeet"), cloud=True)
+    assert cloud == "assemblyai eu (backup: parakeet)"
+    assert describe(voice(stt="parakeet", cloud_stt=False), cloud=True) == "parakeet"
 
 
 def test_make_stt(tmp_path: Path) -> None:
@@ -75,6 +91,40 @@ def test_make_stt(tmp_path: Path) -> None:
     parakeet = make_stt(voice(), tmp_path, parakeet_ok=True)
     assert isinstance(parakeet, FallbackSTT)
     assert isinstance(parakeet.active, ParakeetSTT)
+
+
+def test_with_a_key_assemblyai_hears_and_this_computer_is_the_backup(tmp_path: Path) -> None:
+    key = SecretStr(ASSEMBLYAI_KEY)
+    cloud = make_stt(voice(), tmp_path, parakeet_ok=True, cloud=key, terms=["Leuven"])
+    assert isinstance(cloud, AssemblyAISTT)
+    assert cloud.region == "eu"
+    assert isinstance(cloud.backup, FallbackSTT)
+    off = make_stt(voice(cloud_stt=False), tmp_path, parakeet_ok=True, cloud=key)
+    assert isinstance(off, FallbackSTT)
+
+
+def test_the_cloud_key_is_only_used_when_cloud_stt_is_on(fake_keyring: FakeKeyring) -> None:
+    secrets = SecretStore(backend=fake_keyring, environ={})
+    assert cloud_key(voice(), secrets) is None
+    secrets.set(SecretName.ASSEMBLYAI, ASSEMBLYAI_KEY)
+    resolved = cloud_key(voice(), secrets)
+    assert resolved is not None
+    assert resolved.get_secret_value() == ASSEMBLYAI_KEY
+    assert cloud_key(voice(cloud_stt=False), secrets) is None
+
+
+def test_spoken_names_include_the_user_and_the_place() -> None:
+    config = Config.model_validate(
+        {
+            "assistant": {"user_name": "Victor", "location": "Leuven, Belgium"},
+            "voice": {"vocabulary": ["Zedelgem"]},
+        }
+    )
+    names = spoken_names(config)
+    assert names[0] == "Zedelgem"
+    assert {"Spotify", "Yarvis", "Victor", "Leuven, Belgium"} <= set(names)
+    assert None not in names
+    assert spoken_names(Config()).count("Yarvis") == 2  # duplicates are dropped later
 
 
 class Engine(FakeSTT):
@@ -226,3 +276,48 @@ async def test_a_parakeet_that_cannot_load_falls_back_to_whisper(tmp_path: Path)
     whisper = Engine("whisper heard you", device="cpu")
     stt = FallbackSTT(ParakeetSTT(cache_dir=tmp_path), lambda: whisper)  # not downloaded
     assert await stt.transcribe(np.zeros(16_000, np.float32)) == "whisper heard you"
+
+
+# --------------------------------------------------------------------------- ONNX (any CPU)
+
+
+class FakeRecognizer:
+    def __init__(self) -> None:
+        self.heard: list[tuple[int, str, int]] = []
+
+    def recognize(self, waveform: npt.NDArray[np.float32], *, sample_rate: Literal[16000]) -> str:
+        self.heard.append((waveform.size, str(waveform.dtype), sample_rate))
+        return "  play Feel What You Want by Kristine W  "
+
+
+def test_parakeet_on_the_processor_hears_float32_at_16_khz() -> None:
+    recognizer = FakeRecognizer()
+    engine = OnnxParakeet(recognizer)
+    audio = np.zeros(32_000, dtype=np.float32)[::2]  # a strided view: copied, contiguous
+    assert engine.transcribe(audio) == "play Feel What You Want by Kristine W"
+    assert recognizer.heard == [(16_000, "float32", 16_000)]
+    assert engine.transcribe(np.zeros(800, dtype=np.float32)) == ""  # 50 ms is not a word
+    assert len(recognizer.heard) == 1
+
+
+async def test_the_onnx_build_is_used_off_apple_silicon(tmp_path: Path) -> None:
+    directory = parakeet_dir(tmp_path, "onnx")
+    directory.mkdir(parents=True)
+    for model in PARAKEET_ONNX_FILES:
+        with (directory / model.name).open("wb") as handle:
+            handle.truncate(model.size)
+    loaded: list[Path] = []
+
+    def loader(path: Path) -> OnnxParakeet:
+        loaded.append(path)
+        return OnnxParakeet(FakeRecognizer())
+
+    stt = ParakeetSTT(cache_dir=tmp_path, build="onnx", loader=loader)
+    assert (stt.device, stt.model_name) == ("cpu", "parakeet-tdt-0.6b-v2")
+    assert await stt.transcribe(np.zeros(16_000, dtype=np.float32)) == (
+        "play Feel What You Want by Kristine W"
+    )
+    assert loaded == [directory]
+    chosen = make_stt(voice(), tmp_path, parakeet_ok=True, build="onnx")
+    assert isinstance(chosen, FallbackSTT)
+    assert chosen.device == "cpu"

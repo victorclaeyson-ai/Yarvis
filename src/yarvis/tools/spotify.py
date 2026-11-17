@@ -11,6 +11,7 @@ Without credentials, "play X" opens a Spotify search for X instead.
 
 from __future__ import annotations
 
+import asyncio
 import difflib
 import logging
 import re
@@ -24,16 +25,19 @@ from pydantic import Field, SecretStr, model_validator
 
 from yarvis.security.redact import default_redactor
 from yarvis.tools.base import Arguments, Tier, Tool, ToolError
-from yarvis.tools.computer import OPEN, osascript
+from yarvis.tools.computer import OPEN, osascript, start_hidden
+from yarvis.tools.spotify_remote import LoginNeededError, SpotifyRemote
 
 if TYPE_CHECKING:
-    from collections.abc import Callable
+    from collections.abc import Awaitable, Callable
 
     from yarvis.tools.computer import Runner
+    from yarvis.tools.spotify_remote import Playback
 
 logger = logging.getLogger(__name__)
 
 TOKEN_URL: Final = "https://accounts.spotify.com/api/token"  # noqa: S105 - a URL, not a secret
+API_URL: Final = "https://api.spotify.com/v1"
 SEARCH_URL: Final = "https://api.spotify.com/v1/search"
 MY_PLAYLISTS_URL: Final = "https://api.spotify.com/v1/me/playlists"
 _PLAYLIST_PAGES: Final = 4  # 200 playlists
@@ -144,7 +148,7 @@ class SpotifyCatalog:
 
 
 class SpotifyAccount:
-    """The user's own library, with their consent (authorization code flow, read-only)."""
+    """The user's own library and player, with their consent (authorization code flow)."""
 
     def __init__(
         self,
@@ -164,6 +168,8 @@ class SpotifyAccount:
         self._clock = clock
         self._token: str | None = None
         self._expires = 0.0
+        self.scopes: frozenset[str] | None = None
+        """What the user allowed (known after the first token); None: Spotify did not say."""
         self._playlists: list[Found] = []
         self._playlists_until = 0.0
         default_redactor.register(client_secret.get_secret_value())
@@ -233,6 +239,9 @@ class SpotifyAccount:
         payload = _dict(response.json())
         self._token = str(payload.get("access_token", ""))
         default_redactor.register(self._token)
+        granted = payload.get("scope")
+        if isinstance(granted, str):
+            self.scopes = frozenset(granted.split())
         self._expires = self._clock() + float(str(payload.get("expires_in", 3600))) - 60
         renewed = payload.get("refresh_token")
         if isinstance(renewed, str) and renewed and renewed != self._refresh.get_secret_value():
@@ -241,6 +250,32 @@ class SpotifyAccount:
             if self._save is not None:
                 self._save(renewed)
         return self._token
+
+    async def allows(self, scope: str) -> bool:
+        """Whether the user's login includes ``scope`` (logs in first, if needed)."""
+        await self._bearer()
+        return self.scopes is None or scope in self.scopes
+
+    async def call(
+        self,
+        method: Literal["GET", "PUT", "POST"],
+        path: str,
+        *,
+        params: dict[str, str] | None = None,
+        json: dict[str, object] | None = None,
+    ) -> httpx2.Response:
+        """A request to ``https://api.spotify.com/v1/<path>`` as the user (status unchecked)."""
+        token = await self._bearer()
+        try:
+            return await self._http.request(
+                method,
+                f"{API_URL}/{path}",
+                params=params,
+                json=json,
+                headers={"Authorization": f"Bearer {token}"},
+            )
+        except httpx2.HTTPError as exc:
+            raise ToolError(_UNREACHABLE) from exc
 
     async def _get(self, url: str, params: dict[str, str] | None, token: str) -> httpx2.Response:
         if not url.startswith("https://api.spotify.com/"):  # "next" links come from the API
@@ -355,11 +390,56 @@ _PLAY: Final = (
     "on run argv",
     "set theURI to item 1 of argv",
     'tell application "Spotify"',
-    "activate",
     "play track theURI",
+    "return player state as text",
     "end tell",
     "end run",
 )
+# Spotify brings itself to the front when told to play a track. Yarvis notes which app the
+# user is in first (_FRONT), and afterwards a watcher (_GIVE_BACK) puts the user back there
+# whenever Spotify jumps forward in the next few seconds, hiding it again if it was hidden.
+# Both use System Events, with short timeouts: without that permission the music still
+# plays. The watcher runs alongside the reply, so it never delays it.
+_FRONT: Final = (
+    "set fs to character id 31",
+    "with timeout of 2 seconds",
+    'tell application "System Events"',
+    "set frontName to name of first application process whose frontmost is true",
+    "set spotifyHidden to true",
+    'if exists application process "Spotify" then '
+    'set spotifyHidden to not (visible of application process "Spotify")',
+    "end tell",
+    "end timeout",
+    "return frontName & fs & spotifyHidden",
+)
+_GIVE_BACK: Final = (
+    "on run argv",
+    "set frontName to item 1 of argv",
+    'set spotifyHidden to (item 2 of argv) is "true"',
+    "set firstSeen to 0",
+    "with timeout of 5 seconds",
+    'tell application "System Events"',
+    "repeat with i from 1 to 30",
+    'if frontmost of application process "Spotify" then',
+    "if firstSeen is 0 then set firstSeen to i",
+    'if spotifyHidden then set visible of application process "Spotify" to false',
+    "set frontmost of application process frontName to true",
+    "else if firstSeen > 0 and i > firstSeen + 5 then",
+    "exit repeat",
+    "end if",
+    "delay 0.1",
+    "end repeat",
+    "end tell",
+    "end timeout",
+    "return firstSeen",
+    "end run",
+)
+_LOGIN_FOR_PLAYBACK: Final = (
+    "Yarvis needs the user's permission to control Spotify playback. The user can give it "
+    "once by running this in the terminal: yarvis spotify login"
+)
+_READY_TRIES: Final = 10
+"""A Spotify that was just started needs a few seconds before it takes "play"."""
 
 
 class SpotifyPlay(Tool[PlayArgs]):
@@ -374,16 +454,24 @@ class SpotifyPlay(Tool[PlayArgs]):
     tier = Tier.REVERSIBLE
     Args = PlayArgs
     untrusted_output = True  # names come from Spotify's catalogue
+    timeout_s = 30.0  # Spotify may have to start first
 
     def __init__(
         self,
-        run: Runner,
+        run: Runner | None,
         catalog: SpotifyCatalog | None,
         account: SpotifyAccount | None = None,
+        *,
+        remote: SpotifyRemote | None = None,
+        pause: Callable[[float], Awaitable[None]] = asyncio.sleep,
     ) -> None:
         self._run = run
+        """AppleScript (macOS); None where there is none (Windows)."""
         self._catalog = catalog
         self._account = account
+        self._remote = remote
+        self._pause = pause
+        self._watcher: asyncio.Task[None] | None = None
 
     async def run(self, args: PlayArgs) -> str:
         """Find it and play it."""
@@ -395,6 +483,9 @@ class SpotifyPlay(Tool[PlayArgs]):
                 await self._play(mine.uri)
                 return f"Playing your playlist '{mine.name}'."
         if self._catalog is None:
+            if self._run is None:
+                msg = "To play by name, the user stores Spotify app keys: yarvis key set spotify"
+                raise ToolError(msg)
             text = f"{args.title} {args.artist}".strip()
             await self._run([OPEN, f"spotify:search:{quote(text)}"])
             return (
@@ -428,11 +519,77 @@ class SpotifyPlay(Tool[PlayArgs]):
         return f"Playing your playlist '{found.name}'."
 
     async def _play(self, uri: str) -> None:
-        code, output = await self._run(osascript(_PLAY, uri))
+        """Play through Spotify's Web API if allowed, or else by telling the app (macOS)."""
+        way = await _way(self._run, self._remote)
+        if isinstance(way, SpotifyRemote):
+            await way.play(uri)
+            return
+        if self._remote is not None:
+            logger.info("Playing through the Spotify app: no permission for its Web API yet")
+        await self._play_in_app(way, uri)
+
+    async def _play_in_app(self, run: Runner, uri: str) -> None:
+        """Tell the Spotify app (macOS), keeping the user in the app they are in."""
+        started = await start_hidden(run, "Spotify", pause=self._pause)
+        front = await self._front(run)
+        code, output = 1, ""
+        for attempt in range(_READY_TRIES if started else 1):
+            if attempt:
+                await self._pause(1.0)
+            try:
+                code, output = await run(osascript(_PLAY, uri))
+            except TimeoutError:
+                if not started:
+                    raise
+                logger.info("Spotify is still starting")  # its first answer can be slow
+                continue
+            if code == 0 and (output.strip() == "playing" or not started):
+                break
+        else:
+            if code != 0:
+                logger.warning("Spotify did not play: %s", output[:200])
+                msg = "Spotify did not start playing. Is the Spotify app installed?"
+                raise ToolError(msg)
+            logger.info("Spotify was started, but did not say it is playing")
+        if front is not None and front[0] != "Spotify":
+            self._watcher = asyncio.create_task(self._give_back(run, *front))
+
+    async def settled(self) -> None:
+        """Wait until the user has been put back in their app (for tests)."""
+        if self._watcher is not None:
+            await self._watcher
+
+    @staticmethod
+    async def _front(run: Runner) -> tuple[str, bool] | None:
+        """(the app the user is in, whether Spotify is hidden), if macOS lets Yarvis see."""
+        code, output = await run(osascript(_FRONT))
+        name, _, hidden = output.strip().partition("\x1f")
+        if code != 0 or not name:
+            logger.info("Cannot see which app is in front (System Events): %s", output[-120:])
+            return None
+        return name, hidden == "true"
+
+    @staticmethod
+    async def _give_back(run: Runner, front: str, spotify_hidden: bool) -> None:  # noqa: FBT001
+        try:
+            code, output = await run(
+                osascript(_GIVE_BACK, front, "true" if spotify_hidden else "false")
+            )
+        except TimeoutError:
+            logger.info("Gave up watching Spotify")
+            return
+        except Exception:  # it runs on its own: report here, nobody else would
+            logger.exception("Watching Spotify failed")
+            return
         if code != 0:
-            logger.warning("Spotify did not play: %s", output[:200])
-            msg = "Spotify did not start playing. Is the Spotify app installed?"
-            raise ToolError(msg)
+            logger.info("Could not put %s back in front: %s", front, output[-120:])
+        elif output.strip() in ("", "0"):
+            logger.info("Spotify stayed behind %s", front)
+        else:
+            seconds = int(output.strip()) / 10
+            logger.info(
+                "Spotify came forward after %.1f s; gave the focus back to %s", seconds, front
+            )
 
     def starts_playback(self, args: PlayArgs) -> bool:
         """It does: music."""
@@ -469,12 +626,16 @@ class SpotifyNowPlaying(Tool[NoArgs]):
     Args = NoArgs
     untrusted_output = True
 
-    def __init__(self, run: Runner) -> None:
+    def __init__(self, run: Runner | None, remote: SpotifyRemote | None = None) -> None:
         self._run = run
+        self._remote = remote
 
     async def run(self, args: NoArgs) -> str:
-        """Ask Spotify."""
-        code, output = await self._run(osascript(_NOW))
+        """Ask Spotify: its Web API if allowed, or else the app (macOS)."""
+        way = await _way(self._run, self._remote)
+        if isinstance(way, SpotifyRemote):
+            return _said(await way.state())
+        code, output = await way(osascript(_NOW))
         if code != 0:
             msg = "Spotify did not answer."
             raise ToolError(msg)
@@ -523,11 +684,22 @@ class SpotifyAdjust(Tool[AdjustArgs]):
     tier = Tier.REVERSIBLE
     Args = AdjustArgs
 
-    def __init__(self, run: Runner) -> None:
+    def __init__(self, run: Runner | None, remote: SpotifyRemote | None = None) -> None:
         self._run = run
+        self._remote = remote
 
     async def run(self, args: AdjustArgs) -> str:
-        """Apply the settings."""
+        """Apply the settings: through Spotify's Web API if allowed, or else the app (macOS)."""
+        way = await _way(self._run, self._remote)
+        if isinstance(way, SpotifyRemote):
+            await way.adjust(
+                volume=args.volume,
+                shuffle=args.shuffle,
+                repeat=args.repeat,
+                position_s=args.position_seconds,
+                skip_s=args.skip_seconds,
+            )
+            return "Done: " + self.describe(args) + "."
         values = [
             "" if args.volume is None else str(args.volume),
             "" if args.shuffle is None else str(args.shuffle).lower(),
@@ -535,7 +707,7 @@ class SpotifyAdjust(Tool[AdjustArgs]):
             "" if args.position_seconds is None else str(args.position_seconds),
             "" if args.skip_seconds is None else str(args.skip_seconds),
         ]
-        code, output = await self._run(osascript(_ADJUST, *values))
+        code, output = await way(osascript(_ADJUST, *values))
         if code != 0:
             msg = "Spotify did not accept that."
             raise ToolError(msg)
@@ -559,6 +731,36 @@ class SpotifyAdjust(Tool[AdjustArgs]):
             way = "forward" if args.skip_seconds >= 0 else "back"
             parts.append(f"skip {way} {abs(args.skip_seconds)} seconds")
         return ", ".join(parts)
+
+
+async def _way(run: Runner | None, remote: SpotifyRemote | None) -> Runner | SpotifyRemote:
+    """Spotify's Web API if the user allowed it, or else the app (AppleScript, macOS).
+
+    Raises:
+        LoginNeededError: Neither is possible (no app control here, no permission yet).
+    """
+    if remote is not None:
+        try:
+            if await remote.allowed():
+                return remote
+        except ToolError:  # the login expired, or Spotify is unreachable
+            if run is None:
+                raise
+            logger.info("Spotify's Web API is unavailable: using the Spotify app")
+    if run is None:
+        raise LoginNeededError(_LOGIN_FOR_PLAYBACK)
+    return run
+
+
+def _said(state: Playback | None) -> str:
+    if state is None:
+        return "Spotify is not playing anything."
+    return (
+        f"{'playing' if state.playing else 'paused'}: '{state.track}' by {state.by} (album "
+        f"'{state.album}'), {_clock(str(state.position_s))} of {_clock(str(state.length_s))} "
+        f"on {state.device}. Spotify volume {state.volume if state.volume is not None else '?'}%, "
+        f"shuffle {_on(str(state.shuffle).lower())}, repeat {_on(str(state.repeat).lower())}."
+    )
 
 
 def _on(flag: str) -> str:
@@ -600,13 +802,21 @@ class SpotifyMyPlaylists(Tool[NoArgs]):
 
 
 def spotify_tools(
-    run: Runner, catalog: SpotifyCatalog | None, account: SpotifyAccount | None = None
+    run: Runner | None,
+    catalog: SpotifyCatalog | None,
+    account: SpotifyAccount | None = None,
+    *,
+    remote: SpotifyRemote | None = None,
 ) -> list[Tool[Any]]:
-    """All Spotify tools (the playlist list only when the user has logged in)."""
+    """All Spotify tools (the playlist list only when the user has logged in).
+
+    ``run`` drives the Spotify app (macOS AppleScript; None elsewhere); ``remote`` plays
+    through Spotify's Web API (in the background, on any platform) once the user allows it.
+    """
     tools: list[Tool[Any]] = [
-        SpotifyPlay(run, catalog, account),
-        SpotifyNowPlaying(run),
-        SpotifyAdjust(run),
+        SpotifyPlay(run, catalog, account, remote=remote),
+        SpotifyNowPlaying(run, remote),
+        SpotifyAdjust(run, remote),
     ]
     if account is not None:
         tools.append(SpotifyMyPlaylists(account))

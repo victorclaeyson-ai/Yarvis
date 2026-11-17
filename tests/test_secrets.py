@@ -6,7 +6,7 @@ import keyring
 import keyring.errors
 import pytest
 
-from fakes import VALID_KEY
+from fakes import ASSEMBLYAI_KEY, VALID_KEY
 from yarvis.security.secrets import (
     KEYRING_SERVICE,
     InvalidSecretError,
@@ -93,10 +93,25 @@ def test_set_stores_stripped_value(secrets: SecretStore, fake_keyring: FakeKeyri
     assert fake_keyring.store[(KEYRING_SERVICE, "anthropic")] == VALID_KEY
 
 
-@pytest.mark.parametrize("value", ["", "short", "sk-ant-has a space-in-it-123"])  # gitleaks:allow
-def test_set_rejects_implausible_values(secrets: SecretStore, value: str) -> None:
-    with pytest.raises(InvalidSecretError):
+@pytest.mark.parametrize(
+    ("value", "reason"),
+    [
+        ("", "too short"),
+        ("short", "too short"),
+        ("sk-ant-has a space-in-it-123", "whitespace"),  # gitleaks:allow
+        ("\x16", "invisible characters"),  # a Ctrl+V the terminal did not turn into a paste
+        ("sk-ant-0123456789abcdef\x00", "invisible characters"),  # gitleaks:allow
+        ("my-anthropic-key-0123456789", "start with 'sk-ant-'"),
+        ("sk-ant-0123456789abcdef!", "start with 'sk-ant-'"),  # gitleaks:allow
+    ],
+)
+def test_set_rejects_implausible_values(secrets: SecretStore, value: str, reason: str) -> None:
+    with pytest.raises(InvalidSecretError, match=reason):
         secrets.set(SecretName.ANTHROPIC, value)
+
+
+def test_only_anthropic_keys_need_their_prefix(secrets: SecretStore) -> None:
+    secrets.set(SecretName.SPOTIFY, "0123456789abcdef0123456789abcdef:" + "f" * 32)
 
 
 def test_set_refuses_without_secure_keychain(
@@ -118,6 +133,16 @@ def test_delete(secrets: SecretStore, fake_keyring: FakeKeyring) -> None:
 
 def test_validate_secret_returns_clean_value() -> None:
     assert validate_secret(f" {VALID_KEY} ") == VALID_KEY
+
+
+def test_assemblyai_keys_are_letters_and_digits() -> None:
+    key = ASSEMBLYAI_KEY
+    assert validate_secret(key, SecretName.ASSEMBLYAI) == key
+    with pytest.raises(InvalidSecretError, match="AssemblyAI"):
+        validate_secret("sk-ant-api03-this-is-the-wrong-key", SecretName.ASSEMBLYAI)
+    with pytest.raises(InvalidSecretError, match="AssemblyAI"):
+        validate_secret(ASSEMBLYAI_KEY[:-1] + "!", SecretName.ASSEMBLYAI)
+    assert SecretName.ASSEMBLYAI.env_var == "ASSEMBLYAI_API_KEY"
 
 
 def test_keychain_availability_errors_are_treated_as_unavailable() -> None:

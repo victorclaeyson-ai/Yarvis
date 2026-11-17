@@ -361,7 +361,8 @@ async def test_tool_results_go_back_to_the_model() -> None:
     assert second[-1].tool_results[0].content == "echo: hi"
     assert "echo" in llm.offered[0]
     texts = [m.text for m in conversation.history]
-    assert texts == ["test", "Let me check. It says hi."]  # tool details are not kept
+    # Tool details are not kept, but what was done is noted (by code, from describe()).
+    assert texts == ["test", "Let me check. It says hi. [Done: echo 'hi'.]"]
 
 
 async def test_no_tools_offered_without_a_toolbox() -> None:
@@ -541,3 +542,23 @@ async def test_a_search_while_guessing_is_shown_only_when_used() -> None:
     assert "".join([d async for d in draft.deltas()]) == "Sunny."
     assert activity == ["search the web"]
     assert draft.searches == [""]
+
+
+async def test_the_next_turn_knows_what_was_really_done() -> None:
+    """Without the note, the model read its own "Playing ..." as an empty claim and redid it."""
+    llm = FakeLLM([call("echo", "1", text="jazz")], ["Playing jazz."], ["You have 3 playlists."])
+    conversation = make_conversation(llm, toolbox())
+    await reply(conversation, "play jazz")
+    await reply(conversation, "list my playlists")
+    sent = [m.text for m in llm.calls[-1][0]]
+    assert "Playing jazz. [Done: echo 'jazz'.]" in sent
+    assert conversation.history[-1].text == "You have 3 playlists."  # nothing done: no note
+
+
+async def test_searches_are_noted_too() -> None:
+    llm = FakeLLM([WebSearch("weather Leuven"), "It's sunny."])
+    conversation = make_conversation(llm, toolbox())
+    await reply(conversation, "weather?")
+    assert conversation.history[-1].text == (
+        "It's sunny. [Done: search the web for “weather Leuven”.]"
+    )

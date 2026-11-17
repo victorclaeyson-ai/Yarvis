@@ -96,6 +96,10 @@ on speakers the microphone hears Yarvis itself.
    - `stay_open_s = 0` restores the old behaviour (anything said within `follow_up_s`).
      A small local language model could tell requests apart better than patterns; that
      belongs with the offline mode (Phase 3).
+   - **Off by default since 2026-11-16.** In real use the filter dropped a request that did
+     not sound like a command, which is worse than having to say "Hey Yarvis" again. The
+     default is back to: anything said within `follow_up_s` after an answer counts, then
+     the wake word. `stay_open_s` remains as an option.
 
 ## Consequences
 

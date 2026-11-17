@@ -28,7 +28,6 @@ from yarvis.doctor import CheckResult, DoctorContext, Status, has_failures, run_
 from yarvis.log import configure_logging
 from yarvis.models import (
     KOKORO_FILES,
-    PARAKEET_FILES,
     WAKE_WORD_FILES,
     WHISPER_APPROX_MB,
     ModelFile,
@@ -37,6 +36,7 @@ from yarvis.models import (
     kokoro_dir,
     missing,
     parakeet_dir,
+    parakeet_files,
     wake_word_dir,
     whisper_present,
 )
@@ -49,13 +49,20 @@ from yarvis.security.secrets import (
     SecretSource,
     SecretStore,
 )
-from yarvis.speech.choice import SttEngine, choose_engine, parakeet_available
+from yarvis.speech.choice import (
+    SttEngine,
+    choose_engine,
+    cloud_key,
+    parakeet_available,
+    this_build,
+)
 from yarvis.tools.spotify import SpotifyKeys
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Callable
     from pathlib import Path
 
+    from yarvis.models import ParakeetBuild
     from yarvis.speech.whisper import SttDevice
 
 logger = logging.getLogger(__name__)
@@ -77,7 +84,9 @@ class Services:
     )
     app_runner: Callable[..., None] = field(default_factory=lambda: _run_app)
     parakeet_ok: Callable[[], bool] = parakeet_available
-    """Whether Parakeet speech recognition can run here (an Apple Silicon Mac)."""
+    """Whether Parakeet speech recognition can run here."""
+    parakeet_build: Callable[[], ParakeetBuild] = this_build
+    """Which Parakeet build runs here: the Apple GPU (MLX) or the processor (ONNX)."""
     spotify_login: Callable[[str, SecretStr], str] = field(
         default=lambda client_id, secret: spotify_login.login(
             client_id, secret, open_url=webbrowser.open
@@ -236,6 +245,15 @@ def key_set(
         _fail(services, "Log in through Spotify instead: yarvis spotify login")
     if name is SecretName.SPOTIFY:
         value = _spotify_credentials(services)
+    elif name is SecretName.ASSEMBLYAI:
+        services.console.print(
+            "Sign up at https://www.assemblyai.com/dashboard/signup and copy the API key from "
+            "your dashboard. Yarvis then streams what you say to it (never the wake word or "
+            "anything said before it) to AssemblyAI for transcription, on its EU servers "
+            "unless you set voice.cloud_region.",
+            highlight=False,
+        )
+        value = typer.prompt("Paste your AssemblyAI API key", hide_input=True)
     else:
         value = typer.prompt(f"Paste your {name.value} API key", hide_input=True)
     try:
@@ -426,6 +444,13 @@ def _with_speech_recognition(services: Services, config: Config, *, assume_yes: 
         services.console.print("[yellow]Using Whisper for speech recognition instead.[/]")
         engine = "faster-whisper"
     config = config.model_copy(update={"voice": config.voice.model_copy(update={"stt": engine})})
+    if cloud_key(config.voice, services.secrets) is not None:
+        where = "EU" if config.voice.cloud_region == "eu" else "nearest"
+        backup = "Parakeet" if engine == "parakeet" else f"Whisper {config.voice.stt_model}"
+        services.console.print(
+            f"[dim]Speech recognition: AssemblyAI ({where} servers), with {backup} on this "
+            "computer as backup.[/]"
+        )
     if engine == "faster-whisper" and not whisper_present(
         services.paths.cache_dir, config.voice.stt_model
     ):
@@ -481,15 +506,15 @@ def _spotify(services: Services) -> SpotifyKeys | None:
 
 @spotify_app.command("login")
 def spotify_login_command(ctx: typer.Context) -> None:
-    """Let Yarvis see and play your own playlists (read-only, asks Spotify once)."""
+    """Let Yarvis play your playlists and control Spotify in the background (asks once)."""
     services = _services(ctx)
     app_keys = services.secrets.get(SecretName.SPOTIFY)
     if app_keys is None:
         _fail(services, "First store your Spotify app's keys: yarvis key set spotify")
     client_id, _, secret = app_keys.value.get_secret_value().partition(":")
     services.console.print(
-        "Your browser will open Spotify. Approve read-only access to your playlists, then "
-        "come back here. (Yarvis listens on "
+        "Your browser will open Spotify. Allow Yarvis to read your playlists and control "
+        "playback, then come back here. (Yarvis listens on "
         f"{spotify_login.REDIRECT_URI} until Spotify answers.)",
         highlight=False,
     )
@@ -522,7 +547,8 @@ def bench(
         devices.append("mps")
 
     def make_stt(engine: SttEngine, device: SttDevice = "cpu") -> Callable[[], LoadableSTT]:
-        voice = config.voice.model_copy(update={"stt": engine, "stt_device": device})
+        update = {"stt": engine, "stt_device": device, "cloud_stt": False}  # local engines only
+        voice = config.voice.model_copy(update=update)
         return lambda: backends.stt(config.model_copy(update={"voice": voice}), cache)
 
     recognizers = [
@@ -533,8 +559,9 @@ def bench(
         )
         for device in devices
     ]
-    if config.voice.stt == "parakeet":  # resolved by _prepare: Apple Silicon, downloaded
-        recognizers.insert(0, SttCandidate("parakeet on mps", "mps", make_stt("parakeet")))
+    if config.voice.stt == "parakeet":  # resolved by _prepare: installed, downloaded
+        where = "mps" if services.parakeet_build() == "mlx" else "cpu"
+        recognizers.insert(0, SttCandidate(f"parakeet on {where}", where, make_stt("parakeet")))
     results = asyncio.run(
         run_bench(
             tts=backends.tts(config, cache),
@@ -607,14 +634,16 @@ def _ensure_kokoro(services: Services, *, assume_yes: bool) -> bool:
 
 
 def _ensure_parakeet(services: Services, *, assume_yes: bool) -> bool:
-    directory = parakeet_dir(services.paths.cache_dir)
-    todo = missing(PARAKEET_FILES, directory)
+    build = services.parakeet_build()
+    directory = parakeet_dir(services.paths.cache_dir, build)
+    todo = missing(parakeet_files(build), directory)
     if not todo:
         return True
     gigabytes = sum(model.size for model in todo) / 1_000_000_000
+    where = "your Mac's GPU" if build == "mlx" else "this computer's processor"
     services.console.print(
         "Yarvis can understand you much better with Parakeet, a speech recognition model "
-        f"that runs on your Mac's GPU ({gigabytes:.1f} GB, one time; NVIDIA, CC BY 4.0)."
+        f"that runs on {where} ({gigabytes:.1f} GB, one time; NVIDIA, CC BY 4.0)."
     )
     if not assume_yes and not typer.confirm("Download it now?", default=True):
         return False

@@ -5,6 +5,7 @@ from typing import TYPE_CHECKING
 
 import pytest
 
+from yarvis import paths as yarvis_paths
 from yarvis.paths import (
     HOME_ENV_VAR,
     AppPaths,
@@ -72,6 +73,27 @@ def test_write_private_file_does_not_follow_symlinks(tmp_path: Path) -> None:
     with pytest.raises(OSError, match=r"symbolic links|Too many levels"):
         write_private_file(link, "attacker", overwrite=True)
     assert victim.read_text() == "original"
+
+
+def test_without_o_nofollow_symlinks_are_refused_too(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(yarvis_paths, "_NO_FOLLOW", 0)  # as on Windows
+    victim = tmp_path / "victim"
+    victim.write_text("original")
+    link = tmp_path / "link"
+    link.symlink_to(victim)
+    with pytest.raises(OSError, match="symbolic links"):
+        write_private_file(link, "attacker", overwrite=True)
+    assert victim.read_text() == "original"
+
+
+def test_on_windows_private_means_inside_the_user_profile(tmp_path: Path) -> None:
+    inside = ensure_private_dir(tmp_path / "AppData" / "Local" / "yarvis")
+    inside.chmod(0o777)  # Windows reports every folder like this
+    assert is_private(inside, windows=True, home=tmp_path)
+    assert not is_private(inside, windows=True, home=tmp_path / "other-user")
+    assert not is_private(inside)
 
 
 def test_ensure_all_creates_private_directories(tmp_path: Path) -> None:

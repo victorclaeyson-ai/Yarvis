@@ -14,6 +14,9 @@ cache folder, except Silero VAD, which comes inside the faster-whisper package:
   https://huggingface.co/nvidia/parakeet-tdt-0.6b-v2), converted to MLX by the MLX
   Community (https://huggingface.co/mlx-community/parakeet-tdt-0.6b-v2), run with
   parakeet-mlx (Apache 2.0). Used on Apple Silicon Macs.
+- The same Parakeet TDT 0.6B v2 model exported to ONNX by Ilya Stupakov
+  (https://huggingface.co/istupakov/parakeet-tdt-0.6b-v2-onnx, CC BY 4.0), run with
+  onnx-asr (MIT). Used on every other computer.
 - Whisper speech recognition (MIT), via faster-whisper / CTranslate2 (MIT).
 - Silero VAD (MIT).
 - openWakeWord pre-trained models: melspectrogram, embedding_model and hey_jarvis, by
@@ -25,6 +28,9 @@ reference implementation, Copyright David Scripka, licensed under the Apache Lic
 
 Services used at runtime
 ------------------------
+- Optional: live speech recognition by AssemblyAI (https://www.assemblyai.com), with the
+  user's own API key and under AssemblyAI's terms. Its streaming API is used through
+  websockets (BSD-3-Clause).
 - Weather data by Open-Meteo.com (https://open-meteo.com), licensed under CC BY 4.0
   (https://creativecommons.org/licenses/by/4.0/). Open-Meteo's free API is for
   non-commercial use.

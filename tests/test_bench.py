@@ -144,3 +144,16 @@ def test_bench_command_measures_parakeet_on_apple_silicon(
     assert "parakeet on mps" in result.output
     assert fakes.stt_engines[0] == "parakeet"
     assert "faster-whisper" in fakes.stt_engines  # compared with Whisper
+
+
+def test_bench_command_measures_parakeet_on_a_pcs_processor(
+    invoke: Invoke, services: Services, fake_keyring: FakeKeyring, paths: AppPaths
+) -> None:
+    fake_keyring.store[(KEYRING_SERVICE, "anthropic")] = VALID_KEY
+    install_models(paths, parakeet_onnx=True)
+    services.parakeet_ok = lambda: True
+    services.parakeet_build = lambda: "onnx"
+    services.backends = FakeBackends(FakeLLM(*[["ok"]] * 6)).build
+    result = invoke("bench", "--rounds", "1", "--no-claude")
+    assert result.exit_code == 0, result.output
+    assert "parakeet on cpu" in result.output

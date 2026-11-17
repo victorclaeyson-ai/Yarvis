@@ -5,7 +5,7 @@ from typing import TYPE_CHECKING
 
 from fakes import ASSEMBLYAI_KEY, VALID_KEY, FakeKeyring, Invoke
 from yarvis import __version__
-from yarvis.cli.app import Services
+from yarvis.cli.services import Services
 from yarvis.security.secrets import KEYRING_SERVICE
 
 if TYPE_CHECKING:

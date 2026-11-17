@@ -214,6 +214,88 @@ class ToolsConfig(_Section):
             "needs your confirmation."
         ),
     )
+    skills: bool = Field(
+        default=True,
+        description=(
+            "Use the Agent Skills you added with `yarvis skills add` (instructions only: "
+            "their scripts are never run)."
+        ),
+    )
+
+
+ServerName = Annotated[str, StringConstraints(pattern=r"^[a-z][a-z0-9-]{0,23}$")]
+"""A short name for an MCP server: lowercase letters, digits and hyphens."""
+EnvName = Annotated[str, StringConstraints(pattern=r"^[A-Za-z_][A-Za-z0-9_]{0,63}$")]
+McpToolName = Annotated[str, StringConstraints(pattern=r"^[A-Za-z0-9_.-]{1,128}$")]
+TierNumber = Literal[0, 1, 2, 3]
+
+
+class McpServerConfig(_Section):
+    """One MCP server: started (or reached) by Yarvis, its tools only used if listed here."""
+
+    name: ServerName
+    command: tuple[str, ...] | None = Field(
+        default=None,
+        min_length=1,
+        description="A server Yarvis starts: the program and its arguments (pin a version).",
+    )
+    url: str | None = Field(
+        default=None,
+        pattern=r"^https://\S+$",
+        description="A remote server, reached over HTTPS only (Streamable HTTP).",
+    )
+    env: tuple[EnvName, ...] = Field(
+        default=(),
+        description="Environment variables passed on from Yarvis's own (none by default).",
+    )
+    secrets: tuple[EnvName, ...] = Field(
+        default=(),
+        description=(
+            "Environment variables filled from the keychain: `yarvis mcp secret <server> <NAME>`."
+        ),
+    )
+    token: EnvName | None = Field(
+        default=None,
+        description=(
+            "For a remote server: the keychain secret sent as 'Authorization: Bearer' "
+            "(`yarvis mcp secret <server> <NAME>`)."
+        ),
+    )
+    tools: dict[McpToolName, TierNumber] = Field(
+        default_factory=dict[McpToolName, TierNumber],
+        description=(
+            "The tools Yarvis may use, each with its tier: 0 read only, 1 reversible, "
+            "2 asks you first, 3 never. Unlisted tools are not used."
+        ),
+    )
+    timeout_s: float = Field(default=30.0, ge=1, le=300, description="Per call.")
+
+    @model_validator(mode="after")
+    def _one_kind(self) -> McpServerConfig:
+        if (self.command is None) == (self.url is None):
+            msg = "set either command (a server Yarvis starts) or url (a remote one)"
+            raise ValueError(msg)
+        if self.url is not None and (self.env or self.secrets):
+            msg = "env and secrets are for servers Yarvis starts; use token for a remote one"
+            raise ValueError(msg)
+        if self.command is not None and self.token is not None:
+            msg = "token is for remote servers; use secrets for a server Yarvis starts"
+            raise ValueError(msg)
+        return self
+
+
+class McpConfig(_Section):
+    """MCP servers (design doc §5.4). Nothing is installed or enabled automatically."""
+
+    servers: tuple[McpServerConfig, ...] = ()
+
+    @model_validator(mode="after")
+    def _unique(self) -> McpConfig:
+        names = [server.name for server in self.servers]
+        if len(names) != len(set(names)):
+            msg = "every MCP server needs its own name"
+            raise ValueError(msg)
+        return self
 
 
 class SecurityConfig(_Section):
@@ -243,6 +325,7 @@ class Config(_Section):
     llm: LLMConfig = LLMConfig()
     voice: VoiceConfig = VoiceConfig()
     tools: ToolsConfig = ToolsConfig()
+    mcp: McpConfig = McpConfig()
     security: SecurityConfig = SecurityConfig()
     logging: LoggingConfig = LoggingConfig()
 

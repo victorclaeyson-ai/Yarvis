@@ -17,7 +17,7 @@ from pydantic import ValidationError
 
 from yarvis.llm.base import ToolResult
 from yarvis.security.gate import Verdict
-from yarvis.tools.base import ToolError
+from yarvis.tools.base import ToolError, UntrustedToolError
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterable, Sequence
@@ -134,14 +134,23 @@ class Toolbox:
                 return busy_error, None, False, None
             action = PendingAction(tool, args, description, self._clock() + CONFIRMATION_TTL_S)
             return ToolResult(call.id, WAITING_FOR_USER), action, False, None
+        result, untrusted, ran = await self._run_now(call, tool, args, description)
+        return result, None, untrusted, ran
+
+    async def _run_now(
+        self, call: ToolCall, tool: Tool[Any], args: Arguments, description: str
+    ) -> tuple[ToolResult, bool, str | None]:
+        """Run an allowed call: (result, untrusted result?, what was done if it worked)."""
         try:
             content = await self._execute(tool, args, description)
+        except UntrustedToolError as exc:
+            report = f"{exc}\n{wrap_untrusted(tool.name, exc.content)}"
+            return ToolResult(call.id, report, is_error=True), True, None
         except ToolError as exc:
-            return _error(call, str(exc)), None, False, None
+            return _error(call, str(exc)), False, None
         if tool.untrusted_output:
-            wrapped = wrap_untrusted(tool.name, content)
-            return ToolResult(call.id, wrapped), None, True, description
-        return ToolResult(call.id, content), None, False, description
+            return ToolResult(call.id, wrap_untrusted(tool.name, content)), True, description
+        return ToolResult(call.id, content), False, description
 
     async def _prepare(
         self, call: ToolCall, *, tainted: bool
@@ -158,6 +167,8 @@ class Toolbox:
                 for error in exc.errors(include_input=False, include_url=False)
             )
             return _error(call, f"Invalid arguments: {problems}")
+        except ToolError as exc:
+            return _error(call, str(exc))
         try:
             args = await self._resolve(tool, args)
         except ToolError as exc:

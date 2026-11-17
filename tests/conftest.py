@@ -7,7 +7,8 @@ from rich.console import Console
 from typer.testing import CliRunner, Result
 
 from fakes import FakeAudioProbe, FakeKeyring, Invoke
-from yarvis.cli.app import Services, app
+from yarvis.cli.app import app
+from yarvis.cli.services import Services
 from yarvis.paths import AppPaths
 from yarvis.security.redact import Redactor
 from yarvis.security.secrets import SecretStore

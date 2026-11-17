@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from contextlib import AsyncExitStack
+from contextlib import AsyncExitStack, asynccontextmanager
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Protocol, Self
 
@@ -34,7 +34,8 @@ from yarvis.tools.weather import Weather
 logger = logging.getLogger(__name__)
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator, Awaitable, Callable
+    from collections.abc import AsyncGenerator, AsyncIterator, Awaitable, Callable, Sequence
+    from contextlib import AbstractAsyncContextManager
     from pathlib import Path
     from types import TracebackType
 
@@ -90,6 +91,32 @@ class Sink(AudioSink, Protocol):
     ) -> None: ...
 
 
+class McpTools(Protocol):
+    """The tools of the running MCP servers (see ``tools.mcp.McpHub``)."""
+
+    @property
+    def tools(self) -> Sequence[Tool[Any]]:
+        """The approved, allowlisted tools."""
+        ...
+
+    @property
+    def servers(self) -> Sequence[str]:
+        """The servers they come from."""
+        ...
+
+
+@dataclass(frozen=True, slots=True)
+class _NoMcpTools:
+    tools: tuple[Tool[Any], ...] = ()
+    servers: tuple[str, ...] = ()
+
+
+@asynccontextmanager
+async def no_mcp(_config: Config) -> AsyncGenerator[McpTools]:
+    """No MCP servers (the default for tests)."""
+    yield _NoMcpTools()
+
+
 @dataclass(frozen=True, slots=True)
 class Backends:
     """Factories for every component that touches hardware, models or the network."""
@@ -107,6 +134,10 @@ class Backends:
     """Turns music down during conversations (None: nothing to turn down)."""
     personal: Callable[[Config], list[Tool[Any]]] = lambda _config: []
     """Calendars and email (on a Mac, through its own accounts)."""
+    mcp: Callable[[Config], AbstractAsyncContextManager[McpTools]] = no_mcp
+    """Starts the configured MCP servers for as long as Yarvis runs."""
+    skills: Callable[[Config], list[Tool[Any]]] = lambda _config: []
+    """The Agent Skills the user added."""
 
     @classmethod
     def real(cls) -> Backends:  # pragma: no cover - exercised on real machines, not in CI
@@ -114,6 +145,7 @@ class Backends:
         from yarvis.audio.microphone import Microphone  # noqa: PLC0415
         from yarvis.audio.speaker import Speaker  # noqa: PLC0415
         from yarvis.llm.anthropic import AnthropicProvider  # noqa: PLC0415
+        from yarvis.paths import AppPaths  # noqa: PLC0415
         from yarvis.security.secrets import SecretStore  # noqa: PLC0415
         from yarvis.speech.choice import (  # noqa: PLC0415
             cloud_key,
@@ -129,8 +161,15 @@ class Backends:
             music_ducker,
             personal_tools,
         )
+        from yarvis.tools.mcp import Approvals, McpHub  # noqa: PLC0415
+        from yarvis.tools.mcp_launch import Launcher  # noqa: PLC0415
+        from yarvis.tools.skills import SkillLibrary, user_skills  # noqa: PLC0415
         from yarvis.tools.spotify import SpotifyAccount, SpotifyCatalog  # noqa: PLC0415
 
+        paths = AppPaths.default()
+        launcher = Launcher(
+            SecretStore().get_extra, work_dir=paths.data_dir / "mcp", log_dir=paths.log_dir
+        )
         return cls(
             llm=lambda config, key: AnthropicProvider(
                 key, model=config.llm.model, web_search=config.tools.web_search
@@ -155,6 +194,10 @@ class Backends:
             ),
             ducker=music_ducker,
             personal=personal_tools,
+            mcp=lambda config: McpHub(config.mcp, Approvals.of(paths), launcher),
+            skills=lambda config: (
+                user_skills(SkillLibrary.of(paths)) if config.tools.skills else []
+            ),
             computer=lambda config, spotify: computer_tools(
                 browser=config.tools.browser,
                 typing=config.tools.typing,
@@ -182,41 +225,23 @@ async def run_assistant(
     llm = backends.llm(config, api_key)
     announcements: asyncio.Queue[str] = asyncio.Queue()
     alarms = Alarms(announcements.put_nowait) if config.tools.timers else None
-    tools, abilities = _tools(config, alarms, backends, spotify)
-    gate = Gate(
-        confirm_external=config.security.confirm_tier2,
-        allow_dangerous=config.security.allow_tier3,
-    )
-    conversation = Conversation(
-        llm,
-        system_prompt=lambda: system_prompt(
-            config.assistant.name,
-            user_name=config.assistant.user_name,
-            location=config.assistant.location,
-            abilities=abilities,
-            web_search=_web_search(config) and bool(tools),
-        ),
-        max_tokens=config.llm.max_tokens,
-        toolbox=Toolbox(tools, gate, on_activity=ui.activity) if tools else None,
-    )
     stt = backends.stt(config, cache_dir) if voice_input else None
     tts = backends.tts(config, cache_dir) if voice_output else None
     wake_word = (
         backends.wake_word(config, cache_dir) if voice_input and config.voice.wake_word else None
     )
 
-    loading = [engine for engine in (stt, tts, wake_word) if engine is not None]
-    if loading:
-        if on_loading is not None:
-            on_loading("Loading speech models…")
-        await asyncio.gather(*(asyncio.to_thread(engine.load) for engine in loading))
-    if on_loading is not None:
-        on_loading("Warming up…")
-    await warm_up(llm, stt, tts)
-
     async with AsyncExitStack() as stack:
         if alarms is not None:
             stack.callback(alarms.close)
+        engines = [engine for engine in (stt, tts, wake_word) if engine is not None]
+        mcp = await _load(stack, engines, backends.mcp(config), on_loading)
+        tools, abilities = _tools(config, alarms, backends, spotify, mcp)
+        conversation = _conversation(config, llm, tools, abilities, on_activity=ui.activity)
+        if on_loading is not None:
+            on_loading("Warming up…")
+        await warm_up(llm, stt, tts)
+
         speaker = None
         if tts is not None:
             speaker = await stack.enter_async_context(backends.speaker(config, tts.sample_rate))
@@ -305,8 +330,55 @@ async def run_assistant(
         await assistant.run()
 
 
+async def _load(
+    stack: AsyncExitStack,
+    engines: Sequence[LoadableSTT | LoadableTTS | LoadableWakeWord],
+    mcp: AbstractAsyncContextManager[McpTools],
+    on_loading: Callable[[str], None] | None,
+) -> McpTools:
+    """Load the speech models and, meanwhile, start the MCP servers (kept on ``stack``)."""
+    if engines and on_loading is not None:
+        on_loading("Loading speech models…")
+    loading = asyncio.gather(*(asyncio.to_thread(engine.load) for engine in engines))
+    try:
+        return await stack.enter_async_context(mcp)
+    finally:
+        await loading
+
+
+def _conversation(
+    config: Config,
+    llm: LLMProvider,
+    tools: list[Tool[Any]],
+    abilities: list[str],
+    *,
+    on_activity: Callable[[str], None],
+) -> Conversation:
+    """The conversation with Claude, its tools behind the permission gate."""
+    gate = Gate(
+        confirm_external=config.security.confirm_tier2,
+        allow_dangerous=config.security.allow_tier3,
+    )
+    return Conversation(
+        llm,
+        system_prompt=lambda: system_prompt(
+            config.assistant.name,
+            user_name=config.assistant.user_name,
+            location=config.assistant.location,
+            abilities=abilities,
+            web_search=_web_search(config) and bool(tools),
+        ),
+        max_tokens=config.llm.max_tokens,
+        toolbox=Toolbox(tools, gate, on_activity=on_activity) if tools else None,
+    )
+
+
 def _tools(
-    config: Config, alarms: Alarms | None, backends: Backends, spotify: SpotifyKeys | None
+    config: Config,
+    alarms: Alarms | None,
+    backends: Backends,
+    spotify: SpotifyKeys | None,
+    mcp: McpTools,
 ) -> tuple[list[Tool[Any]], list[str]]:
     """The enabled tools, and what they let Yarvis do (in words, for the system prompt)."""
     tools: list[Tool[Any]] = []
@@ -323,6 +395,15 @@ def _tools(
     if config.tools.weather:
         tools.append(Weather(config.assistant.location))
         said.append("tell the weather, now and for the coming week")
+    if skills := backends.skills(config):
+        tools += skills
+        said.append("follow the skills the user added (use_skill loads one when it applies)")
+    if mcp.tools:
+        tools += mcp.tools
+        said.append(
+            f"use the tools of {', '.join(mcp.servers)}, connected through MCP (each tool "
+            "says what it does)"
+        )
     if _web_search(config) and tools:  # it is offered alongside the other tools
         said.append(
             "search the web for anything current: news, sports results, prices, opening "

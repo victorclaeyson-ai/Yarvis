@@ -67,6 +67,17 @@ web_search = true           # Claude searches the web for current info (~1 cent 
 weather = true              # forecasts from Open-Meteo (free, no account)
 calendar = true             # your calendars, via System Settings → Internet Accounts (macOS)
 mail = true                 # your email, via the Mail app; sending always asks you first
+skills = true               # Agent Skills you added (yarvis skills add <folder>)
+
+# MCP servers: only the tools you list are used, each with a tier (0 read only,
+# 1 reversible, 2 asks you first, 3 never). Then run: yarvis mcp approve <name>
+# [[mcp.servers]]
+# name = "files"
+# command = ["npx", "-y", "@modelcontextprotocol/server-filesystem@<version>", "/Users/me/Notes"]
+# secrets = []              # filled from the keychain: yarvis mcp secret <name> <SECRET>
+#   [mcp.servers.tools]
+#   read_text_file = 0
+#   write_file = 2
 
 [security]
 allow_tier3 = false         # dangerous tools (shell, delete, purchases): keep this off

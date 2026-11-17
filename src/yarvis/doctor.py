@@ -34,6 +34,9 @@ from yarvis.speech.choice import (
     parakeet_package,
     parakeet_supported,
 )
+from yarvis.tools.mcp import Approvals
+from yarvis.tools.mcp_launch import secret_key
+from yarvis.tools.skills import SkillLibrary
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
@@ -108,6 +111,8 @@ def run_doctor(ctx: DoctorContext) -> list[CheckResult]:
         check_audio_output(ctx, config),
         check_speech_recognition(ctx, config),
         check_models(ctx, config),
+        check_mcp(ctx, config),
+        check_skills(ctx, config),
     ]
 
 
@@ -368,3 +373,45 @@ def _portaudio_hint(system: str) -> str:
     if system == "Linux":
         return "Install PortAudio: sudo apt install libportaudio2 (Debian/Ubuntu)."
     return "Reinstall Yarvis; the sounddevice wheel bundles PortAudio on macOS."
+
+
+def check_mcp(ctx: DoctorContext, config: Config) -> CheckResult:
+    """Every configured MCP server should have its secrets and approved tools."""
+    label = "MCP servers"
+    servers = config.mcp.servers
+    if not servers:
+        return CheckResult(label, Status.OK, "none configured")
+    approved = Approvals.of(ctx.paths).load()
+    for server in servers:
+        needed = (*server.secrets, *((server.token,) if server.token else ()))
+        for name in needed:
+            if ctx.secrets.get_extra(secret_key(server.name, name)) is None:
+                return CheckResult(
+                    label,
+                    Status.WARN,
+                    f"{server.name}: secret {name} is not set",
+                    hint=f"Run: yarvis mcp secret {server.name} {name}",
+                )
+        pending = [name for name in server.tools if name not in approved.get(server.name, {})]
+        if pending:
+            return CheckResult(
+                label,
+                Status.WARN,
+                f"{server.name}: not approved yet: {', '.join(pending)}",
+                hint=f"Run: yarvis mcp approve {server.name}",
+            )
+    names = ", ".join(server.name for server in servers)
+    return CheckResult(label, Status.OK, f"{names} (definitions are checked at every start)")
+
+
+def check_skills(ctx: DoctorContext, config: Config) -> CheckResult:
+    """The skills the user added should still be the ones they approved."""
+    label = "Skills"
+    if not config.tools.skills:
+        return CheckResult(label, Status.OK, "off (tools.skills = false)")
+    skills, problems = SkillLibrary.of(ctx.paths).skills()
+    if problems:
+        return CheckResult(label, Status.WARN, "; ".join(problems))
+    if not skills:
+        return CheckResult(label, Status.OK, "none", hint="Add one: yarvis skills add <folder>")
+    return CheckResult(label, Status.OK, ", ".join(skill.name for skill in skills))

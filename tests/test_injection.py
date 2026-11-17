@@ -1,9 +1,9 @@
 """Prompt injection: outside content must never be able to act on the user's behalf.
 
 Every source of outside content Yarvis reads (web pages, tab titles, song and playlist
-names, place names, web search results, emails, calendar invitations) is tried with a
-model that obeys whatever the content says. That is the worst case: the defences below
-must not depend on Claude spotting the trick.
+names, place names, web search results, emails, calendar invitations, MCP tool results,
+Agent Skills) is tried with a model that obeys whatever the content says. That is the
+worst case: the defences below must not depend on Claude spotting the trick.
 
 1. After reading outside content, any consequential action (tier 2) is asked first, even
    when the user switched confirmations off, and the question is built by code.
@@ -23,12 +23,14 @@ from typing import TYPE_CHECKING, Any
 
 import httpx2
 import pytest
+from mcp_types import CallToolResult, TextContent
 
 from fakes import FakeLLM
 from test_agent_tools import Send, TextArgs, Wipe, call, make_conversation, reply
 from test_calendars import FakeStore, at
 from test_computer import FakeRunner
 from test_mail import FakeApps, listed
+from test_mcp import FakeSession, definition, notes_config, session_opener
 from yarvis.agent.toolbox import Toolbox, wrap_untrusted
 from yarvis.config.models import Config
 from yarvis.llm.base import ToolCall, WebSearch
@@ -39,6 +41,8 @@ from yarvis.tools.calendars import CalendarEvents, Event
 from yarvis.tools.computer import Apps, OpenWebsite
 from yarvis.tools.desktop import computer_tools, personal_tools
 from yarvis.tools.mail import Listing, MacMail, MailList, MailRead, MailSend, Message
+from yarvis.tools.mcp import Connection, McpTool, RemoteTool
+from yarvis.tools.skills import UseSkill, read_skill
 from yarvis.tools.spotify import SpotifyNowPlaying
 from yarvis.tools.weather import GEOCODING_URL, Weather
 
@@ -126,6 +130,22 @@ def invitation_with_attack(tmp_path: Path) -> tuple[Tool[Any], ToolCall]:
     return CalendarEvents(FakeStore([invite])), call("calendar_events", "r1")
 
 
+def mcp_result_with_attack(tmp_path: Path) -> tuple[Tool[Any], ToolCall]:
+    result = CallToolResult(content=[TextContent(type="text", text=ATTACK)])
+    session = FakeSession([definition("read_notes")], result=result)
+    connection = Connection(notes_config(read_notes=0), session_opener(session))
+    connection._session = session  # pyright: ignore[reportPrivateUsage] - already "connected"
+    remote = RemoteTool("read_notes", "Reads the notes.", {"type": "object"})
+    return McpTool(connection, remote, Tier.READ), call("notes__read_notes", "r1")
+
+
+def skill_with_attack(tmp_path: Path) -> tuple[Tool[Any], ToolCall]:
+    folder = tmp_path / "evil"
+    folder.mkdir()
+    (folder / "SKILL.md").write_text(f"---\nname: evil\ndescription: Helpful.\n---\n{ATTACK}")
+    return UseSkill([read_skill(folder)]), ToolCall("r1", "use_skill", {"name": "evil"})
+
+
 SOURCES = {
     "a web page": page_with_attack,
     "a tab title": tab_with_attack,
@@ -134,6 +154,8 @@ SOURCES = {
     "an email": email_with_attack,
     "an email subject": email_subject_with_attack,
     "a calendar invitation": invitation_with_attack,
+    "an MCP tool result": mcp_result_with_attack,
+    "an Agent Skill": skill_with_attack,
 }
 
 

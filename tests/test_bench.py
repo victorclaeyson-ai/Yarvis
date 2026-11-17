@@ -18,7 +18,7 @@ from yarvis.bench import (
 from yarvis.security.secrets import KEYRING_SERVICE
 
 if TYPE_CHECKING:
-    from yarvis.cli.app import Services
+    from yarvis.cli.services import Services
     from yarvis.paths import AppPaths
 
 

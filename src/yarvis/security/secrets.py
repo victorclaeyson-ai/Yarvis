@@ -225,10 +225,59 @@ class SecretStore:
 
     def delete(self, name: SecretName) -> bool:
         """Remove a secret from the keychain. Returns False if it was not stored."""
+        return self._delete(name.value)
+
+    def get_extra(self, key: str) -> SecretStr | None:
+        """A secret stored under a free-form key, such as an MCP server's token.
+
+        Keychain only: these have no environment-variable fallback.
+        """
+        if not self.keychain_available:
+            return None
+        try:
+            value = self._backend.get_password(KEYRING_SERVICE, _extra(key))
+        except keyring.errors.KeyringError:
+            logger.warning("Keychain lookup failed for %s", key)
+            return None
+        if not value:
+            return None
+        self._redactor.register(value)
+        return SecretStr(value)
+
+    def set_extra(self, key: str, value: str) -> None:
+        """Validate and store a secret under a free-form key (see ``get_extra``).
+
+        Raises:
+            InvalidSecretError: If the value is not a plausible credential.
+            RuntimeError: If no secure keychain is available.
+        """
+        value = validate_secret(value)
+        if not self.keychain_available:
+            msg = "no secure OS keychain is available"
+            raise RuntimeError(msg)
+        self._redactor.register(value)
+        self._backend.set_password(KEYRING_SERVICE, _extra(key), value)
+
+    def delete_extra(self, key: str) -> bool:
+        """Remove a secret stored with ``set_extra``. Returns False if it was not stored."""
+        return self._delete(_extra(key))
+
+    def _delete(self, username: str) -> bool:
         if not self.keychain_available:
             return False
         try:
-            self._backend.delete_password(KEYRING_SERVICE, name.value)
+            self._backend.delete_password(KEYRING_SERVICE, username)
         except keyring.errors.PasswordDeleteError:
             return False
         return True
+
+
+_EXTRA_KEY: Final = re.compile(r"^[a-z][a-z0-9-]*(:[A-Za-z0-9_-]+)+$")
+
+
+def _extra(key: str) -> str:
+    """The keychain entry for a free-form key, kept apart from the ``SecretName`` ones."""
+    if not _EXTRA_KEY.match(key):
+        msg = f"not a valid secret key: {key!r}"
+        raise ValueError(msg)
+    return f"extra:{key}"

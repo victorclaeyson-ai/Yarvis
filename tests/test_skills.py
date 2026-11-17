@@ -88,7 +88,12 @@ def test_too_many_files_are_refused(tmp_path: Path, monkeypatch: pytest.MonkeyPa
 @pytest.mark.parametrize(
     ("text", "problem"),
     [
-        ("# just markdown", "must start with YAML front matter"),
+        ("# just markdown", "must start with a --- line, not '# just markdown'"),
+        ("", "is empty"),
+        ("  \n\n", "is empty"),
+        ("```markdown\n---\nname: skill\n---\n```", "remove the ``` lines"),
+        ("\\---\n\nname: skill\n\n\\---\n", "remove the backslashes"),
+        ("---\nname: skill\ndescription: x\n", "no closing --- line"),
         ("---\nname: [unclosed\n---\nbody", "not valid YAML"),
         ("---\n- a list\n---\nbody", "must be a mapping"),
         ("---\ndescription: x\n---\nbody", "needs a name"),
@@ -105,6 +110,33 @@ def test_invalid_skills_are_refused(tmp_path: Path, text: str, problem: str) -> 
     folder.mkdir()
     (folder / "SKILL.md").write_text(text)
     with pytest.raises(SkillError, match=problem):
+        read_skill(folder)
+
+
+@pytest.mark.parametrize(
+    "pasted",
+    [
+        "\ufeff---\nname: skill\ndescription: Does it.\n---\nBody.",  # Notepad's BOM
+        "\n\n---\r\nname: skill\r\ndescription: Does it.\r\n---\r\nBody.\r\n",  # CRLF
+        "    ---\n    name: skill\n    description: Does it.\n    ---\n    Body.",  # indented
+        "---  \nname: skill\ndescription: Does it.\n---",  # no instructions at all
+    ],
+)
+def test_what_pasting_brings_along_is_forgiven(tmp_path: Path, pasted: str) -> None:
+    folder = tmp_path / "skill"
+    folder.mkdir()
+    (folder / "SKILL.md").write_text(pasted, encoding="utf-8", newline="")
+    skill = read_skill(folder)
+    assert skill.name == "skill"
+    assert skill.description == "Does it."
+    assert skill.instructions in {"Body.", ""}
+
+
+def test_a_skill_saved_as_utf16_is_explained(tmp_path: Path) -> None:
+    folder = tmp_path / "skill"
+    folder.mkdir()
+    (folder / "SKILL.md").write_text("---\nname: skill\n---\n", encoding="utf-16")
+    with pytest.raises(SkillError, match="must be saved as UTF-8"):
         read_skill(folder)
 
 

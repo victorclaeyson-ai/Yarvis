@@ -24,7 +24,7 @@ from test_computer import FakeRunner
 from test_listen_and_assistant import RecordingUi, lines
 from test_speech_engines import frames, speech_clip
 from test_wake_and_barge_in import EventUi
-from yarvis.cli.app import Services
+from yarvis.cli.services import Services
 from yarvis.cli.ui import ConsoleUi, format_timings, stdin_lines
 from yarvis.config import Config
 from yarvis.config.models import VoiceConfig
@@ -52,7 +52,7 @@ from yarvis.tools.desktop import computer_tools
 from yarvis.tools.spotify import SpotifyKeys
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator, Callable
+    from collections.abc import AsyncGenerator, AsyncIterator, Callable
     from pathlib import Path
     from types import TracebackType
 
@@ -709,6 +709,57 @@ async def test_computer_tools_are_described_to_the_model(tmp_path: Path) -> None
         voice_input=False,
         voice_output=False,
     )
+
+
+async def test_mcp_servers_and_skills_are_offered_to_the_model(tmp_path: Path) -> None:
+    from contextlib import asynccontextmanager  # noqa: PLC0415
+
+    from test_mcp import in_process, notes_config, notes_server  # noqa: PLC0415
+    from test_skills import make_skill  # noqa: PLC0415
+    from yarvis.config.models import McpConfig  # noqa: PLC0415
+    from yarvis.tools.mcp import Approvals, Connection, McpHub  # noqa: PLC0415
+    from yarvis.tools.skills import read_skill, skill_tools  # noqa: PLC0415
+
+    approvals = Approvals(tmp_path / "approved.json")
+    server = notes_config(add_note=1)
+    opener = in_process(notes=notes_server())
+    connection = Connection(server, opener)
+    approvals.approve("notes", [t for t in await connection.start() if t.name == "add_note"])
+    await connection.stop()
+    started: list[str] = []
+
+    @asynccontextmanager
+    async def hub(config: Config) -> AsyncGenerator[McpHub]:
+        async with McpHub(McpConfig(servers=(server,)), approvals, opener) as running:
+            started.append("notes")
+            yield running
+
+    skill = read_skill(make_skill(tmp_path / "skills"))
+    llm = FakeLLM([ToolCall("m1", "notes__add_note", {"text": "milk"})], ["Noted."])
+
+    def skills(config: Config) -> list[Any]:
+        return skill_tools([skill])
+
+    backends = replace(FakeBackends(llm).build(), mcp=hub, skills=skills)
+    ui = RecordingUi()
+    await run_assistant(
+        Config(),
+        api_key=SecretStr("k"),
+        cache_dir=tmp_path,
+        lines=lines("note milk", "q"),
+        ui=ui,
+        backends=backends,
+        voice_input=False,
+        voice_output=False,
+    )
+    assert started == ["notes"]
+    prompt = llm.calls[0][1]
+    assert "use the tools of notes, connected through MCP" in prompt
+    assert "follow the skills the user added" in prompt
+    assert {"notes__add_note", "use_skill", "read_skill_file"} <= set(llm.offered[0])
+    assert "reply:Noted." in ui.events
+    result = llm.calls[1][0][-1].tool_results[0].content
+    assert "Stored 'milk' under general." in result
 
 
 async def test_spotify_credentials_reach_the_computer_tools(tmp_path: Path) -> None:

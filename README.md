@@ -31,7 +31,8 @@ Your own Jarvis — except it lives on your machine, like a yeti lives off the g
   mode is on the roadmap.
 - **Actually does things** — reads your calendars and email and sends mail, searches the
   web, checks the weather, sets timers and reminders that speak up, drives apps, websites,
-  volume and music; any MCP server next.
+  volume and music; and anything you add: MCP servers and Agent Skills, each tool approved
+  by you ([how it works](docs/adr/0013-mcp-servers-and-agent-skills.md)).
 - **Safe to give power to** — a security model that assumes the AI *will* be manipulated:
   every action passes a permission gate in code, consequential ones need your spoken "yes"
   (the question is built by code, so you hear exactly what will happen), and content from
@@ -39,7 +40,8 @@ Your own Jarvis — except it lives on your machine, like a yeti lives off the g
   ([how it works](docs/adr/0007-tools-and-the-permission-gate.md)). A
   [prompt-injection test suite](docs/adr/0009-web-search-weather-and-injection-tests.md)
   plants the same attack in every page, tab title, song title, place name, search result,
-  email and calendar invitation, and checks that it never gets through.
+  email, calendar invitation, MCP tool result and skill, and checks that it never gets
+  through.
 - **Has a body** — an optional ESP32 desk satellite with mic, speaker and LED ring.
 
 Read the full [design document](docs/DESIGN.md).
@@ -50,7 +52,7 @@ Read the full [design document](docs/DESIGN.md).
 |---|---|---|
 | 0 | Foundations: tooling, CI, config, secrets, event bus, `yarvis doctor` | ✅ done |
 | 1 | Voice loop: wake word, streaming STT, Claude, streaming TTS, barge-in | ✅ done |
-| 2 | Tools and the security core: permission gate, MCP | 🚧 in progress |
+| 2 | Tools and the security core: permission gate, MCP, skills | ✅ done |
 | 3 | Memory and fully offline mode | planned |
 | 4 | ESP32 desk satellite | planned |
 | 5 | v1.0 launch | planned |
@@ -110,8 +112,35 @@ them separately (4 MB) instead of bundling them. Prefer press-to-talk? Set
 no wake word needed (`follow_up_s`); say "thanks" or "that's all" to end it sooner. After
 that, say "Hey Yarvis" again. If you'd like it to stay open longer, `stay_open_s` keeps it
 listening, but only for what sounds meant for it (its name, or a command like "open
-Spotify"); other talk in the room is dropped on your computer and never reaches Claude. That filter
-can also miss a real request that doesn't sound like one, so it's off by default.
+Spotify"); other talk in the room is dropped on your computer and never reaches Claude. That
+filter can also miss a real request that doesn't sound like one, so it's off by default.
+
+**Add abilities: MCP servers.** Any [MCP](https://modelcontextprotocol.io) server can give
+Yarvis new tools, but only the ones you list, each with a tier: 0 runs freely (read only),
+1 runs and is shown (reversible), 2 asks you first, 3 never runs. In the config:
+
+```toml
+[[mcp.servers]]
+name = "files"
+command = ["npx", "-y", "@modelcontextprotocol/server-filesystem@<version>", "/Users/me/Notes"]
+  [mcp.servers.tools]
+  read_text_file = 0
+  write_file = 2
+```
+
+Then `yarvis mcp approve files` starts it and shows each listed tool exactly as Claude will
+read it; approving records a fingerprint, and a tool that changes later is left out until
+you approve it again. Servers that need a key get it from the keychain
+(`secrets = ["NAME"]`, then `yarvis mcp secret files NAME`); a server Yarvis starts never
+sees Yarvis's own keys. Remote servers: `url = "https://..."` (HTTPS only), with an optional
+`token`. Whatever a server returns is outside content: after it, every call asks you first.
+`yarvis mcp list` shows what is set up.
+
+**Add know-how: Agent Skills.** A skill ([agentskills.io](https://agentskills.io)) is a
+folder with a `SKILL.md`: when to use it, and instructions. `yarvis skills add
+~/skills/morning-briefing` shows it and copies its text in; Yarvis reads it when a request
+calls for it. Scripts in a skill are never run, and a skill can't approve anything: every
+action still goes through the gate. `yarvis skills list` and `yarvis skills remove`.
 
 Curious how fast it is on your machine? `yarvis bench` measures each stage (voice, each
 speech recognition engine and what it heard, Claude's first token) and recommends settings.

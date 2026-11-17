@@ -24,8 +24,12 @@ dependencies = [
     "anthropic>=2.8",
     "faster-whisper>=1.2",
     "httpx2>=2.16",
+    # Checks the arguments of MCP tools against the schema their server publishes.
+    "jsonschema>=4.23",
     "keyring>=25.7",
     "kokoro-onnx>=0.6",
+    # The official Model Context Protocol SDK: Yarvis is an MCP client (servers allowlisted).
+    "mcp>=2.3",
     "numpy>=2.1",
     "onnx-asr>=0.12",  # Parakeet on any processor (Windows, Linux, Intel Macs)
     "onnxruntime>=1.22",
@@ -36,6 +40,8 @@ dependencies = [
     "pyobjc-framework-EventKit>=13.0; sys_platform == 'darwin'",
     "pydantic>=2.11",
     "pywebview>=6.2",
+    # The front matter of Agent Skills (SKILL.md), read with yaml.safe_load only.
+    "pyyaml>=6.0",
     "rich>=14",
     "sounddevice>=0.5",
     "typer>=0.16",
@@ -61,6 +67,8 @@ dev = [
     "pytest-cov>=7.1",
     "pytest-timeout>=2.3",
     "ruff>=0.17",
+    "types-jsonschema>=4.26.0.20261006",
+    "types-pyyaml>=6.0.12.20261113",
 ]
 
 # --------------------------------------------------------------------------- ruff

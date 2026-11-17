@@ -148,7 +148,8 @@ class LLMProvider(Protocol):
 ### 4.3 Tools
 
 - **Built-in (v1):** timers and reminders (spoken when due), open/quit app, volume, media control, browser tabs (list, switch, open, close, search, back/forward), Spotify by name (play, volume, shuffle, repeat, position, now playing), typing into apps (Enter = tier 2) (done, ADR 0007); web search through Anthropic's server tool (tainting, like a page) and the weather from Open-Meteo (done, ADR 0009); calendars (EventKit) and email (Mail, names from Contacts) through the Mac's own Internet Accounts, with no developer setup and no tokens held by Yarvis (done, ADR 0010); notes, system info (next).
-- **MCP:** any MCP server (stdio or remote HTTPS) declared in config. Nothing is auto-installed or auto-enabled.
+- **MCP:** any MCP server (stdio or remote HTTPS) declared in config. Nothing is auto-installed or auto-enabled; only the tools listed under a server are offered (done, ADR 0013).
+- **Agent Skills:** folders with a `SKILL.md` (agentskills.io) added with `yarvis skills add`: instructions only (scripts are never run), pinned, and read as outside content (done, ADR 0013).
 - Every tool — built-in or MCP — has a **declared permission tier** (§5.3). MCP tools default to the most restrictive tier until the user assigns one.
 
 ---
@@ -204,6 +205,7 @@ The gate is a single small module (`yarvis/security/gate.py`) with exhaustive te
 - stdio servers are spawned with a **scrubbed environment** (only variables explicitly listed in config), a fixed working directory, and output size limits.
 - Remote servers: HTTPS only, OAuth where supported, no plain HTTP.
 - Tool descriptions are shown to the user at approval time, since descriptions themselves are an injection vector.
+- Built as designed (ADR 0013): `yarvis mcp approve` pins the definitions; secrets come from the keychain (`yarvis mcp secret`); results and error messages are wrapped as untrusted content; every MCP call counts as sending data out, so after outside content each one needs a "yes"; arguments are checked against the approved JSON Schema before the gate.
 
 ### 5.5 Secrets
 
@@ -317,7 +319,7 @@ yarvis/
 |---|---|---|
 | **0 · Foundations** | Repo, tooling, CI, config, secrets, logging, event bus, `yarvis doctor` | CI green on macOS + Linux; `doctor` checks mic, speaker, models, keys |
 | **1 · Voice loop** | Audio I/O, wake word, VAD, STT, Claude streaming, TTS, barge-in, latency harness | Natural conversation with barge-in; p50 latency measured and published |
-| **2 · Tools & security core** | Permission gate, taint tracking, confirmations, built-in tools, MCP client + pinning | Injection suite passing; calendar and email work end to end (through the Mac, ADR 0010); MCP client with pinning |
+| **2 · Tools & security core** | Permission gate, taint tracking, confirmations, built-in tools, MCP client + pinning, Agent Skills | Injection suite passing; calendar and email work end to end (through the Mac, ADR 0010); MCP client with pinning and skills (ADR 0013) — done |
 | **3 · Memory & offline** | Memory store, recall, Ollama offline mode, Dutch voice | Fully offline demo; memory forget/export works |
 | **4 · Satellite** | ESP32-S3 firmware, pairing, secure audio streaming, LED states | Satellite pairs in < 1 minute; link passes security review |
 | **5 · Launch** | Demo video, docs site, install polish, launch posts | Public release v1.0 |

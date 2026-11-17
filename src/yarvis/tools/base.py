@@ -37,16 +37,32 @@ class ToolError(Exception):
     """A tool could not do its job. The message is shown to the model (and maybe the user)."""
 
 
-class Tool[A: Arguments](ABC):
-    """Something Yarvis can do. Subclasses set the class attributes and implement ``run``."""
+class UntrustedToolError(ToolError):
+    """A tool failed with an explanation written by someone else (an MCP server).
 
-    name: ClassVar[str]
-    description: ClassVar[str]
-    tier: ClassVar[Tier]
+    The message is Yarvis's own summary; ``content`` reaches the model only wrapped as
+    outside content, and taints the turn like any other.
+    """
+
+    def __init__(self, summary: str, content: str) -> None:
+        super().__init__(summary)
+        self.content = content
+
+
+class Tool[A: Arguments](ABC):
+    """Something Yarvis can do. Subclasses set the class attributes and implement ``run``.
+
+    ``name``, ``description`` and ``tier`` are usually class attributes; tools that only
+    exist at runtime (from an MCP server) set them per instance.
+    """
+
+    name: str
+    description: str
+    tier: Tier
     Args: ClassVar[type[Arguments]]
     untrusted_output: ClassVar[bool] = False
     """True if results contain outside content (web pages, messages): the turn is tainted."""
-    timeout_s: ClassVar[float | None] = None
+    timeout_s: float | None = None
     """How long one call may take; None: the toolbox's default."""
 
     def spec(self) -> ToolSpec:
@@ -54,7 +70,12 @@ class Tool[A: Arguments](ABC):
         return ToolSpec(self.name, self.description, self.Args.model_json_schema())
 
     def parse(self, raw: Mapping[str, Any]) -> A:
-        """Validate the model's arguments (raises ``pydantic.ValidationError``)."""
+        """Validate the model's arguments.
+
+        Raises:
+            pydantic.ValidationError: If they do not fit ``Args``.
+            ToolError: If they are invalid in another way (the message says how).
+        """
         return cast("A", self.Args.model_validate(dict(raw)))
 
     async def prepare(self, args: A) -> A:

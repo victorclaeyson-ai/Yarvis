@@ -7,22 +7,20 @@ import contextlib
 import logging
 import platform
 import re
-import webbrowser
-from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Annotated, NoReturn
+from typing import TYPE_CHECKING, Annotated
 
 import httpx2
 import typer
 from pydantic import SecretStr
-from rich.console import Console
 from rich.markup import escape
 from rich.progress import BarColumn, DownloadColumn, Progress, TextColumn, TransferSpeedColumn
 from rich.table import Table
 
 from yarvis import __version__, spotify_login
-from yarvis.audio.devices import AudioProbe, SoundDeviceProbe
 from yarvis.bench import SttCandidate, recommendation, run_bench
-from yarvis.cli.ui import ConsoleUi, stdin_lines
+from yarvis.cli.extensions import mcp_app, skills_app
+from yarvis.cli.services import Services, fail, load_config_or_exit, services_of
+from yarvis.cli.ui import ConsoleUi
 from yarvis.config import Config, ConfigError, load_config, write_default_config
 from yarvis.doctor import CheckResult, DoctorContext, Status, has_failures, run_doctor
 from yarvis.log import configure_logging
@@ -32,7 +30,6 @@ from yarvis.models import (
     WHISPER_APPROX_MB,
     ModelFile,
     ModelIntegrityError,
-    download,
     kokoro_dir,
     missing,
     parakeet_dir,
@@ -40,70 +37,27 @@ from yarvis.models import (
     wake_word_dir,
     whisper_present,
 )
-from yarvis.paths import AppPaths
-from yarvis.runtime import Backends, LoadableSTT, run_assistant
+from yarvis.runtime import LoadableSTT, run_assistant
 from yarvis.security.secrets import (
     InvalidSecretError,
     ResolvedSecret,
     SecretName,
     SecretSource,
-    SecretStore,
 )
 from yarvis.speech.choice import (
     SttEngine,
     choose_engine,
     cloud_key,
-    parakeet_available,
-    this_build,
 )
 from yarvis.tools.spotify import SpotifyKeys
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator, Callable
+    from collections.abc import Callable
     from pathlib import Path
 
-    from yarvis.models import ParakeetBuild
     from yarvis.speech.whisper import SttDevice
 
 logger = logging.getLogger(__name__)
-
-
-@dataclass(slots=True)
-class Services:
-    """Dependencies of the CLI. Tests pass their own instance as the Click ``obj``."""
-
-    paths: AppPaths
-    secrets: SecretStore
-    audio: AudioProbe
-    console: Console
-    err_console: Console
-    backends: Callable[[], Backends] = Backends.real
-    lines: Callable[[], AsyncIterator[str]] = stdin_lines
-    downloader: Callable[[ModelFile, Path, Callable[[int], None]], Path] = field(
-        default=lambda model, directory, progress: download(model, directory, progress=progress)
-    )
-    app_runner: Callable[..., None] = field(default_factory=lambda: _run_app)
-    parakeet_ok: Callable[[], bool] = parakeet_available
-    """Whether Parakeet speech recognition can run here."""
-    parakeet_build: Callable[[], ParakeetBuild] = this_build
-    """Which Parakeet build runs here: the Apple GPU (MLX) or the processor (ONNX)."""
-    spotify_login: Callable[[str, SecretStr], str] = field(
-        default=lambda client_id, secret: spotify_login.login(
-            client_id, secret, open_url=webbrowser.open
-        )
-    )
-    """Runs the Spotify consent flow in the browser; returns a refresh token."""
-
-    @classmethod
-    def default(cls) -> Services:
-        """Real implementations for normal use."""
-        return cls(
-            paths=AppPaths.default(),
-            secrets=SecretStore(),
-            audio=SoundDeviceProbe(),
-            console=Console(),
-            err_console=Console(stderr=True),
-        )
 
 
 # Pretty exceptions render local variables, which could include secrets: keep them off.
@@ -122,14 +76,8 @@ app.add_typer(config_app, name="config")
 app.add_typer(key_app, name="key")
 app.add_typer(models_app, name="models")
 app.add_typer(spotify_app, name="spotify")
-
-
-def _services(ctx: typer.Context) -> Services:
-    obj: object = ctx.find_root().obj
-    if not isinstance(obj, Services):  # pragma: no cover - guaranteed by the root callback
-        msg = "CLI services were not initialised"
-        raise TypeError(msg)
-    return obj
+app.add_typer(mcp_app, name="mcp")
+app.add_typer(skills_app, name="skills")
 
 
 def _version_callback(value: bool) -> None:
@@ -164,7 +112,7 @@ _STATUS_STYLE = {
 @app.command()
 def doctor(ctx: typer.Context) -> None:
     """Check that this machine is ready to run Yarvis."""
-    services = _services(ctx)
+    services = services_of(ctx)
     context = DoctorContext.current(
         paths=services.paths,
         secrets=services.secrets,
@@ -197,7 +145,7 @@ def _results_table(results: list[CheckResult]) -> Table:
 @config_app.command("path")
 def config_path(ctx: typer.Context) -> None:
     """Print where the configuration file lives."""
-    services = _services(ctx)
+    services = services_of(ctx)
     services.console.print(str(services.paths.config_file), highlight=False, soft_wrap=True)
 
 
@@ -207,7 +155,7 @@ def config_init(
     force: Annotated[bool, typer.Option("--force", help="Overwrite an existing file.")] = False,
 ) -> None:
     """Create a commented default configuration file."""
-    services = _services(ctx)
+    services = services_of(ctx)
     path = services.paths.config_file
     try:
         write_default_config(path, overwrite=force)
@@ -222,7 +170,7 @@ def config_init(
 @config_app.command("show")
 def config_show(ctx: typer.Context) -> None:
     """Show the effective configuration (defaults merged with your file)."""
-    services = _services(ctx)
+    services = services_of(ctx)
     try:
         config = load_config(services.paths.config_file)
     except ConfigError as exc:
@@ -240,9 +188,9 @@ def key_set(
     name: Annotated[SecretName, typer.Argument(help="Which key to store.")],
 ) -> None:
     """Store an API key in the OS keychain (input is hidden)."""
-    services = _services(ctx)
+    services = services_of(ctx)
     if name is SecretName.SPOTIFY_LOGIN:
-        _fail(services, "Log in through Spotify instead: yarvis spotify login")
+        fail(services, "Log in through Spotify instead: yarvis spotify login")
     if name is SecretName.SPOTIFY:
         value = _spotify_credentials(services)
     elif name is SecretName.ASSEMBLYAI:
@@ -277,7 +225,7 @@ def _spotify_credentials(services: Services) -> str:
     client_id = typer.prompt("Client ID").strip()
     secret = typer.prompt("Client secret", hide_input=True).strip()
     if not (_SPOTIFY_ID.match(client_id) and _SPOTIFY_ID.match(secret)):
-        _fail(services, "Spotify client IDs and secrets are 32 characters of 0-9 and a-f.")
+        fail(services, "Spotify client IDs and secrets are 32 characters of 0-9 and a-f.")
     return f"{client_id}:{secret}"
 
 
@@ -287,7 +235,7 @@ def key_delete(
     name: Annotated[SecretName, typer.Argument(help="Which key to delete.")],
 ) -> None:
     """Remove an API key from the OS keychain."""
-    services = _services(ctx)
+    services = services_of(ctx)
     if services.secrets.delete(name):
         services.console.print(f"Deleted the {name.value} key.")
     else:
@@ -297,7 +245,7 @@ def key_delete(
 @key_app.command("status")
 def key_status(ctx: typer.Context) -> None:
     """Show which keys are configured and where. Never prints the keys themselves."""
-    services = _services(ctx)
+    services = services_of(ctx)
     for name in SecretName:
         resolved = services.secrets.get(name)
         where = "not set" if resolved is None else f"set ({resolved.source.value})"
@@ -324,7 +272,7 @@ def run(
     ] = False,
 ) -> None:
     """Start a conversation with Yarvis in the terminal."""
-    services = _services(ctx)
+    services = services_of(ctx)
     config, key = _prepare(
         services,
         voice_input=not text,
@@ -370,7 +318,7 @@ def app_command(
     ] = False,
 ) -> None:
     """Open the Yarvis app window."""
-    services = _services(ctx)
+    services = services_of(ctx)
     config, key = _prepare(
         services,
         voice_input=not text,
@@ -390,7 +338,7 @@ def app_command(
             spotify=_spotify(services),
         )
     except RuntimeError as exc:
-        _fail(
+        fail(
             services,
             f"{exc}. On Linux, install a GUI backend first: uv pip install 'pywebview[qt]'. "
             "The terminal version still works: yarvis run",
@@ -410,7 +358,7 @@ def _prepare(
     Returns the configuration as it will actually run (e.g. without the wake word if its
     model is unavailable).
     """
-    config = _load_config_or_exit(services)
+    config = load_config_or_exit(services)
     if not (wake_word and voice_input):
         config = _without_wake_word(config)
     services.paths.ensure_all()
@@ -420,12 +368,12 @@ def _prepare(
         console=services.err_console,
     )
     if config.llm.provider != "anthropic":
-        _fail(services, 'The Ollama provider arrives in Phase 3. Set llm.provider = "anthropic".')
+        fail(services, 'The Ollama provider arrives in Phase 3. Set llm.provider = "anthropic".')
     key = services.secrets.get(SecretName.ANTHROPIC)
     if key is None:
-        _fail(services, "No Anthropic API key found. Run: yarvis key set anthropic")
+        fail(services, "No Anthropic API key found. Run: yarvis key set anthropic")
     if voice_output and not _ensure_kokoro(services, assume_yes=assume_yes):
-        _fail(services, "Yarvis cannot speak without its voice model. Use --mute to skip it.")
+        fail(services, "Yarvis cannot speak without its voice model. Use --mute to skip it.")
     if config.voice.wake_word and not _ensure_wake_word(services, assume_yes=assume_yes):
         services.console.print(
             "[yellow]Continuing without the wake word: press Space (app) or Enter (terminal) "
@@ -461,29 +409,6 @@ def _with_speech_recognition(services: Services, config: Config, *, assume_yes: 
     return config
 
 
-def _run_app(
-    config: Config,
-    *,
-    api_key: SecretStr,
-    cache_dir: Path,
-    backends: Backends,
-    voice_input: bool,
-    voice_output: bool,
-    spotify: SpotifyKeys | None = None,
-) -> None:  # pragma: no cover - opens a real window
-    from yarvis.app.window import run_app  # noqa: PLC0415 - GUI imports only when needed
-
-    run_app(
-        config,
-        api_key=api_key,
-        cache_dir=cache_dir,
-        backends=backends,
-        voice_input=voice_input,
-        voice_output=voice_output,
-        spotify=spotify,
-    )
-
-
 def _spotify(services: Services) -> SpotifyKeys | None:
     """The Spotify developer app's credentials and the user's login, if stored."""
     app_keys = services.secrets.get(SecretName.SPOTIFY)
@@ -507,10 +432,10 @@ def _spotify(services: Services) -> SpotifyKeys | None:
 @spotify_app.command("login")
 def spotify_login_command(ctx: typer.Context) -> None:
     """Let Yarvis play your playlists and control Spotify in the background (asks once)."""
-    services = _services(ctx)
+    services = services_of(ctx)
     app_keys = services.secrets.get(SecretName.SPOTIFY)
     if app_keys is None:
-        _fail(services, "First store your Spotify app's keys: yarvis key set spotify")
+        fail(services, "First store your Spotify app's keys: yarvis key set spotify")
     client_id, _, secret = app_keys.value.get_secret_value().partition(":")
     services.console.print(
         "Your browser will open Spotify. Allow Yarvis to read your playlists and control "
@@ -522,7 +447,7 @@ def spotify_login_command(ctx: typer.Context) -> None:
         token = services.spotify_login(client_id, SecretStr(secret))
         services.secrets.set(SecretName.SPOTIFY_LOGIN, token)
     except (spotify_login.LoginError, InvalidSecretError, RuntimeError) as exc:
-        _fail(services, f"Spotify login failed: {exc}")
+        fail(services, f"Spotify login failed: {exc}")
     services.console.print(
         "[green]Connected.[/] Yarvis can now play your own playlists. To disconnect: "
         "yarvis key delete spotify-login"
@@ -538,7 +463,7 @@ def bench(
     ] = True,
 ) -> None:
     """Measure each stage on this machine and recommend the fastest settings."""
-    services = _services(ctx)
+    services = services_of(ctx)
     config, key = _prepare(services, voice_input=True, voice_output=True, assume_yes=False)
     backends = services.backends()
     cache = services.paths.cache_dir
@@ -599,8 +524,8 @@ def models_download(
     yes: Annotated[bool, typer.Option("--yes", "-y", help="Do not ask for confirmation.")] = False,
 ) -> None:
     """Download the voice, wake-word and speech recognition models ahead of time."""
-    services = _services(ctx)
-    config = _load_config_or_exit(services)
+    services = services_of(ctx)
+    config = load_config_or_exit(services)
     services.paths.ensure_all()
     if not _ensure_kokoro(services, assume_yes=yes):
         raise typer.Exit(code=1)
@@ -681,19 +606,6 @@ def _download(services: Services, todo: list[ModelFile], directory: Path) -> boo
         services.err_console.print(f"[red]Download failed:[/] {escape(str(exc))}")
         return False
     return True
-
-
-def _load_config_or_exit(services: Services) -> Config:
-    try:
-        return load_config(services.paths.config_file)
-    except ConfigError as exc:
-        services.err_console.print(f"[red]{escape(str(exc))}[/]", highlight=False)
-        raise typer.Exit(code=1) from None
-
-
-def _fail(services: Services, message: str) -> NoReturn:
-    services.err_console.print(f"[red]✗ {escape(message)}[/]", highlight=False)
-    raise typer.Exit(code=1)
 
 
 def main() -> None:

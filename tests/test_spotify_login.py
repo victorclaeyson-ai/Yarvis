@@ -28,7 +28,7 @@ if TYPE_CHECKING:
     from collections.abc import Callable
 
     from fakes import FakeKeyring, Invoke
-    from yarvis.cli.app import Services
+    from yarvis.cli.services import Services
 
 CLIENT_ID = "0123456789abcdef0123456789abcdef"
 SECRET = SecretStr("fedcba9876543210fedcba9876543210")  # gitleaks:allow - a test value

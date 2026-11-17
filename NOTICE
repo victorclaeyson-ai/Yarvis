@@ -28,6 +28,9 @@ reference implementation, Copyright David Scripka, licensed under the Apache Lic
 
 Services used at runtime
 ------------------------
+- MCP servers the user configures run under their own licenses; Yarvis talks to them with
+  the official MCP Python SDK (MIT), checks their arguments with jsonschema (MIT) and reads
+  Agent Skills' front matter with PyYAML (MIT).
 - Optional: live speech recognition by AssemblyAI (https://www.assemblyai.com), with the
   user's own API key and under AssemblyAI's terms. Its streaming API is used through
   websockets (BSD-3-Clause).

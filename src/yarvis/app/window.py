@@ -10,11 +10,7 @@ from typing import TYPE_CHECKING, Any
 
 from yarvis.app.bridge import AppApi, AppUi, CommandQueue, EventPump
 from yarvis.assistant import AssistantControls
-from yarvis.llm.anthropic import DEFAULT_MODEL
 from yarvis.runtime import run_assistant
-from yarvis.security.secrets import SecretStore
-from yarvis.speech.choice import cloud_key
-from yarvis.speech.choice import describe as describe_stt
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -27,7 +23,8 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-WINDOW_SIZE = (480, 820)
+WINDOW_SIZE = (1280, 800)
+"""Wide enough for the whole dashboard; narrower windows get the compact layout."""
 MIN_SIZE = (400, 600)
 BACKGROUND = "#07030f"
 
@@ -43,11 +40,6 @@ def index_html() -> str:
 
 class AppError(RuntimeError):
     """The window could not be opened (e.g. no GUI backend on Linux)."""
-
-
-def uses_cloud_stt(config: Config, secrets: SecretStore | None = None) -> bool:
-    """Whether AssemblyAI hears the user (its key is stored and ``cloud_stt`` is on)."""
-    return cloud_key(config.voice, secrets or SecretStore()) is not None
 
 
 def run_app(
@@ -72,12 +64,15 @@ def run_app(
     controls = AssistantControls()
     pump = EventPump()
     ui = AppUi(pump.post)
-    details = {
-        "llm": config.llm.model or DEFAULT_MODEL,
-        "stt": describe_stt(config.voice, cloud=uses_cloud_stt(config)) if voice_input else "off",
-        "tts": config.voice.voice if voice_output else "muted",
-    }
-    api = AppApi(commands, controls, name=config.assistant.name, voice=voice_input, details=details)
+    api = AppApi(
+        commands,
+        controls,
+        name=config.assistant.name,
+        voice=voice_input,
+        user=config.assistant.user_name,
+        place=config.assistant.location,
+        asks=config.security.confirm_tier2,
+    )
 
     window = gui.create_window(
         config.assistant.name,
@@ -110,6 +105,7 @@ def run_app(
                     on_loading=ui.notice,
                     controls=controls,
                     spotify=spotify,
+                    dashboard=ui,
                 )
             )
         except Exception as exc:

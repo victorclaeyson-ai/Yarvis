@@ -171,8 +171,11 @@ class Turn:
         observer: TurnObserver,
         chime: AudioArray | None = None,
         names: Sequence[str] = DEFAULT_WAKE_NAMES,
+        on_finished: Callable[[TurnTimings], None] | None = None,
     ) -> None:
         self._conversation = conversation
+        self._on_finished = on_finished
+        """Told about every reply given (the dashboard counts them, and their speed)."""
         self._stt = stt
         self._tts = tts
         self._speaker = speaker
@@ -358,6 +361,8 @@ class Turn:
             timings.llm_ms,
             timings.tts_ms,
         )
+        if self._on_finished is not None:
+            self._on_finished(timings)
         return TurnResult(transcript=transcript, reply="".join(parts).strip(), timings=timings)
 
     async def _produce(

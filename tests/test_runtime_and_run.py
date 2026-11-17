@@ -23,12 +23,13 @@ from fakes import (
 from test_computer import FakeRunner
 from test_listen_and_assistant import RecordingUi, lines
 from test_speech_engines import frames, speech_clip
+from test_usage import RecordingDashboard
 from test_wake_and_barge_in import EventUi
 from yarvis.cli.services import Services
 from yarvis.cli.ui import ConsoleUi, format_timings, stdin_lines
 from yarvis.config import Config
 from yarvis.config.models import VoiceConfig
-from yarvis.llm.base import ToolCall
+from yarvis.llm.base import ToolCall, WebSearch
 from yarvis.models import (
     KOKORO_FILES,
     PARAKEET_FILES,
@@ -50,6 +51,7 @@ from yarvis.speech.silero import SileroVAD
 from yarvis.tools.computer import Apps
 from yarvis.tools.desktop import computer_tools
 from yarvis.tools.spotify import SpotifyKeys
+from yarvis.usage import ClaudeUsage, UsageBook
 
 if TYPE_CHECKING:
     from collections.abc import AsyncGenerator, AsyncIterator, Callable
@@ -58,6 +60,7 @@ if TYPE_CHECKING:
 
     from yarvis.paths import AppPaths
     from yarvis.speech.base import AudioArray
+    from yarvis.telemetry import Reporter
 
 
 class LoadableSTT(FakeSTT):
@@ -221,8 +224,10 @@ async def test_assemblyai_hears_a_voice_turn_through_the_real_wiring(
     def make_stt(config: Config, cache: Path) -> AssemblyAISTT:
         return cloud
 
-    backends = replace(fakes.build(), stt=make_stt)
+    book = UsageBook(tmp_path / "usage.json")
+    backends = replace(fakes.build(), stt=make_stt, usage=lambda: book)
     ui = RecordingUi()
+    dashboard = RecordingDashboard()
     caplog.set_level("INFO")
     await run_assistant(
         NO_WAKE_WORD,
@@ -231,7 +236,16 @@ async def test_assemblyai_hears_a_voice_turn_through_the_real_wiring(
         lines=lines("", "q"),
         ui=ui,
         backends=backends,
+        dashboard=dashboard,
     )
+    speech = next(link for link in dashboard.link_updates[0] if link.key == "speech")
+    assert speech.detail == "AssemblyAI, EU servers"
+    (day,) = book.days().values()
+    assert day.turns == 1
+    assert len(day.latencies_ms) == 1  # a spoken turn
+    assert day.speech_seconds >= 0
+    shown = dashboard.usage_updates[-1].today  # at the end of the turn
+    assert (shown.turns, shown.latencies_ms) == (day.turns, day.latencies_ms)
     assert backup.loaded
     assert backup.received == [8_000]  # only the warm-up: the request was heard in the cloud
     assert "you:what time is it in Tokyo?" in ui.events
@@ -742,6 +756,7 @@ async def test_mcp_servers_and_skills_are_offered_to_the_model(tmp_path: Path) -
 
     backends = replace(FakeBackends(llm).build(), mcp=hub, skills=skills)
     ui = RecordingUi()
+    dashboard = RecordingDashboard()
     await run_assistant(
         Config(),
         api_key=SecretStr("k"),
@@ -751,7 +766,12 @@ async def test_mcp_servers_and_skills_are_offered_to_the_model(tmp_path: Path) -
         backends=backends,
         voice_input=False,
         voice_output=False,
+        dashboard=dashboard,
     )
+    shown = {link.key: (link.state, link.detail) for link in dashboard.link_updates[0]}
+    assert shown["mcp:notes"] == ("ok", "1 tool")
+    assert shown["skills"] == ("ok", "1 added")
+    assert shown["speech"][0] == shown["voice"][0] == "off"
     assert started == ["notes"]
     prompt = llm.calls[0][1]
     assert "use the tools of notes, connected through MCP" in prompt
@@ -813,3 +833,93 @@ def test_run_passes_stored_spotify_credentials(
     assert keys.login.get_secret_value() == "r" * 40
     keys.save_login("s" * 40)  # Spotify renewed it: the keychain keeps the new one
     assert fake_keyring.store[(KEYRING_SERVICE, "spotify-login")] == "s" * 40
+
+
+class ReportingLLM(FakeLLM):
+    """A fake Claude that reports its usage, like the real client."""
+
+    reporter: Reporter | None = None
+
+    def report_to(self, reporter: Reporter) -> None:
+        self.reporter = reporter
+
+    async def stream(self, *args: Any, **kwargs: Any) -> AsyncGenerator[str | ToolCall | WebSearch]:
+        async for event in super().stream(*args, **kwargs):
+            yield event
+        assert self.reporter is not None
+        self.reporter.claude(ClaudeUsage("claude-haiku-5-5", input_tokens=2_000, output_tokens=20))
+        self.reporter.health("claude", "ok", "haiku-5-5")
+
+
+async def test_usage_is_counted_and_kept_whatever_the_interface(tmp_path: Path) -> None:
+    llm = ReportingLLM(["Hi."], ["Hello again."])
+    book = UsageBook(tmp_path / "usage.json")
+    backends = replace(FakeBackends(llm).build(), usage=lambda: book)
+    await run_assistant(
+        Config(),
+        api_key=SecretStr("k"),
+        cache_dir=tmp_path,
+        lines=lines("hi", "and again", "q"),
+        ui=RecordingUi(),
+        backends=backends,
+        voice_input=False,
+        voice_output=False,
+    )
+    assert llm.reporter is not None
+    (day,) = book.days().values()
+    assert (day.turns, day.requests, day.input_tokens) == (2, 2, 4_000)
+    assert day.latencies_ms == ()  # typed, and nothing spoken
+    assert day.claude_usd == pytest.approx(2 * (2_000 * 0.10 + 20 * 0.50) / 1e6)
+
+
+async def test_the_dashboard_shows_timers_and_the_weather(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from yarvis import runtime  # noqa: PLC0415
+    from yarvis.tools.weather import Outlook, Weather  # noqa: PLC0415
+
+    watched: list[str | None] = []
+
+    async def fake_watch(weather: Weather, show: Callable[[Outlook], None]) -> None:
+        watched.append(weather.home)
+        show(Outlook("Leuven, Belgium", 9.0, 7.0, "overcast", 14.0, None, None))
+
+    monkeypatch.setattr(runtime, "watch_weather", fake_watch)
+    llm = FakeLLM([ToolCall("t1", "set_timer", {"minutes": 10, "label": "pasta"})], ["Set."])
+    dashboard = RecordingDashboard()
+    config = Config.model_validate({"assistant": {"location": "Leuven"}})
+    await run_assistant(
+        config,
+        api_key=SecretStr("k"),
+        cache_dir=tmp_path,
+        lines=lines("pasta timer", "q"),
+        ui=RecordingUi(),
+        backends=FakeBackends(llm).build(),
+        voice_input=False,
+        voice_output=False,
+        dashboard=dashboard,
+    )
+    assert watched == ["Leuven"]
+    assert [outlook.place for outlook in dashboard.outlooks] == ["Leuven, Belgium"]
+    assert dashboard.timer_updates[0] == ["pasta"]
+    assert dashboard.timer_updates[-1] == []  # closed when Yarvis stops
+
+
+async def test_no_home_no_weather_watch(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from yarvis import runtime  # noqa: PLC0415
+
+    def never(*args: object) -> None:
+        raise AssertionError
+
+    monkeypatch.setattr(runtime, "watch_weather", never)
+    await run_assistant(
+        Config(),
+        api_key=SecretStr("k"),
+        cache_dir=tmp_path,
+        lines=lines("hi", "q"),
+        ui=RecordingUi(),
+        backends=FakeBackends(FakeLLM(["Hi."])).build(),
+        voice_input=False,
+        voice_output=False,
+        dashboard=RecordingDashboard(),
+    )

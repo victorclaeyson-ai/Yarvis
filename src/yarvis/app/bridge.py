@@ -9,7 +9,8 @@ Threads involved:
   reply fragments costs one JavaScript call instead of dozens.
 
 Security: everything sent to the page is JSON data (never HTML or code), and the page
-only ever inserts it with ``textContent``. The JavaScript API is four small methods
+only ever inserts it with ``textContent``; the dashboard gets numbers, and connection
+details already scrubbed of secrets (``telemetry.Link``). The JavaScript API is four small methods
 with validated arguments (``hello``, ``talk``, ``stop``, ``send``).
 """
 
@@ -21,16 +22,22 @@ import threading
 from typing import TYPE_CHECKING, Any, Final, Protocol
 
 from yarvis.cli.ui import format_timings
+from yarvis.telemetry import RECENT_TURNS
+from yarvis.usage import PRICES_AS_OF, percentile
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator, Callable, Mapping
+    from collections.abc import AsyncIterator, Callable, Sequence
 
     from yarvis.assistant import AssistantControls
     from yarvis.pipeline import TurnResult
+    from yarvis.telemetry import Link, UsageUpdate
+    from yarvis.tools.timers import Alarm
+    from yarvis.tools.weather import Day, Outlook
 
 Event = dict[str, Any]
 
 MAX_MESSAGE_CHARS: Final = 2_000
+MAX_LABEL_CHARS: Final = 60
 LEVEL_EVERY_N_FRAMES: Final = 2  # ~15 updates per second is plenty for an animation
 
 
@@ -66,17 +73,30 @@ class AppApi:
         *,
         name: str,
         voice: bool,
-        details: Mapping[str, str] | None = None,
+        user: str | None = None,
+        place: str | None = None,
+        asks: bool = True,
     ) -> None:
         self._commands = commands
         self._controls = controls
         self._name = name
         self._voice = voice
-        self._details = dict(details or {})
+        self._user = user
+        self._place = place
+        self._asks = asks
 
     def hello(self) -> Event:
-        """Initial information for the page (name, input mode, models in use)."""
-        return {"name": self._name, "voice": self._voice, "details": self._details}
+        """What the page shows from the start: names, the input mode, the gate's setting.
+
+        Everything else (the connections, the numbers, timers, weather) arrives as events.
+        """
+        return {
+            "name": self._name,
+            "voice": self._voice,
+            "user": self._user,
+            "place": self._place,
+            "asks": self._asks,
+        }
 
     def talk(self) -> None:
         """Start listening (ignored in text-only mode)."""
@@ -168,7 +188,7 @@ def script_for(events: list[Event]) -> str:
 
 
 class AppUi:
-    """``AssistantUi`` that turns every update into an event for the page."""
+    """``AssistantUi`` and ``Dashboard`` that turn every update into an event for the page."""
 
     def __init__(self, emit: Callable[[Event], None]) -> None:
         self._emit = emit
@@ -251,3 +271,84 @@ class AppUi:
     def interrupted(self) -> None:
         """The user talked over the reply."""
         self._emit({"type": "interrupted"})
+
+    def links(self, links: Sequence[Link]) -> None:
+        """The state of every connection."""
+        self._emit(
+            {
+                "type": "links",
+                "links": [
+                    {"key": c.key, "label": c.label, "state": c.state, "detail": c.detail}
+                    for c in links
+                ],
+            }
+        )
+
+    def usage(self, update: UsageUpdate) -> None:
+        """Today's cost and speed (and the cost of the turn that just ended)."""
+        day = update.today
+        latencies = day.latencies_ms
+        self._emit(
+            {
+                "type": "usage",
+                "turn_usd": update.turn_usd,
+                "as_of": PRICES_AS_OF,
+                "today": {
+                    "turns": day.turns,
+                    "requests": day.requests,
+                    "input_tokens": day.input_tokens,
+                    "output_tokens": day.output_tokens,
+                    "web_searches": day.web_searches,
+                    "speech_seconds": round(day.speech_seconds, 1),
+                    "claude_usd": day.claude_usd,
+                    "search_usd": day.search_usd,
+                    "speech_usd": day.speech_usd,
+                    "total_usd": day.total_usd,
+                    "unpriced": day.unpriced,
+                    "p50_ms": percentile(latencies, 0.5),
+                    "p90_ms": percentile(latencies, 0.9),
+                    "recent_ms": list(latencies[-RECENT_TURNS:]),
+                },
+            }
+        )
+
+    def timers(self, alarms: Sequence[Alarm]) -> None:
+        """The running timers and reminders; the page counts down from ``due_ms``."""
+        self._emit(
+            {
+                "type": "timers",
+                "timers": [
+                    {
+                        "id": alarm.id,
+                        "kind": alarm.kind,
+                        "label": alarm.label[:MAX_LABEL_CHARS],
+                        "due_ms": round(alarm.due.timestamp() * 1000),
+                        "seconds": alarm.seconds,
+                    }
+                    for alarm in alarms
+                ],
+            }
+        )
+
+    def weather(self, outlook: Outlook) -> None:
+        """The weather at home (refreshed twice an hour)."""
+        self._emit(
+            {
+                "type": "weather",
+                "weather": {
+                    "place": outlook.place[:MAX_LABEL_CHARS],
+                    "temperature": outlook.temperature,
+                    "feels_like": outlook.feels_like,
+                    "condition": outlook.condition,
+                    "wind_kmh": outlook.wind_kmh,
+                    "today": _day(outlook.today),
+                    "tomorrow": _day(outlook.tomorrow),
+                },
+            }
+        )
+
+
+def _day(day: Day | None) -> Event | None:
+    if day is None:
+        return None
+    return {"condition": day.condition, "low": day.low, "high": day.high, "rain": day.rain_chance}

@@ -22,6 +22,7 @@ from yarvis.cli.extensions import mcp_app, skills_app
 from yarvis.cli.profile import profile_app
 from yarvis.cli.services import Services, fail, load_config_or_exit, services_of
 from yarvis.cli.ui import ConsoleUi
+from yarvis.cli.usage import usage_app
 from yarvis.config import Config, ConfigError, load_config, write_default_config
 from yarvis.doctor import CheckResult, DoctorContext, Status, has_failures, run_doctor
 from yarvis.log import configure_logging
@@ -80,6 +81,7 @@ app.add_typer(spotify_app, name="spotify")
 app.add_typer(mcp_app, name="mcp")
 app.add_typer(skills_app, name="skills")
 app.add_typer(profile_app, name="profile")
+app.add_typer(usage_app, name="usage")
 
 
 def _version_callback(value: bool) -> None:

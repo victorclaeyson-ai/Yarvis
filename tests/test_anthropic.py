@@ -8,6 +8,7 @@ import httpx2
 import pytest
 from pydantic import SecretStr
 
+from fakes import RecordingReporter
 from yarvis.llm.anthropic import (
     DEFAULT_MODEL,
     AnthropicProvider,
@@ -15,6 +16,7 @@ from yarvis.llm.anthropic import (
 )
 from yarvis.llm.anthropic import _explain as explain  # pyright: ignore[reportPrivateUsage]
 from yarvis.llm.base import LLMError, Message, ToolCall, ToolResult, ToolSpec, WebSearch
+from yarvis.usage import ClaudeUsage
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -478,3 +480,106 @@ async def test_a_search_before_a_tool_call_is_sent_back_exactly() -> None:
     for n in range(20):  # only recent turns are kept
         p._keep(f"id{n}", [])  # pyright: ignore[reportPrivateUsage]
     assert "toolu_9" not in p._turns  # pyright: ignore[reportPrivateUsage]
+
+
+# --------------------------------------------------------------------------- usage reports
+
+
+def reporting(
+    handler: Callable[[httpx2.Request], httpx2.Response],
+) -> tuple[AnthropicProvider, RecordingReporter]:
+    p = provider(handler)
+    reporter = RecordingReporter()
+    p.report_to(reporter)
+    return p, reporter
+
+
+async def test_each_request_reports_its_usage_and_that_claude_answers() -> None:
+    handler, _ = streaming(text_stream("Hello."))
+    p, reporter = reporting(handler)
+    assert await collect(p, [Message("user", "Hi")]) == "Hello."
+    assert reporter.claude_calls == [ClaudeUsage(DEFAULT_MODEL, input_tokens=12, output_tokens=5)]
+    assert reporter.health_calls == [("claude", "ok", DEFAULT_MODEL.removeprefix("claude-"))]
+
+
+async def test_searches_and_cached_tokens_are_counted() -> None:
+    start = message_start()
+    start["message"]["usage"] |= {"cache_creation_input_tokens": 100, "cache_read_input_tokens": 50}
+    finish = {
+        "type": "message_delta",
+        "delta": {"stop_reason": "end_turn", "stop_sequence": None},
+        "usage": {"output_tokens": 30, "server_tool_use": {"web_search_requests": 1}},
+    }
+    body = sse(
+        start,
+        *search_blocks(0, "Club Brugge score"),
+        *text_block(2, "They won."),
+        finish,
+        {"type": "message_stop"},
+    )
+    handler, _ = streaming(body)
+    p, reporter = reporting(handler)
+    p.web_search = True
+    _ = [
+        e async for e in p.stream([Message("user", "x")], system="S", max_tokens=50, tools=[TIMER])
+    ]
+    (usage,) = reporter.claude_calls
+    assert (usage.cache_write_tokens, usage.cache_read_tokens) == (100, 50)
+    assert usage.output_tokens == 30
+    assert usage.web_searches == 1
+
+
+async def test_a_reply_cut_off_is_still_counted() -> None:
+    """A draft dropped mid-stream was billed for what it read and wrote so far."""
+    body = sse(
+        message_start(),
+        *search_blocks(0, "news", with_result=False),
+        *text_block(1, "A long answer that the user never hears in full"),
+        *text_block(2, "and more."),
+        *end("end_turn"),
+    )
+    handler, _ = streaming(body)
+    p, reporter = reporting(handler)
+    p.web_search = True
+    stream = p.stream([Message("user", "x")], system="S", max_tokens=50, tools=[TIMER])
+    assert isinstance(await anext(stream), WebSearch)
+    assert isinstance(await anext(stream), str)
+    await stream.aclose()
+    (usage,) = reporter.claude_calls
+    assert usage.input_tokens == 12
+    assert usage.output_tokens == 12  # 47 characters received, about 4 per token
+    assert usage.web_searches == 1  # seen, though the final counts never came
+    assert reporter.health_calls == []
+
+
+async def test_a_failure_marks_claude_as_down_and_counts_nothing() -> None:
+    def handler(request: httpx2.Request) -> httpx2.Response:
+        body = {"type": "error", "error": {"type": "authentication_error", "message": "no"}}
+        return httpx2.Response(401, json=body)
+
+    p, reporter = reporting(handler)
+    with pytest.raises(LLMError):
+        await collect(p, [Message("user", "Hi")])
+    assert reporter.claude_calls == []
+    assert reporter.health_calls == [
+        (
+            "claude",
+            "error",
+            "Claude rejected the API key. Store a valid one with: yarvis key set anthropic",
+        )
+    ]
+
+
+async def test_without_a_reporter_nothing_is_counted() -> None:
+    handler, _ = streaming(text_stream("Hello."))
+    assert await collect(provider(handler), [Message("user", "Hi")]) == "Hello."
+
+
+async def test_a_stream_that_fails_before_it_starts_counts_nothing() -> None:
+    overloaded = {"type": "error", "error": {"type": "overloaded_error", "message": "busy"}}
+    handler, _ = streaming(sse(overloaded))
+    p, reporter = reporting(handler)
+    with pytest.raises(LLMError):
+        await collect(p, [Message("user", "Hi")])
+    assert reporter.claude_calls == []
+    assert reporter.health_calls[0][:2] == ("claude", "error")

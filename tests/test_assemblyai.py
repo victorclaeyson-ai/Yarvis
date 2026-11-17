@@ -17,7 +17,7 @@ from websockets.asyncio.server import serve
 from websockets.exceptions import ConnectionClosed
 from websockets.frames import Close
 
-from fakes import ASSEMBLYAI_KEY, FakeSTT
+from fakes import ASSEMBLYAI_KEY, FakeSTT, RecordingReporter
 from test_speech_engines import frames, speech_clip
 from yarvis.listen import AudioTap, PauseHooks, listen
 from yarvis.speech import assemblyai
@@ -133,6 +133,8 @@ class FakeConnection:
         self.order: list[str] = []
         self.closed = False
         self.send_termination = True
+        self.billed: float | None = None
+        """The session length the server reports when it terminates (None: none)."""
         self.answer_while_sending = False
         self.broken: Exception | None = None
         self.inbox: asyncio.Queue[str | bytes | None] = asyncio.Queue()
@@ -159,7 +161,10 @@ class FakeConnection:
                 for _ in range(5):
                     await asyncio.sleep(0)
         elif control == TERMINATE and self.send_termination:
-            self.inbox.put_nowait(json.dumps({"type": "Termination"}))
+            termination: dict[str, Any] = {"type": "Termination"}
+            if self.billed is not None:
+                termination["session_duration_seconds"] = self.billed
+            self.inbox.put_nowait(json.dumps(termination))
 
     def say(self, message: str) -> None:
         self.inbox.put_nowait(message)
@@ -670,6 +675,85 @@ async def test_the_backlog_is_paced() -> None:
     assert service.last.sent_bytes == len(backlog) * 2
     assert waits  # not all at once
     assert now[0] == pytest.approx((len(backlog) / 16_000 - 1.0) / 2.0, abs=0.05)
+
+
+# --------------------------------------------------------------------------- reports
+
+
+def reported(stt: AssemblyAISTT) -> RecordingReporter:
+    reporter = RecordingReporter()
+    stt.report_to(reporter)
+    return reporter
+
+
+async def test_each_session_reports_its_billed_length() -> None:
+    service = FakeService(["Lights off."])
+    stt = make_stt(service)
+    reporter = reported(stt)
+    chunks = tone(20)
+    await stream_utterance(stt, chunks)
+    service.last.billed = 2.4
+    audio = joined(chunks)
+    stt.end(audio)
+    assert await stt.transcribe(audio) == "Lights off."
+    await settle()
+    assert reporter.speech_calls == [(MODEL, 2.4)]
+    assert reporter.health_calls == [("speech", "ok", "AssemblyAI, EU servers")]
+
+
+async def test_without_a_billed_length_the_measured_one_counts() -> None:
+    now = [100.0]
+    service = FakeService(["Hi."])
+    stt = make_stt(service, clock=lambda: now[0])
+    reporter = reported(stt)
+    chunks = tone(20)
+    await stream_utterance(stt, chunks)
+    now[0] += 3.0
+    audio = joined(chunks)
+    stt.end(audio)
+    await stt.transcribe(audio)
+    await settle()
+    assert reporter.speech_calls == [(MODEL, 3.0)]
+
+
+async def test_a_session_that_never_connected_costs_nothing() -> None:
+    service = FakeService(fail_connect=CloudSttError("could not connect (OSError)"))
+    stt = make_stt(service)
+    reporter = reported(stt)
+    chunks = tone(20)
+    await stream_utterance(stt, chunks)
+    stt.end(joined(chunks))
+    assert await stt.transcribe(joined(chunks)) == "from this computer"
+    await settle()
+    assert reporter.speech_calls == []
+    ((key, state, detail),) = reporter.health_calls
+    assert (key, state) == ("speech", "warn")
+    assert "this computer took over" in detail
+
+
+async def test_a_refused_key_shows_as_an_error() -> None:
+    service = FakeService(greeting=[error(1008, "Unauthorized Connection: Invalid API key")])
+    stt = make_stt(service)
+    reporter = reported(stt)
+    chunks = tone(20)
+    await stream_utterance(stt, chunks)
+    service.last.drop()
+    await settle()
+    await stt.transcribe(joined(chunks))
+    assert reporter.health_calls[-1][:2] == ("speech", "error")
+    assert "refused the key" in reporter.health_calls[-1][2]
+
+
+async def test_sending_too_fast_shows_as_a_warning() -> None:
+    service = FakeService(greeting=[error(3007, "Audio Transmission Rate Exceeded: 5 s in 1 s")])
+    stt = make_stt(service)
+    reporter = reported(stt)
+    chunks = tone(20)
+    await stream_utterance(stt, chunks)
+    service.last.drop()
+    await settle()
+    await stt.transcribe(joined(chunks))
+    assert reporter.health_calls[-1][:2] == ("speech", "warn")
 
 
 # --------------------------------------------------------------------------- a real socket

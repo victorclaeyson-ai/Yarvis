@@ -147,3 +147,25 @@ def test_timer_arguments_are_validated() -> None:
     spec = set_timer.spec()
     assert spec.name == "set_timer"
     assert set(spec.input_schema["properties"]) == {"minutes", "label"}
+
+
+async def test_the_dashboard_hears_of_every_change() -> None:
+    time = FakeTime()
+    seen: list[list[str]] = []
+    said: list[str] = []
+    service = Alarms(
+        said.append,
+        now=time,
+        sleep=time.sleep,
+        on_change=lambda active: seen.append([alarm.label for alarm in active]),
+    )
+    pasta = service.start_timer(90, "pasta")
+    service.remind(START + timedelta(minutes=1), "call back")
+    assert seen == [["pasta"], ["call back", "pasta"]]
+    service.cancel(pasta.id)
+    assert seen[-1] == ["call back"]
+    await settle()  # the reminder goes off
+    assert seen[-1] == []
+    service.start_timer(60)
+    service.close()
+    assert seen[-1] == []

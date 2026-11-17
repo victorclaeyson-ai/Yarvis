@@ -7,7 +7,7 @@ from typing import TYPE_CHECKING
 
 import pytest
 
-from fakes import FakeLLM
+from fakes import FakeLLM, symlink_or_skip
 from test_agent_tools import Send, call, make_conversation, reply
 from yarvis.agent.toolbox import Toolbox
 from yarvis.llm.base import ToolCall
@@ -73,7 +73,7 @@ def test_links_binaries_and_large_files_are_skipped(tmp_path: Path) -> None:
     folder = make_skill(tmp_path)
     secret = tmp_path / "id_rsa.txt"
     secret.write_text("PRIVATE KEY")
-    (folder / "references" / "key.md").symlink_to(secret)
+    symlink_or_skip(folder / "references" / "key.md", secret)
     (folder / "references" / "latin1.md").write_bytes("caf\xe9".encode("latin-1"))
     (folder / "references" / "big.md").write_text("x" * (skills_module.MAX_FILE_BYTES + 1))
     assert read_skill(folder).files == ("notes.txt", "references/style.md")

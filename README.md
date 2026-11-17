@@ -15,7 +15,8 @@ Your own Jarvis — except it lives on your machine, like a yeti lives off the g
 
 - **Feels instant** — Yarvis starts transcribing and asking Claude *during your pauses*,
   speaks from the first comma, and keeps every engine warm
-  ([how it works](docs/adr/0005-speculative-turn-taking.md)).
+  ([how it works](docs/adr/0005-speculative-turn-taking.md)). It measures itself: every
+  reply's time to the first word, and what it cost, on the dashboard and in `yarvis usage`.
 - **Talk like you would to a person** — say "Hey Yarvis" and it greets you; keep talking
   and the conversation stays open; talk over it to interrupt (or say "Hey Yarvis" again on
   speakers); say "thanks" when you're done
@@ -53,6 +54,7 @@ Read the full [design document](docs/DESIGN.md).
 | 0 | Foundations: tooling, CI, config, secrets, event bus, `yarvis doctor` | ✅ done |
 | 1 | Voice loop: wake word, streaming STT, Claude, streaming TTS, barge-in | ✅ done |
 | 2 | Tools and the security core: permission gate, MCP, skills | ✅ done |
+| 2.5 | Polish and reach: the HUD dashboard with cost and speed (done), one-line install, routines, demo | in progress |
 | 3 | Memory and fully offline mode | planned |
 | 4 | ESP32 desk satellite | planned |
 | 5 | v1.0 launch | planned |
@@ -121,6 +123,17 @@ an email back to me before sending it"). Yarvis knows it at every question, and 
 counts from your next one ([how it works](docs/adr/0014-about-me-profile.md)). It is sent to
 Claude with your requests, so keep it to about a page and never put keys in it;
 `yarvis profile show` prints exactly what is sent.
+
+**The dashboard.** The window is a heads-up display: Yarvis's core in the middle, your
+conversation under it, and around it every connection (Claude, speech recognition, Spotify,
+your MCP servers…) with what each one uses or what to run to fix it, the microphone, the
+permission gate, the weather at home, your timers, and what today cost and how fast Yarvis
+answered (time to the first word, the median, a chart of the latest turns; Claude, web
+searches and AssemblyAI at list prices). Make the window narrow and it turns into a compact
+one, with the connections behind a button. `yarvis usage` shows the last days; only numbers
+are kept, never what was said, and `yarvis usage clear` deletes them. With a `location` in
+the config, the dashboard asks Open-Meteo for that town's weather twice an hour
+([how it works](docs/adr/0015-dashboard-cost-and-speed.md)).
 
 **Add abilities: MCP servers.** Any [MCP](https://modelcontextprotocol.io) server can give
 Yarvis new tools, but only the ones you list, each with a tier: 0 runs freely (read only),

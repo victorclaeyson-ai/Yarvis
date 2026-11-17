@@ -2,11 +2,11 @@ from __future__ import annotations
 
 import io
 import logging
-import stat
 from typing import TYPE_CHECKING
 
 from rich.console import Console
 
+from fakes import posix_mode
 from yarvis.log import LOG_FILE_NAME, configure_logging
 
 if TYPE_CHECKING:
@@ -32,7 +32,7 @@ def test_logs_are_redacted_everywhere(tmp_path: Path, redactor: Redactor) -> Non
     assert "my-very-secret-key" not in screen.getvalue()
     assert "[REDACTED]" in screen.getvalue()
     assert "my-very-secret-key" not in log_file.read_text()
-    assert stat.S_IMODE(log_file.stat().st_mode) == 0o600
+    assert posix_mode(log_file) in {0o600, None}
 
 
 def ours() -> list[logging.Handler]:

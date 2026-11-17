@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import sys
 from typing import TYPE_CHECKING
 
 import pytest
@@ -19,6 +20,7 @@ from yarvis.tools.computer import (
     SetVolume,
     UrlArgs,
     VolumeArgs,
+    environment,
     run_command,
     safe_url,
     short_url,
@@ -178,15 +180,19 @@ def test_tools_per_platform(apps: Apps, monkeypatch: pytest.MonkeyPatch) -> None
     assert computer_tools(FakeRunner(), platform="freebsd") == []
 
 
+SHOW_ENV = "import os; print(chr(10).join(k + '=' + v for k, v in os.environ.items()))"
+ECHO = "import sys; print(sys.argv[1])"
+
+
 async def test_commands_run_without_a_shell_or_secrets(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-secret")  # gitleaks:allow
-    code, output = await run_command(["/usr/bin/env"])
+    code, output = await run_command([sys.executable, "-c", SHOW_ENV])
     assert code == 0
-    assert "PATH=/usr/bin:/bin" in output
+    assert f"PATH={environment()['PATH']}" in output
     assert "sk-ant-secret" not in output
-    assert await run_command(["/bin/echo", "$(whoami)"]) == (0, "$(whoami)")
+    assert await run_command([sys.executable, "-c", ECHO, "$(whoami)"]) == (0, "$(whoami)")
 
 
 async def test_commands_time_out() -> None:
     with pytest.raises(TimeoutError):
-        await run_command(["/bin/sleep", "5"], timeout_s=0.1)
+        await run_command([sys.executable, "-c", "import time; time.sleep(5)"], timeout_s=0.1)

@@ -3,18 +3,23 @@ from __future__ import annotations
 import json
 import re
 import threading
+from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Any
 
 import pytest
 
-from fakes import ASSEMBLYAI_KEY, VALID_KEY, FakeKeyring, Invoke
+from fakes import VALID_KEY, FakeKeyring, Invoke
 from test_runtime_and_run import install_models
 from yarvis.app.bridge import AppApi, AppUi, CommandQueue, EventPump, script_for
-from yarvis.app.window import AppError, index_html, uses_cloud_stt
+from yarvis.app.window import AppError, index_html
 from yarvis.assistant import AssistantControls
-from yarvis.config import Config
 from yarvis.pipeline import TurnResult, TurnTimings
-from yarvis.security.secrets import KEYRING_SERVICE, SecretName, SecretStore
+from yarvis.security.secrets import KEYRING_SERVICE
+from yarvis.telemetry import Link, UsageUpdate
+from yarvis.tools.timers import Alarm
+from yarvis.tools.weather import Day as WeatherDay
+from yarvis.tools.weather import Outlook
+from yarvis.usage import PRICES_AS_OF, Day
 
 if TYPE_CHECKING:
     from yarvis.cli.services import Services
@@ -108,19 +113,111 @@ def test_app_ui_events() -> None:
     json.dumps(events)  # everything must be JSON-serialisable
 
 
+def test_dashboard_events_carry_data_only() -> None:
+    events: list[dict[str, Any]] = []
+    ui = AppUi(events.append)
+    ui.links([Link("claude", "Claude", "ok", "haiku-5-5"), Link("wake", "Wake word", "off")])
+    day = Day(
+        turns=3, claude_usd=0.002, speech_usd=0.001, latencies_ms=tuple(range(100, 3100, 100))
+    )
+    ui.usage(UsageUpdate(today=day, turn_usd=0.0007))
+    ui.usage(UsageUpdate(today=Day()))
+    links, usage, empty = events
+    assert links == {
+        "type": "links",
+        "links": [
+            {"key": "claude", "label": "Claude", "state": "ok", "detail": "haiku-5-5"},
+            {"key": "wake", "label": "Wake word", "state": "off", "detail": ""},
+        ],
+    }
+    assert usage["turn_usd"] == 0.0007
+    assert usage["as_of"] == PRICES_AS_OF
+    today = usage["today"]
+    assert today["turns"] == 3
+    assert today["total_usd"] == pytest.approx(0.003)
+    assert (today["p50_ms"], today["p90_ms"]) == (1500, 2700)
+    assert today["recent_ms"] == list(range(700, 3100, 100))  # the last 24
+    assert empty["turn_usd"] is None
+    assert empty["today"]["p50_ms"] is None
+    assert empty["today"]["recent_ms"] == []
+    json.dumps(events)
+
+
+def test_timers_and_weather_events() -> None:
+    events: list[dict[str, Any]] = []
+    ui = AppUi(events.append)
+    due = datetime(2026, 11, 17, 14, 0, tzinfo=UTC)
+    ui.timers(
+        [
+            Alarm(1, "timer", "pasta " * 20, due, 600.0),
+            Alarm(2, "reminder", "call back", due + timedelta(hours=4)),
+        ]
+    )
+    ui.weather(
+        Outlook(
+            place="Leuven, Belgium",
+            temperature=9.3,
+            feels_like=6.8,
+            condition="overcast",
+            wind_kmh=14.2,
+            today=WeatherDay("light rain", 4.1, 10.2, 40.0),
+            tomorrow=None,
+        )
+    )
+    timers, weather = events
+    first, second = timers["timers"]
+    assert first == {
+        "id": 1,
+        "kind": "timer",
+        "label": ("pasta " * 20)[:60],
+        "due_ms": round(due.timestamp() * 1000),
+        "seconds": 600.0,
+    }
+    assert second["kind"] == "reminder"
+    assert second["seconds"] is None
+    assert weather["weather"]["today"] == {
+        "condition": "light rain",
+        "low": 4.1,
+        "high": 10.2,
+        "rain": 40.0,
+    }
+    assert weather["weather"]["tomorrow"] is None
+    json.dumps(events)
+
+
+def test_page_handles_the_dashboard_events() -> None:
+    html = index_html()
+    for handler in ("links(e)", "usage(e)", "timers(e)", "weather(e)"):
+        assert handler in html
+    for element in ('id="links"', 'id="panel"', 'id="spark"', 'id="cost"', 'id="linklist"'):
+        assert element in html
+
+
 # --------------------------------------------------------------------------- commands from the page
 
 
 async def test_api_validates_input_and_queues_commands() -> None:
     commands = CommandQueue()
-    api = AppApi(
+    api = AppApi(commands, AssistantControls(), name="Yarvis", voice=True)
+    assert api.hello() == {
+        "name": "Yarvis",
+        "voice": True,
+        "user": None,
+        "place": None,
+        "asks": True,
+    }
+    told = AppApi(
         commands,
         AssistantControls(),
-        name="Yarvis",
-        voice=True,
-        details={"llm": "claude-haiku-5-5"},
+        name="Y",
+        voice=False,
+        user="Victor",
+        place="Leuven",
+        asks=False,
     )
-    assert api.hello() == {"name": "Yarvis", "voice": True, "details": {"llm": "claude-haiku-5-5"}}
+    assert told.hello() == {
+        "name": "Y", "voice": False, "user": "Victor", "place": "Leuven", "asks": False,
+    }  # fmt: skip
     api.talk()
     api.send("  hello \n  there ")
     api.send(42)
@@ -254,11 +351,3 @@ def test_app_command_reports_gui_failures(
 
 def test_app_command_needs_a_key(invoke: Invoke) -> None:
     assert invoke("app").exit_code == 1
-
-
-def test_the_window_says_when_assemblyai_hears(fake_keyring: FakeKeyring) -> None:
-    secrets = SecretStore(backend=fake_keyring, environ={})
-    assert not uses_cloud_stt(Config(), secrets)
-    secrets.set(SecretName.ASSEMBLYAI, ASSEMBLYAI_KEY)
-    assert uses_cloud_stt(Config(), secrets)
-    assert not uses_cloud_stt(Config.model_validate({"voice": {"cloud_stt": False}}), secrets)

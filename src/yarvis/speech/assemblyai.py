@@ -12,7 +12,7 @@ until the end of your turn. The wake word is detected on this computer, so nothi
 while Yarvis waits for it, and nothing is sent while Yarvis talks. By default the EU
 servers are used (``voice.cloud_region``): AssemblyAI keeps their data in the EU and does
 not train on it. Each session is closed right after your turn (they are billed by the
-second).
+second); its length is reported to the dashboard, which shows what it cost.
 
 Reliability: if anything goes wrong (no internet, a refused key, no answer in time), that
 turn is transcribed on this computer instead, from the same audio. A refused key turns
@@ -35,6 +35,7 @@ from pydantic import BaseModel, ConfigDict, ValidationError
 from websockets.exceptions import ConnectionClosed, InvalidStatus, WebSocketException
 
 from yarvis.speech.base import MIC_SAMPLE_RATE
+from yarvis.telemetry import SPEECH, cloud_hearing
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable, Iterable, Mapping
@@ -43,6 +44,7 @@ if TYPE_CHECKING:
 
     from yarvis.runtime import LoadableSTT
     from yarvis.speech.base import AudioArray
+    from yarvis.telemetry import Reporter
 
 logger = logging.getLogger(__name__)
 
@@ -208,6 +210,8 @@ class _Message(BaseModel):
     error_code: int | None = None
     error: str = ""
     configuration: _Configuration | None = None
+    session_duration_seconds: float | None = None
+    """In ``Termination``: the length of the session, as AssemblyAI bills it."""
 
 
 def _parse(raw: str) -> _Message | None:
@@ -265,9 +269,13 @@ class LiveStream:
         pace: Pace,
         clock: Callable[[], float] = time.monotonic,
         sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
+        on_closed: Callable[[float], None] | None = None,
     ) -> None:
         self._connect = connect
         self._pace = pace
+        self._on_closed = on_closed
+        self._billed: float | None = None
+        """The session's length according to AssemblyAI (its ``Termination`` message)."""
         self._clock = clock
         self._sleep = sleep
         self._frames: list[AudioArray] = []
@@ -374,6 +382,7 @@ class LiveStream:
 
     async def _run(self) -> None:
         connection: Connection | None = None
+        opened = self._clock()
         try:
             async with asyncio.timeout(MAX_SESSION_S):
                 connection = await self._open()
@@ -394,6 +403,12 @@ class LiveStream:
             if connection is not None:
                 with contextlib.suppress(Exception):
                     await connection.close()
+                self._closed(self._clock() - opened)
+
+    def _closed(self, measured_s: float) -> None:
+        """Report how long the session was open (billed by the second)."""
+        if self._on_closed is not None:
+            self._on_closed(self._billed if self._billed is not None else measured_s)
 
     async def _open(self) -> Connection:
         started = self._clock()
@@ -483,6 +498,7 @@ class LiveStream:
             case "Error":
                 self._error = _server_error(message)
             case "Termination":
+                self._billed = message.session_duration_seconds
                 return True
             case _:
                 pass
@@ -548,6 +564,11 @@ class AssemblyAISTT:
         self._pace = pace
         self._stream: LiveStream | None = None
         self._enabled = True
+        self._reporter: Reporter | None = None
+
+    def report_to(self, reporter: Reporter) -> None:
+        """Report each session's length, and how AssemblyAI is doing, to ``reporter``."""
+        self._reporter = reporter
 
     @property
     def backup(self) -> LoadableSTT:
@@ -570,7 +591,11 @@ class AssemblyAISTT:
         self._stream = None
         if self._enabled:
             self._stream = LiveStream(
-                self._connect, pace=self._pace, clock=self._clock, sleep=self._sleep
+                self._connect,
+                pace=self._pace,
+                clock=self._clock,
+                sleep=self._sleep,
+                on_closed=self._session_closed,
             )
             self._stream.feed(audio)
 
@@ -599,17 +624,31 @@ class AssemblyAISTT:
                     "assemblyai",
                     exc,
                 )
+                self._health(
+                    "error", "AssemblyAI refused the key: this computer listens until restart"
+                )
             except TooFastError as exc:
                 self._pace = CAREFUL_PACE
                 logger.warning("AssemblyAI: %s. Sending audio more slowly from now on.", exc)
+                self._health("warn", f"AssemblyAI missed a turn ({exc}): this computer took over")
             except CloudSttError as exc:
                 logger.warning(
                     "AssemblyAI could not transcribe this (%s): using this computer", exc
                 )
+                self._health("warn", f"AssemblyAI missed a turn ({exc}): this computer took over")
             else:
                 logger.info("AssemblyAI transcript after %d ms", (self._clock() - started) * 1000)
+                self._health("ok", cloud_hearing(self.region))
                 return text
         return await self._backup.transcribe(audio)
+
+    def _session_closed(self, seconds: float) -> None:
+        if self._reporter is not None:
+            self._reporter.speech(MODEL, seconds)
+
+    def _health(self, state: Literal["ok", "warn", "error"], detail: str) -> None:
+        if self._reporter is not None:
+            self._reporter.health(SPEECH, state, detail)
 
     def _connect(self) -> Awaitable[Connection]:
         headers = {

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from datetime import date
 from typing import Any
 
@@ -9,7 +10,15 @@ import httpx2
 import pytest
 
 from yarvis.tools.base import Tier, ToolError
-from yarvis.tools.weather import FORECAST_URL, GEOCODING_URL, Weather, WeatherArgs
+from yarvis.tools.weather import (
+    DASHBOARD_EVERY_S,
+    FORECAST_URL,
+    GEOCODING_URL,
+    Day,
+    Weather,
+    WeatherArgs,
+    watch_weather,
+)
 
 TODAY = date(2026, 11, 15)
 LEUVEN = {
@@ -144,3 +153,62 @@ async def test_a_forecast_from_another_day_still_answers() -> None:
     tool = Weather("Leuven", http=http, today=lambda: date(2030, 1, 1))
     said = await tool.run(WeatherArgs(days_ahead=1))
     assert "Tomorrow: overcast" in said  # the second day of the forecast
+
+
+# --------------------------------------------------------------------------- the dashboard
+
+
+async def test_the_outlook_at_home() -> None:
+    tool = weather(OpenMeteo())
+    assert tool.home == "Leuven, Belgium"
+    outlook = await tool.outlook()
+    assert outlook.place == "Leuven, Belgium"
+    assert (outlook.temperature, outlook.feels_like, outlook.wind_kmh) == (7.3, 4.1, 18.4)
+    assert outlook.condition == "light rain"
+    assert outlook.today == Day("light rain", 4.2, 9.1, 80.0)
+    assert outlook.tomorrow == Day("overcast", 5.4, 11.6, 10.0)
+
+
+async def test_the_outlook_tolerates_odd_answers() -> None:
+    odd: dict[str, Any] = {"daily": {"time": ["2026-11-15"], "weather_code": [3]}}
+    service = OpenMeteo()
+    original = service.handler
+
+    def handler(request: httpx2.Request) -> httpx2.Response:
+        if str(request.url).startswith(FORECAST_URL):
+            service.requests.append(request)
+            return httpx2.Response(200, json=odd)
+        return original(request)
+
+    http = httpx2.AsyncClient(transport=httpx2.MockTransport(handler))
+    outlook = await Weather("Leuven", http=http, today=lambda: TODAY).outlook()
+    assert outlook.temperature is None
+    assert outlook.condition == "unknown"
+    assert outlook.today == Day("overcast", None, None, None)
+    assert outlook.tomorrow is None
+
+
+async def test_no_home_no_outlook() -> None:
+    with pytest.raises(ToolError, match="home location"):
+        await weather(OpenMeteo(), home=None).outlook()
+
+
+async def test_the_dashboard_is_kept_up_to_date() -> None:
+    shown: list[str] = []
+    waits: list[float] = []
+    service = OpenMeteo()
+    tool = weather(service)
+
+    async def sleep(seconds: float) -> None:
+        waits.append(seconds)
+        if len(waits) == 1:
+            service.status = 500  # the second check fails: nothing new is shown
+        elif len(waits) == 2:
+            service.status = 200
+        else:
+            raise asyncio.CancelledError
+
+    with pytest.raises(asyncio.CancelledError):
+        await watch_weather(tool, lambda outlook: shown.append(outlook.place), sleep=sleep)
+    assert shown == ["Leuven, Belgium", "Leuven, Belgium"]
+    assert waits == [DASHBOARD_EVERY_S] * 3

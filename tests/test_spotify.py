@@ -8,9 +8,11 @@ import pytest
 from pydantic import SecretStr
 
 from test_computer import FakeRunner
+from test_spotify_remote import FakePlayer
+from test_spotify_remote import remote as make_remote
 from yarvis.security.redact import default_redactor
 from yarvis.tools.base import ToolError
-from yarvis.tools.computer import OPEN
+from yarvis.tools.computer import OPEN, OSASCRIPT, PGREP
 from yarvis.tools.spotify import (
     MY_PLAYLISTS_URL,
     SEARCH_URL,
@@ -27,9 +29,10 @@ from yarvis.tools.spotify import (
     SpotifyPlay,
     spotify_tools,
 )
+from yarvis.tools.spotify_remote import LoginNeededError, SpotifyRemote
 
 if TYPE_CHECKING:
-    from collections.abc import Callable
+    from collections.abc import Callable, Sequence
 
 CLIENT_ID = "0123456789abcdef0123456789abcdef"
 SECRET = "fedcba9876543210fedcba9876543210"  # noqa: S105  # gitleaks:allow - a test value
@@ -174,10 +177,95 @@ async def test_play_finds_and_plays() -> None:
     tool = SpotifyPlay(run, catalog(FakeSpotify({"tracks": {"items": [track()]}})))
     args = PlayArgs(title="Feel What You Want", artist="Kristine W")
     assert await tool.run(args) == "Playing the track 'Feel What You Want' by Kristine W."
-    assert run.commands[0][-1] == TRACK  # the URI travels as data
-    assert all(TRACK not in part for part in run.commands[0][:-1])
+    assert run.commands[0] == [PGREP, "-x", "Spotify"]  # already running: just play
+    assert run.commands[2][-1] == TRACK  # the URI travels as data
+    assert all(TRACK not in part for part in run.commands[2][:-1])
+    assert "activate" not in "\n".join(run.commands[2])  # Yarvis never brings Spotify forward
     assert tool.describe(args) == "play Feel What You Want by Kristine W on Spotify"
     assert tool.untrusted_output
+
+
+async def test_the_user_is_put_back_in_their_app(caplog: pytest.LogCaptureFixture) -> None:
+    """Spotify jumps forward when it plays; a watcher gives the focus back."""
+    caplog.set_level("INFO")
+    run = FakeRunner((0, ""), (0, "Safari\x1ftrue"), (0, "playing"), (0, "7"))
+    tool = SpotifyPlay(run, catalog(FakeSpotify({"tracks": {"items": [track()]}})))
+    await tool.run(PlayArgs(title="Feel What You Want"))
+    await tool.settled()
+    assert run.commands[-1][-2:] == ["Safari", "true"]  # back to Safari, Spotify hidden again
+    assert "set frontmost of application process frontName to true" in run.commands[-1]
+    assert "came forward after 0.7 s; gave the focus back to Safari" in caplog.text
+
+
+@pytest.mark.parametrize(
+    ("front", "watched", "logged"),
+    [
+        ((0, "Spotify\x1ffalse"), None, ""),  # the user is in Spotify: nothing to give back
+        ((1, "Not authorized (-1743)"), None, "Cannot see which app is in front"),
+        ((0, "Notes\x1ffalse"), (0, "0"), "Spotify stayed behind Notes"),
+        ((0, "Notes\x1ffalse"), (1, "error (-1719)"), "Could not put Notes back in front"),
+    ],
+)
+async def test_giving_the_focus_back_is_best_effort(
+    front: tuple[int, str],
+    watched: tuple[int, str] | None,
+    logged: str,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    caplog.set_level("INFO")
+    answers = [(0, ""), front, (0, "playing"), *([watched] if watched else [])]
+    run = FakeRunner(*answers)
+    tool = SpotifyPlay(run, catalog(FakeSpotify({"tracks": {"items": [track()]}})))
+    assert (await tool.run(PlayArgs(title="x"))).startswith("Playing")  # it plays regardless
+    await tool.settled()
+    assert len(run.commands) == len(answers)
+    assert logged in caplog.text
+
+
+class Stalling:
+    """Answers like FakeRunner, but some commands never finish in time."""
+
+    def __init__(self, *answers: tuple[int, str] | type[BaseException]) -> None:
+        self.answers = list(answers)
+        self.commands: list[list[str]] = []
+
+    async def __call__(self, argv: Sequence[str]) -> tuple[int, str]:
+        self.commands.append(list(argv))
+        answer = self.answers.pop(0) if self.answers else (0, "")
+        if isinstance(answer, tuple):
+            return answer
+        raise answer
+
+
+async def test_a_watcher_that_stalls_or_breaks_is_only_logged(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    caplog.set_level("INFO")
+    for problem, logged in (
+        (TimeoutError, "Gave up watching"),
+        (OSError, "Watching Spotify failed"),
+    ):
+        run = Stalling((0, ""), (0, "Notes\x1ffalse"), (0, "playing"), problem)
+        tool = SpotifyPlay(run, catalog(FakeSpotify({"tracks": {"items": [track()]}})))
+        await tool.run(PlayArgs(title="x"))
+        await tool.settled()
+        assert logged in caplog.text
+    await SpotifyPlay(FakeRunner(), None).settled()  # nothing to wait for
+
+
+async def test_a_spotify_that_is_slow_to_answer_after_starting() -> None:
+    async def no_wait(seconds: float) -> None:
+        pass
+
+    run = Stalling((1, ""), (0, ""), (0, "1"), (0, ""), TimeoutError, (0, "playing"))
+    tool = SpotifyPlay(run, catalog(FakeSpotify({"tracks": {"items": [track()]}})), pause=no_wait)
+    assert (await tool.run(PlayArgs(title="x"))).startswith("Playing")
+    already = SpotifyPlay(
+        Stalling((0, ""), (0, ""), TimeoutError),
+        catalog(FakeSpotify({"tracks": {"items": [track()]}})),
+    )
+    with pytest.raises(TimeoutError):  # Spotify was running: no reason to wait longer
+        await already.run(PlayArgs(title="x"))
 
 
 async def test_play_without_credentials_opens_a_search() -> None:
@@ -194,10 +282,49 @@ async def test_play_failures() -> None:
     with pytest.raises(ToolError, match="found no track"):
         await nothing.run(PlayArgs(title="zzz"))
     broken = SpotifyPlay(
-        FakeRunner((1, "error")), catalog(FakeSpotify({"tracks": {"items": [track()]}}))
+        FakeRunner((0, ""), (0, ""), (1, "error")),
+        catalog(FakeSpotify({"tracks": {"items": [track()]}})),
     )
     with pytest.raises(ToolError, match="did not start playing"):
         await broken.run(PlayArgs(title="x"))
+
+
+async def test_spotify_is_started_in_the_background_and_given_a_moment() -> None:
+    """Spotify was closed: started hidden, then asked again until it plays."""
+    run = FakeRunner(
+        (1, ""), (0, ""), (0, "4242"), (0, ""), (0, "paused"), (1, "(-600)"), (0, "playing")
+    )
+    waited: list[float] = []
+
+    async def pause(seconds: float) -> None:
+        waited.append(seconds)
+
+    tool = SpotifyPlay(run, catalog(FakeSpotify({"tracks": {"items": [track()]}})), pause=pause)
+    await tool.run(PlayArgs(title="Feel What You Want"))
+    assert run.commands[1] == [OPEN, "-g", "-j", "-a", "Spotify"]  # hidden, not in front
+    assert [c[0] for c in run.commands[3:]] == [OSASCRIPT] * 4  # where the user is, 3 tries
+    assert waited == [1.0, 1.0]
+    assert tool.timeout_s and tool.timeout_s >= 15  # room for Spotify to start
+
+
+async def test_a_slow_spotify_is_not_an_error() -> None:
+    async def no_wait(seconds: float) -> None:
+        pass
+
+    run = FakeRunner((1, ""), (0, ""), (0, "1"), (0, ""), *[(0, "paused")] * 10)
+    tool = SpotifyPlay(run, catalog(FakeSpotify({"tracks": {"items": [track()]}})), pause=no_wait)
+    assert (
+        await tool.run(PlayArgs(title="x"))
+        == "Playing the track 'Feel What You Want' by Kristine W."
+    )
+    assert len(run.commands) == 4 + 10
+    stuck = SpotifyPlay(
+        FakeRunner((1, ""), (0, ""), (0, "1"), (0, ""), *[(1, "error")] * 10),
+        catalog(FakeSpotify({"tracks": {"items": [track()]}})),
+        pause=no_wait,
+    )
+    with pytest.raises(ToolError, match="did not start playing"):
+        await stuck.run(PlayArgs(title="x"))
 
 
 async def test_now_playing() -> None:
@@ -448,3 +575,83 @@ async def test_your_own_playlists_explain_what_is_missing() -> None:
         await tool.run(PlayArgs(title="jazz evenings", mine=True))
     with pytest.raises(ToolError, match="Liked Songs"):
         await tool.run(PlayArgs(title="Liked Songs", mine=True))
+
+
+# --------------------------------------------------------------------------- Spotify's own service
+
+
+def service(**kwargs: Any) -> tuple[FakePlayer, SpotifyRemote]:
+    fake = FakePlayer(**kwargs)
+    return fake, make_remote(fake)[0]
+
+
+def found() -> SpotifyCatalog:
+    return catalog(FakeSpotify({"tracks": {"items": [track()]}}))
+
+
+async def test_playing_through_spotifys_service_never_touches_the_app() -> None:
+    fake, remote = service()
+    run = FakeRunner()
+    tool = SpotifyPlay(run, found(), remote=remote)
+    assert await tool.run(PlayArgs(title="Feel What You Want")) == (
+        "Playing the track 'Feel What You Want' by Kristine W."
+    )
+    assert run.commands == []  # no AppleScript: Spotify cannot jump to the front
+    assert fake.sent("PUT", "me/player/play") == [({"device_id": "mac"}, {"uris": [TRACK]})]
+
+
+async def test_without_permission_a_mac_tells_the_app_and_windows_asks_for_it() -> None:
+    _, remote = service(scope="playlist-read-private")
+    run = FakeRunner()
+    await SpotifyPlay(run, found(), remote=remote).run(PlayArgs(title="x"))
+    assert any(command[-1] == TRACK for command in run.commands)  # the app, as before
+    with pytest.raises(LoginNeededError, match="yarvis spotify login"):
+        await SpotifyPlay(None, found(), remote=remote).run(PlayArgs(title="x"))
+    with pytest.raises(LoginNeededError):
+        await SpotifyPlay(None, found()).run(PlayArgs(title="x"))  # not logged in at all
+    with pytest.raises(ToolError, match="yarvis key set spotify"):
+        await SpotifyPlay(None, None).run(PlayArgs(title="x"))  # no app keys either
+
+
+async def test_an_expired_login_falls_back_to_the_app_where_there_is_one() -> None:
+    expired = FakeAccount(token_status=401)
+    remote = SpotifyRemote(account(expired), computer="mac", start_app=no_start)
+    run = FakeRunner()
+    await SpotifyPlay(run, found(), remote=remote).run(PlayArgs(title="x"))
+    assert any(command[-1] == TRACK for command in run.commands)
+    with pytest.raises(ToolError, match="Log in again"):
+        await SpotifyPlay(None, found(), remote=remote).run(PlayArgs(title="x"))
+
+
+async def test_now_playing_and_adjusting_through_spotifys_service() -> None:
+    state: dict[str, object] = {
+        "is_playing": False,
+        "progress_ms": 5000,
+        "item": {"name": "Song", "artists": []},
+    }
+    fake, remote = service(answers={"GET me/player": [(200, state)]})
+    said = await SpotifyNowPlaying(None, remote).run(NoArgs())
+    assert said.startswith("paused: 'Song' by  (album ''), 0:05 of 0:00")
+    assert "volume ?%" in said
+    assert await SpotifyNowPlaying(None, remote).run(NoArgs()) == "Spotify is not playing anything."
+    adjust = SpotifyAdjust(None, remote)
+    assert await adjust.run(AdjustArgs(volume=20)) == "Done: set Spotify's volume to 20%."
+    assert fake.sent("PUT", "me/player/volume") == [({"volume_percent": "20"}, None)]
+    with pytest.raises(LoginNeededError):
+        await SpotifyNowPlaying(None, None).run(NoArgs())
+
+
+async def no_start() -> None:
+    pass
+
+
+async def test_an_unreachable_spotify_service() -> None:
+    def offline(request: httpx2.Request) -> httpx2.Response:
+        if str(request.url) == TOKEN_URL:
+            return httpx2.Response(200, json={"access_token": "t" * 20, "expires_in": 60})
+        raise httpx2.ConnectError("offline")
+
+    http = httpx2.AsyncClient(transport=httpx2.MockTransport(offline))
+    user = SpotifyAccount(CLIENT_ID, SecretStr(SECRET), SecretStr(REFRESH), http=http)
+    with pytest.raises(ToolError, match="could not be reached"):
+        await user.call("GET", "me/player")

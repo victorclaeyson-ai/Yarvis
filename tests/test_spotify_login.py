@@ -35,13 +35,17 @@ SECRET = SecretStr("fedcba9876543210fedcba9876543210")  # gitleaks:allow - a tes
 STATE = "state-1234"
 
 
-def test_the_consent_page_asks_for_read_only_access() -> None:
+def test_the_consent_page_asks_for_playlists_and_the_player_only() -> None:
     url = urlsplit(authorize_url(CLIENT_ID, STATE))
     assert (url.scheme, url.netloc, url.path) == ("https", "accounts.spotify.com", "/authorize")
     query = parse_qs(url.query)
     assert query["client_id"] == [CLIENT_ID]
     assert query["redirect_uri"] == [REDIRECT_URI] == ["http://127.0.0.1:8888/callback"]
-    assert query["scope"] == ["playlist-read-private playlist-read-collaborative"]
+    assert query["scope"] == [
+        "playlist-read-private playlist-read-collaborative user-read-playback-state "
+        "user-modify-playback-state"
+    ]
+    assert not any("modify" in s and "playback" not in s for s in query["scope"][0].split())
     assert query["response_type"] == ["code"]
     assert query["state"] == [STATE]
     assert new_state() != new_state() and len(new_state()) >= 32

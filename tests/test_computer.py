@@ -173,7 +173,9 @@ def test_tools_per_platform(apps: Apps, monkeypatch: pytest.MonkeyPatch) -> None
     assert [t.name for t in computer_tools(FakeRunner(), platform="linux")] == ["open_website"]
     monkeypatch.setattr(os, "access", lambda path, mode: False)  # pyright: ignore[reportUnknownLambdaType, reportUnknownArgumentType]
     assert computer_tools(FakeRunner(), platform="linux") == []
-    assert computer_tools(FakeRunner(), platform="win32") == []
+    windows = [tool.name for tool in computer_tools(FakeRunner(), platform="win32")]
+    assert windows == ["open_app", "quit_app", "set_volume", "media", "open_website"]
+    assert computer_tools(FakeRunner(), platform="freebsd") == []
 
 
 async def test_commands_run_without_a_shell_or_secrets(monkeypatch: pytest.MonkeyPatch) -> None:

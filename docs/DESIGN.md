@@ -12,7 +12,7 @@
 ### Goals
 
 1. **Feels instant.** Conversational latency comparable to talking to a person, with natural interruptions (barge-in).
-2. **Private by default.** Wake word, speech-to-text and text-to-speech run locally. Audio never leaves the machine. Only text goes to the LLM, and a fully offline mode exists.
+2. **Private by default.** Wake word, speech-to-text and text-to-speech run locally. Audio never leaves the machine. Only text goes to the LLM, and a fully offline mode exists. The one exception is opt-in: with an AssemblyAI key stored, the speech of each request is transcribed live in AssemblyAI's EU data zone, with the local engine as backup ([ADR 0012](adr/0012-assemblyai-live-speech-recognition.md)).
 3. **Actually does things.** Tools via the Model Context Protocol (MCP), so anyone can plug in new abilities.
 4. **Safe to give power to.** A security model that assumes the LLM *will* be manipulated, and limits the damage when it is.
 5. **Has a body.** An optional ESP32 desk satellite (mic, speaker, LED ring) that pairs securely with the host.
@@ -108,7 +108,7 @@ Defaults are chosen on paper; **every row marked ⚖ is benchmarked in Phase 1**
 | Wake word | openWakeWord "hey jarvis" model (also hears "Hey Yarvis"), own ONNX inference (ADR 0006) | Custom "Hey Yarvis" model; push-to-talk hotkey | Local, ~2 % of one core; pre-trained models are CC BY-NC-SA, so they are downloaded, not bundled |
 | VAD | Silero VAD (ONNX) | WebRTC VAD | Accurate, tiny, fast |
 | Turn detection ⚖ | Silero silence threshold + Smart Turn model | Silence threshold only | Fewer premature cut-offs → can use a shorter silence window |
-| STT ⚖ | Apple Silicon: Parakeet TDT 0.6B on the GPU (MLX); elsewhere: faster-whisper | Whisper turbo (MLX), Moonshine | Most accurate option that is still fast per platform; all local ([ADR 0008](adr/0008-parakeet-speech-recognition.md)) |
+| STT ⚖ | Parakeet TDT 0.6B: on the Apple GPU (MLX), elsewhere on the CPU (ONNX); optional AssemblyAI Universal-3.6 Pro streaming, with Parakeet as backup | Whisper (faster-whisper), Moonshine | Most accurate option that is still fast per platform, local by default ([ADR 0008](adr/0008-parakeet-speech-recognition.md), [ADR 0012](adr/0012-assemblyai-live-speech-recognition.md)) |
 | LLM | Anthropic Messages API (streaming, tool use) | Ollama (offline mode) | Best tool use and instruction following; one switch for offline |
 | TTS ⚖ | Kokoro (ONNX) for English | Piper (incl. Dutch `nl_BE` voices) | Natural voice with very low first-chunk latency |
 | Tools | Built-ins + official `mcp` Python SDK | — | Standard protocol, huge existing ecosystem |
@@ -230,7 +230,7 @@ The gate is a single small module (`yarvis/security/gate.py`) with exhaustive te
 
 | Data | Stored? | Where | Leaves the machine? |
 |---|---|---|---|
-| Raw audio | No (in-memory ring buffer only; opt-in debug recording) | — | Never (except to a paired satellite) |
+| Raw audio | No (in-memory ring buffer only; opt-in debug recording) | — | Never (except to a paired satellite), unless AssemblyAI is set up: then the speech of each request, streamed for transcription (EU data zone by default) |
 | Transcripts | Short-term in memory; optional history | Local SQLite | Only the current conversation text, to the configured LLM |
 | Memories | Yes, if enabled | Local SQLite, file mode `0600` | Relevant snippets in LLM context |
 | Config | Yes | `~/.config/yarvis/` (Linux), `~/Library/Application Support/yarvis/` (macOS) | No |
@@ -253,7 +253,9 @@ model = "<fast-tier model>"   # chosen in Phase 1 by latency benchmark
 max_tokens = 1024
 
 [voice]
-stt = "auto"                  # Parakeet (MLX) on Apple Silicon, faster-whisper elsewhere
+cloud_stt = true              # AssemblyAI, only if its key is stored (`yarvis key set assemblyai`)
+cloud_region = "eu"           # AssemblyAI's EU data zone
+stt = "auto"                  # on this computer, and the backup: Parakeet (MLX or ONNX), else Whisper
 tts = "kokoro"
 voice = "af_heart"
 

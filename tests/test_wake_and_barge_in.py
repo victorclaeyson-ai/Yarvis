@@ -616,6 +616,31 @@ async def test_thanks_closes_the_conversation() -> None:
     assert "reply:Anytime." in ui.events
 
 
+async def test_hey_yarvis_that_cuts_yarvis_off_is_not_greeted() -> None:
+    """The chime says it is listening; "Good evening" would only be talked over."""
+    ui = EventUi()
+    turn, speaker = make_turn(
+        FakeLLM(["You have 59 playlists: Funk Slowed, Bangers, ..."], ["Playing BIG BOY."]),
+        ScriptedSTT("list my playlists", "Hey Yarvis.", "play the big boy playlist"),
+        ui,
+    )
+    ears = FakeEars(
+        requests(utterance(), utterance(), utterance()),
+        interruption=interrupt_once(speaker, wake_word=True, prefix=PREFIX),
+    )
+    await Assistant(
+        turn=turn,
+        lines=talk_then_quit(ui.replied),
+        ui=ui,
+        ears=ears,
+        turn_taking=NO_SPECULATION,
+        greeter=evening_greeter(),
+    ).run()
+    assert not any(event.startswith("said:") for event in ui.events)
+    assert "you:play the big boy playlist" in ui.events
+    assert ears.prefixes[2] == ()  # straight on to the request, nothing kept from before
+
+
 async def test_hey_yarvis_during_a_conversation_is_greeted_too() -> None:
     ui = EventUi()
     turn, speaker = make_turn(

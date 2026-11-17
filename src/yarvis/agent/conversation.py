@@ -194,10 +194,15 @@ class Draft:
             if not self._task.done():
                 self._task.cancel()
             reply = "".join(heard).strip()
-            if self.done and not finished:
-                # Cut off after acting: say so, or the model would do it all again when
-                # the user goes on ("skip" must not skip two songs).
-                reply = f"{reply} [Interrupted. Already done: {'; '.join(self.done)}.]".strip()
+            # Tool calls and results are not kept in the history (they are large, and outside
+            # content must not outlive its turn), so what was done is noted, by code. Without
+            # it, the model reads its own "Playing ..." as a claim it never backed up, and
+            # "corrects" it next time, or does it all again ("skip" must not skip two songs).
+            done = [*self.done, *(_search_activity(query) for query in self.searches)]
+            if done and not finished:
+                reply = f"{reply} [Interrupted. Already done: {'; '.join(done)}.]".strip()
+            elif done:
+                reply = f"{reply} [Done: {'; '.join(done)}.]".strip()
             if reply:
                 self._conversation.remember(self.user_text, reply)
 

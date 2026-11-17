@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import socket
 import sys
 from functools import partial
 from typing import TYPE_CHECKING, Any, Literal
@@ -18,14 +19,17 @@ from yarvis.tools.computer import (
     QuitApp,
     SetVolume,
     run_command,
+    start_hidden,
 )
 from yarvis.tools.ducking import BrowserDucker, Duckers, SpotifyDucker
 from yarvis.tools.mail import MAIL_TIMEOUT_S, MacMail, mail_tools
 from yarvis.tools.spotify import spotify_tools
+from yarvis.tools.spotify_remote import SpotifyRemote, computer_name
 from yarvis.tools.typing import typing_tools
+from yarvis.tools.windows import start_spotify, windows_tools
 
 if TYPE_CHECKING:
-    from collections.abc import Sequence
+    from collections.abc import Awaitable, Callable, Sequence
 
     from yarvis.config.models import Config
     from yarvis.tools.base import Tool
@@ -45,8 +49,20 @@ def computer_tools(
     typing: bool = True,
     spotify: SpotifyCatalog | None = None,
     spotify_account: SpotifyAccount | None = None,
+    node: str | None = None,
 ) -> list[Tool[Any]]:
-    """The tools that act on this computer, given what is installed."""
+    """The tools that act on this computer, given what is installed.
+
+    ``node`` is this computer's network name, to find its Spotify app among the user's
+    devices (default: the real one).
+    """
+    name = computer_name(node or socket.gethostname())
+    if platform == "win32":
+        tools = windows_tools(run)
+        if spotify is not None:
+            remote = _remote(spotify_account, name, start_spotify)
+            tools += spotify_tools(None, spotify, spotify_account, remote=remote)
+        return tools
     if platform == "darwin":
         apps = apps or Apps()
         tools: list[Tool[Any]] = [
@@ -58,7 +74,12 @@ def computer_tools(
         browsers = Browsers(run, apps, browser)
         tools += browser_tools(run, browsers) if browsers.available() else [OpenWebsite(run)]
         if "Spotify" in apps.names():
-            tools += spotify_tools(run, spotify, spotify_account)
+
+            async def start() -> None:
+                await start_hidden(run, "Spotify")
+
+            remote = _remote(spotify_account, name, start)
+            tools += spotify_tools(run, spotify, spotify_account, remote=remote)
         if typing:
             tools += typing_tools(run, apps)
         return tools
@@ -83,6 +104,13 @@ def personal_tools(
     if config.tools.mail:
         tools += mail_tools(MacMail(run or partial(run_command, timeout_s=MAIL_TIMEOUT_S)))
     return tools
+
+
+def _remote(
+    account: SpotifyAccount | None, computer: str, start: Callable[[], Awaitable[None]]
+) -> SpotifyRemote | None:
+    """Spotify's Web API player, once the user has logged in."""
+    return None if account is None else SpotifyRemote(account, computer=computer, start_app=start)
 
 
 def music_ducker(
@@ -141,8 +169,9 @@ def abilities(tools: Sequence[Tool[Any]]) -> list[str]:
         )
     if "mail_list" in names:
         said.append(
-            "list, search and read the user's email in all their accounts, and send emails "
-            "or replies (the user confirms; names are looked up in their contacts). Read "
-            "emails out as who, what and the gist, never the addresses"
+            "list, search and read the user's email in all their accounts, star them or mark "
+            "them read, send emails or replies and move emails to the trash (sending and "
+            "trashing need the user's confirmation; names are looked up in their contacts). "
+            "Say emails as who, what and the gist, never the addresses"
         )
     return said

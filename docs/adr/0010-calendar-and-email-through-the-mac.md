@@ -32,16 +32,20 @@ the model by sending the user an email or an invitation.
 2. **Email through the Mail app**, driven by fixed AppleScripts that receive every value
    as `argv` data; names through Contacts. `mail_list` numbers the latest emails across
    all accounts and `mail_read` reads one by its number: the model never makes up an id.
-   `mail_send` and `mail_reply` need the user's "yes". A reply is sent as a new email with
+   `mail_send`, `mail_reply` and `mail_trash` need the user's "yes". Trashing too, although
+   the trash can be emptied back: an email that quietly trashed the security alert about
+   its own attack would be a classic trick. `mail_mark` stars (flags: a star in Gmail) or
+   marks emails read without asking: it is undone with one more word, and the email stays
+   in the inbox either way. A reply is sent as a new email with
    "Re:" from the account that received the original (Mail's own reply command does not
    reliably keep text set without opening a window); mail apps usually thread it by
    subject. The original is not quoted.
 3. **Resolve before asking** (`Tool.prepare`). The confirmation question names exactly what
    will run: the contact's address ("Should I email Thomas Peeters (thomas@example.com),
    from victor@example.com, ...?"), the calendar ("Home (victor@gmail.com)"), the email
-   being answered. The resolved arguments are what the "yes" runs. A reply's recipient is
-   taken from the listed email, never from the model (those fields are hidden from it and
-   overwritten). Names from Contacts are outside text too, so they are cleaned to letters
+   being answered or trashed. The resolved arguments are what the "yes" runs. A reply's
+   recipient and the emails to trash are taken from the listed emails, never from the
+   model (those fields are hidden from it and overwritten). Names from Contacts are outside text too, so they are cleaned to letters
    and simple punctuation before being said.
 4. **What was read is outside content.** Emails, invitations and contacts taint the turn
    like a web page. Anything external in that turn needs a spoken "yes", even with

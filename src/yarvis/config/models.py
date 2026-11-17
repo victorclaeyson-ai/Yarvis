@@ -68,11 +68,26 @@ class VoiceConfig(_Section):
     Only implemented backends are accepted; more (Piper) arrive in later phases.
     """
 
+    cloud_stt: bool = Field(
+        default=True,
+        description=(
+            "Recognize speech with AssemblyAI (the most accurate) when its API key is stored. "
+            "Only what you say after the wake word is sent; the engine below is the backup."
+        ),
+    )
+    cloud_region: Literal["eu", "global"] = Field(
+        default="eu",
+        description=(
+            "Where AssemblyAI processes your speech. 'eu': servers in the EU only, and never "
+            "used to train models; 'global': the nearest servers."
+        ),
+    )
     stt: Literal["auto", "parakeet", "faster-whisper"] = Field(
         default="auto",
         description=(
-            "Speech recognition. 'auto': Parakeet on the GPU of Apple Silicon Macs (the most "
-            "accurate), Whisper elsewhere."
+            "Speech recognition on this computer (and the backup for AssemblyAI). 'auto': "
+            "Parakeet, on the GPU of Apple Silicon Macs and on the processor elsewhere; "
+            "Whisper if it cannot run."
         ),
     )
     stt_model: SttModel = Field(default="small.en", description="The Whisper model.")
@@ -83,7 +98,9 @@ class VoiceConfig(_Section):
     vocabulary: tuple[VocabularyWord, ...] = Field(
         default=("Yarvis",),
         max_length=50,
-        description="Names and places Whisper should spell correctly (Parakeet needs no hints).",
+        description=(
+            "Names and places to spell correctly (AssemblyAI and Whisper; Parakeet takes no hints)."
+        ),
     )
     tts: Literal["kokoro"] = "kokoro"
     voice: str = Field(default="bm_george", pattern=r"^[a-z]{2}_[a-z]+$")
@@ -105,19 +122,19 @@ class VoiceConfig(_Section):
         ge=0,
         le=60,
         description=(
-            "When Yarvis asks you something, anything you say this long afterwards is your "
-            "answer. Without stay_open_s, this is how long a conversation stays open."
+            "After Yarvis answers, anything you say this long afterwards goes to Yarvis, "
+            "without the wake word. Then say 'Hey Yarvis' again."
         ),
     )
     stay_open_s: float = Field(
-        default=300.0,
+        default=0.0,
         ge=0,
         le=3600,
         description=(
-            "After your last request, keep listening this long for requests meant for Yarvis "
-            "(its name, or a command such as 'open Spotify'). Everything else, like talking "
-            "to someone else, is ignored on this computer and never sent. 0 = off. Say "
-            "'thanks' or 'that's all' to end it sooner."
+            "Off by default (0). Keep listening this long after follow_up_s, but only for "
+            "requests that sound meant for Yarvis (its name, or a command such as 'open "
+            "Spotify'); other talk is dropped on this computer and never reaches Claude. It "
+            "can miss a real request that does not sound like one."
         ),
     )
     speculative: bool = Field(

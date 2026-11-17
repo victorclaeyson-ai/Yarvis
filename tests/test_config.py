@@ -161,7 +161,7 @@ def test_follow_up_window() -> None:
 
 
 def test_staying_open() -> None:
-    assert Config().voice.stay_open_s == 300  # five minutes after the last request
+    assert Config().voice.stay_open_s == 0  # off: it could ignore a real request
     assert parse_config("[voice]\nstay_open_s = 0").voice.stay_open_s == 0
     with pytest.raises(ConfigError, match="stay_open_s"):
         parse_config("[voice]\nstay_open_s = 3601")

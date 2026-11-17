@@ -10,7 +10,16 @@ import pytest
 from pydantic import SecretStr
 from rich.console import Console
 
-from fakes import VALID_KEY, FakeKeyring, FakeLLM, FakeSTT, FakeTTS, FakeWakeWord, Invoke
+from fakes import (
+    ASSEMBLYAI_KEY,
+    VALID_KEY,
+    FakeKeyring,
+    FakeLLM,
+    FakeSTT,
+    FakeTTS,
+    FakeWakeWord,
+    Invoke,
+)
 from test_computer import FakeRunner
 from test_listen_and_assistant import RecordingUi, lines
 from test_speech_engines import frames, speech_clip
@@ -23,6 +32,7 @@ from yarvis.llm.base import ToolCall
 from yarvis.models import (
     KOKORO_FILES,
     PARAKEET_FILES,
+    PARAKEET_ONNX_FILES,
     WAKE_WORD_FILES,
     WHISPER_REVISIONS,
     ModelFile,
@@ -192,6 +202,44 @@ async def test_full_voice_turn_through_the_real_wiring(tmp_path: Path) -> None:
     assert fakes.llm.warm_ups == 2  # at startup, and again when speech started
 
 
+async def test_assemblyai_hears_a_voice_turn_through_the_real_wiring(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    from test_assemblyai import FakeService  # noqa: PLC0415 - the fake AssemblyAI
+    from yarvis.speech.assemblyai import AssemblyAISTT, Pace  # noqa: PLC0415
+
+    fakes = FakeBackends(FakeLLM(["It is half past one."]))
+    service = FakeService(["Hey Yarvis, what time is it in Tokyo?"])
+    backup = fakes.stt
+    cloud = AssemblyAISTT(
+        SecretStr(ASSEMBLYAI_KEY),
+        backup,
+        connect=service.connect,
+        pace=Pace(burst_s=100.0, rate=100.0),
+    )
+
+    def make_stt(config: Config, cache: Path) -> AssemblyAISTT:
+        return cloud
+
+    backends = replace(fakes.build(), stt=make_stt)
+    ui = RecordingUi()
+    caplog.set_level("INFO")
+    await run_assistant(
+        NO_WAKE_WORD,
+        api_key=SecretStr("k"),
+        cache_dir=tmp_path,
+        lines=lines("", "q"),
+        ui=ui,
+        backends=backends,
+    )
+    assert backup.loaded
+    assert backup.received == [8_000]  # only the warm-up: the request was heard in the cloud
+    assert "you:what time is it in Tokyo?" in ui.events
+    assert service.connections[0].forces == 1
+    assert service.connections[0].sent_bytes > 2 * 16_000 * 2
+    assert "Speech recognition: AssemblyAI" in caplog.text
+
+
 async def test_wake_word_through_the_real_wiring(
     tmp_path: Path, caplog: pytest.LogCaptureFixture
 ) -> None:
@@ -248,7 +296,12 @@ async def test_text_and_mute_mode_load_nothing(tmp_path: Path) -> None:
 
 
 def install_models(
-    paths: AppPaths, *, whisper: bool = True, wake_word: bool = True, parakeet: bool = False
+    paths: AppPaths,
+    *,
+    whisper: bool = True,
+    wake_word: bool = True,
+    parakeet: bool = False,
+    parakeet_onnx: bool = False,
 ) -> None:
     paths.ensure_all()
     sets: list[tuple[Path, tuple[ModelFile, ...]]] = [(kokoro_dir(paths.cache_dir), KOKORO_FILES)]
@@ -256,6 +309,8 @@ def install_models(
         sets.append((wake_word_dir(paths.cache_dir), WAKE_WORD_FILES))
     if parakeet:
         sets.append((parakeet_dir(paths.cache_dir), PARAKEET_FILES))
+    if parakeet_onnx:
+        sets.append((parakeet_dir(paths.cache_dir, "onnx"), PARAKEET_ONNX_FILES))
     for directory, models in sets:
         directory.mkdir(parents=True, exist_ok=True)
         for model in models:
@@ -294,6 +349,18 @@ def test_run_voice_mode(invoke: Invoke, services: Services, ready: FakeBackends)
     assert result.exit_code == 0, result.output
     assert "You: what time is it" in result.output
     assert "to first word" in result.output
+
+
+def test_run_says_when_assemblyai_hears(
+    invoke: Invoke, services: Services, ready: FakeBackends, fake_keyring: FakeKeyring
+) -> None:
+    fake_keyring.store[(KEYRING_SERVICE, "assemblyai")] = ASSEMBLYAI_KEY
+    services.lines = lambda: lines("q")
+    result = invoke("run")
+    assert result.exit_code == 0, result.output
+    assert "AssemblyAI (EU servers), with Whisper small.en on this computer as backup" in (
+        " ".join(result.output.split())
+    )
 
 
 def test_run_requires_a_key(invoke: Invoke, paths: AppPaths) -> None:
@@ -354,6 +421,21 @@ def test_run_offers_to_download_parakeet(
     assert accepted.exit_code == 0, accepted.output
     assert downloaded == [model.name for model in PARAKEET_FILES]
     assert ready.stt_engines == ["faster-whisper", "parakeet"]
+
+
+def test_a_windows_pc_gets_parakeet_for_its_processor(
+    invoke: Invoke, services: Services, ready: FakeBackends
+) -> None:
+    services.parakeet_ok = lambda: True
+    services.parakeet_build = lambda: "onnx"
+    downloaded: list[str] = []
+    services.downloader = recording_downloader(downloaded)
+    services.lines = lambda: lines("q")
+    accepted = invoke("run", "--yes")
+    assert accepted.exit_code == 0, accepted.output
+    assert "runs on this computer's processor (2.5 GB, one time" in accepted.output
+    assert downloaded == [model.name for model in PARAKEET_ONNX_FILES]
+    assert ready.stt_engines == ["parakeet"]
 
 
 def test_text_mode_needs_no_speech_recognition(

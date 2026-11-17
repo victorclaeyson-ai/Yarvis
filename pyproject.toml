@@ -27,6 +27,7 @@ dependencies = [
     "keyring>=25.7",
     "kokoro-onnx>=0.6",
     "numpy>=2.1",
+    "onnx-asr>=0.12",  # Parakeet on any processor (Windows, Linux, Intel Macs)
     "onnxruntime>=1.22",
     # Speech recognition on the Apple GPU (MLX only exists for Apple Silicon Macs).
     "parakeet-mlx>=0.7; sys_platform == 'darwin' and platform_machine == 'arm64'",
@@ -38,6 +39,8 @@ dependencies = [
     "rich>=14",
     "sounddevice>=0.5",
     "typer>=0.16",
+    # Live speech recognition by AssemblyAI (optional: only with its API key).
+    "websockets>=15",
 ]
 
 [project.scripts]

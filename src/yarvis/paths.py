@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import os
 import stat
+import sys
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -22,6 +23,9 @@ APP_NAME = "yarvis"
 HOME_ENV_VAR = "YARVIS_HOME"
 PRIVATE_DIR_MODE = 0o700
 PRIVATE_FILE_MODE = 0o600
+WINDOWS = sys.platform == "win32"
+_NO_FOLLOW: int = getattr(os, "O_NOFOLLOW", 0)
+"""``O_NOFOLLOW`` where it exists (not on Windows, where creating a link needs admin rights)."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -83,8 +87,16 @@ def ensure_private_dir(path: Path) -> Path:
     return path
 
 
-def is_private(path: Path) -> bool:
-    """Return True if neither group nor others have any access to ``path``."""
+def is_private(path: Path, *, windows: bool = WINDOWS, home: Path | None = None) -> bool:
+    """Return True if only the current user can access ``path``.
+
+    On macOS and Linux: neither group nor others have any permission bits. Windows has no
+    such bits (Python reports every folder as open to all); there, Windows' own default
+    permissions keep everything inside the user's profile folder (``home``) to that user,
+    the system and administrators, so a path inside it counts as private.
+    """
+    if windows:
+        return path.resolve().is_relative_to((home or Path.home()).resolve())
     mode = path.stat().st_mode
     return stat.S_IMODE(mode) & 0o077 == 0
 
@@ -96,7 +108,10 @@ def write_private_file(path: Path, content: str, *, overwrite: bool = False) -> 
         FileExistsError: If the file exists and ``overwrite`` is False.
     """
     ensure_private_dir(path.parent)
-    flags = os.O_WRONLY | os.O_CREAT | os.O_NOFOLLOW
+    if not _NO_FOLLOW and path.is_symlink():
+        msg = f"refusing to write through symbolic links: {path}"
+        raise OSError(msg)
+    flags = os.O_WRONLY | os.O_CREAT | _NO_FOLLOW
     flags |= os.O_TRUNC if overwrite else os.O_EXCL
     fd = os.open(path, flags, PRIVATE_FILE_MODE)
     with os.fdopen(fd, "w", encoding="utf-8") as handle:

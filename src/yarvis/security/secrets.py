@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 from dataclasses import dataclass
 from enum import StrEnum
 from typing import TYPE_CHECKING, Final, Protocol
@@ -40,6 +41,8 @@ class SecretName(StrEnum):
     """A Spotify developer app's ``client_id:client_secret`` (for searching music)."""
     SPOTIFY_LOGIN = "spotify-login"
     """The user's Spotify refresh token (``yarvis spotify login``: their own playlists)."""
+    ASSEMBLYAI = "assemblyai"
+    """An AssemblyAI API key: live speech recognition in the cloud (optional)."""
 
     @property
     def env_var(self) -> str:
@@ -47,10 +50,13 @@ class SecretName(StrEnum):
         return _ENV_VARS[self]
 
 
+_ANTHROPIC_KEY: Final = re.compile(r"^sk-ant-[A-Za-z0-9_-]+$")
+_ASSEMBLYAI_KEY: Final = re.compile(r"^[A-Za-z0-9_]{32,128}$")
 _ENV_VARS: Final[dict[SecretName, str]] = {
     SecretName.ANTHROPIC: "ANTHROPIC_API_KEY",
     SecretName.SPOTIFY: "YARVIS_SPOTIFY",
     SecretName.SPOTIFY_LOGIN: "YARVIS_SPOTIFY_LOGIN",
+    SecretName.ASSEMBLYAI: "ASSEMBLYAI_API_KEY",
 }
 
 
@@ -124,8 +130,12 @@ class SystemKeyring:
         return f"{type(backend).__module__}.{type(backend).__qualname__}"
 
 
-def validate_secret(value: str) -> str:
+def validate_secret(value: str, name: SecretName | None = None) -> str:
     """Reject values that cannot be a real credential (empty, whitespace, too short).
+
+    A paste can bring in invisible characters (a terminal's Ctrl+V can arrive as one), and
+    a copy can catch the wrong text: both are caught here, before the key is stored and the
+    first request fails with a vague "rejected".
 
     Returns:
         The value, stripped of surrounding whitespace.
@@ -134,11 +144,20 @@ def validate_secret(value: str) -> str:
         InvalidSecretError: If the value is clearly not a credential.
     """
     value = value.strip()
+    if any(not char.isprintable() for char in value):
+        msg = "the pasted text contains invisible characters; copy the key again"
+        raise InvalidSecretError(msg)
     if len(value) < MIN_SECRET_LENGTH:
         msg = f"value is too short to be an API key (minimum {MIN_SECRET_LENGTH} characters)"
         raise InvalidSecretError(msg)
     if any(char.isspace() for char in value):
         msg = "API keys never contain whitespace"
+        raise InvalidSecretError(msg)
+    if name is SecretName.ANTHROPIC and not _ANTHROPIC_KEY.match(value):
+        msg = "Anthropic API keys start with 'sk-ant-' (create one at console.anthropic.com)"
+        raise InvalidSecretError(msg)
+    if name is SecretName.ASSEMBLYAI and not _ASSEMBLYAI_KEY.match(value):
+        msg = "AssemblyAI API keys are 32 letters and digits (copy yours from assemblyai.com)"
         raise InvalidSecretError(msg)
     return value
 
@@ -194,7 +213,7 @@ class SecretStore:
             InvalidSecretError: If the value is not a plausible credential.
             RuntimeError: If no secure keychain is available.
         """
-        value = validate_secret(value)
+        value = validate_secret(value, name)
         if not self.keychain_available:
             msg = (
                 "no secure OS keychain is available; "

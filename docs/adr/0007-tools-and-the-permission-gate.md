@@ -98,6 +98,15 @@ whatever it was told or tricked into, the decision to run a tool is made by code
      (`Tool.starts_playback`). When one does, the rest of the reply can only be
      interrupted by "Hey Yarvis", and the conversation ends after the reply instead of
      listening to the song.
+   - **In the background.** Playing a song leaves the user in their app. If Spotify is
+     closed it is started hidden (`open -g -j`) and asked again, for a few seconds, until it
+     plays. Spotify brings itself to the front when it plays a track, so Yarvis notes the
+     frontmost app first, and a watcher running alongside the reply gives the focus back
+     whenever Spotify jumps forward in the next three seconds (hiding it again if it was
+     hidden), through System Events. Without that permission the music still plays; each
+     step is logged. Mail and Contacts start hidden the same way. What
+     the user wants to look at (a website, a tab, an app they named) still comes to the
+     front.
    - **Interrupted after acting.** A reply cut off before its first word used to be
      treated as unfinished, so the user's next words were added to the same request,
      and the model did everything again ("skip" skipped two songs). Once a tool has

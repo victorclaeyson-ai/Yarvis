@@ -12,6 +12,8 @@ from yarvis.app.bridge import AppApi, AppUi, CommandQueue, EventPump
 from yarvis.assistant import AssistantControls
 from yarvis.llm.anthropic import DEFAULT_MODEL
 from yarvis.runtime import run_assistant
+from yarvis.security.secrets import SecretStore
+from yarvis.speech.choice import cloud_key
 from yarvis.speech.choice import describe as describe_stt
 
 if TYPE_CHECKING:
@@ -43,6 +45,11 @@ class AppError(RuntimeError):
     """The window could not be opened (e.g. no GUI backend on Linux)."""
 
 
+def uses_cloud_stt(config: Config, secrets: SecretStore | None = None) -> bool:
+    """Whether AssemblyAI hears the user (its key is stored and ``cloud_stt`` is on)."""
+    return cloud_key(config.voice, secrets or SecretStore()) is not None
+
+
 def run_app(
     config: Config,
     *,
@@ -67,7 +74,7 @@ def run_app(
     ui = AppUi(pump.post)
     details = {
         "llm": config.llm.model or DEFAULT_MODEL,
-        "stt": describe_stt(config.voice) if voice_input else "off",
+        "stt": describe_stt(config.voice, cloud=uses_cloud_stt(config)) if voice_input else "off",
         "tts": config.voice.voice if voice_output else "muted",
     }
     api = AppApi(commands, controls, name=config.assistant.name, voice=voice_input, details=details)

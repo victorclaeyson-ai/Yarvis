@@ -7,8 +7,10 @@ token, and needs no developer account at Google or Microsoft.
 Emails are the classic way in for prompt injection, so:
 
 * everything read from Mail or Contacts is outside content (the turn is tainted);
-* sending and replying always need the user's "yes", and the question is built by code
-  from resolved addresses ("Should I email Thomas Peeters, thomas@example.com, ...?");
+* sending, replying and trashing always need the user's "yes", and the question is built
+  by code from what was resolved ("Should I email Thomas Peeters (thomas@example.com),
+  ...?"). Trashing too: an email that quietly trashed the security alert about its own
+  attack would be a classic trick;
 * the model refers to emails by the number Yarvis gave them, never by an id it made up;
 * AppleScript receives every value as ``argv`` data, never spliced into the script.
 
@@ -24,13 +26,13 @@ import re
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from email.utils import parseaddr
-from typing import TYPE_CHECKING, Any, Final
+from typing import TYPE_CHECKING, Any, Final, Literal
 
 from pydantic import Field
 from pydantic.json_schema import SkipJsonSchema  # noqa: TC002 - pydantic needs it at runtime
 
 from yarvis.tools.base import Arguments, Tier, Tool, ToolError
-from yarvis.tools.computer import OPEN, OSASCRIPT, osascript
+from yarvis.tools.computer import START_PAUSE_S, osascript, start_hidden
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable, Sequence
@@ -44,8 +46,6 @@ MAIL_TIMEOUT_S: Final = 30.0
 MAX_LISTED: Final = 25
 MAX_BODY_CHARS: Final = 6_000
 _SCAN_LIMIT: Final = 400
-_START_TRIES: Final = 20
-_START_PAUSE_S: Final = 0.5
 _SAID_BODY_CHARS: Final = 300
 _FIELD: Final = "\x1f"
 _RECORD: Final = "\x1e"
@@ -169,6 +169,35 @@ _SEND: Final = (
     "end repeat",
     "return (send m) as text",
     "end tell",
+    "end run",
+)
+_MARK: Final = (
+    "on run argv",
+    "set acctName to item 1 of argv",
+    "set boxName to item 2 of argv",
+    "set msgId to (item 3 of argv) as integer",
+    "set theField to item 4 of argv",
+    'set newValue to (item 5 of argv) is "true"',
+    'tell application "Mail"',
+    "set m to first message of mailbox boxName of account acctName whose id is msgId",
+    'if theField is "flagged" then',
+    "set flagged status of m to newValue",
+    "else",
+    "set read status of m to newValue",
+    "end if",
+    "end tell",
+    'return "marked"',
+    "end run",
+)
+_TRASH: Final = (
+    "on run argv",
+    "set acctName to item 1 of argv",
+    "set boxName to item 2 of argv",
+    "set msgId to (item 3 of argv) as integer",
+    'tell application "Mail"',
+    "delete (first message of mailbox boxName of account acctName whose id is msgId)",
+    "end tell",
+    'return "trashed"',
     "end run",
 )
 _CONTACTS: Final = (
@@ -300,6 +329,22 @@ class MacMail:
             msg = "Mail did not send it."
             raise ToolError(msg)
 
+    async def mark(self, message: Message, *, field: Literal["flagged", "read"], on: bool) -> None:
+        """Flag (a star, in Gmail) or unflag an email, or mark it read or unread."""
+        await self._script(
+            "Mail",
+            _MARK,
+            message.account,
+            message.mailbox,
+            str(message.id),
+            field,
+            "true" if on else "false",
+        )
+
+    async def trash(self, message: Message) -> None:
+        """Move an email to its account's trash (recoverable there)."""
+        await self._script("Mail", _TRASH, message.account, message.mailbox, str(message.id))
+
     async def contacts(self, name: str) -> list[tuple[str, str]]:
         """(name, address) of the contacts whose name contains ``name``."""
         return [
@@ -309,10 +354,10 @@ class MacMail:
         ]
 
     async def _script(self, app: str, script: Sequence[str], *values: str) -> str:
-        await self._start_hidden(app)
+        await start_hidden(self._run, app, pause=self._pause)
         code, output = await self._run(osascript(script, *values))
         if code != 0 and "(-600)" in output:  # still starting up: once more, a moment later
-            await self._pause(_START_PAUSE_S)
+            await self._pause(START_PAUSE_S)
             code, output = await self._run(osascript(script, *values))
         if code == 0:
             return output
@@ -327,25 +372,6 @@ class MacMail:
         number = _ERROR_NUMBER.search(output)
         msg = f"{app} did not answer" + (f" (error {number.group(1)})." if number else ".")
         raise ToolError(msg)
-
-    async def _start_hidden(self, app: str) -> None:
-        """Start ``app`` hidden and in the background (``open -g -j``), if it is not running.
-
-        AppleScript would start it in plain view; this way the user stays where they are.
-        """
-        if await self._running(app):
-            return
-        logger.info("Starting %s in the background", app)
-        await self._run([OPEN, "-g", "-j", "-a", app])
-        for _ in range(_START_TRIES):
-            if await self._running(app):
-                return
-            await self._pause(_START_PAUSE_S)
-
-    async def _running(self, app: str) -> bool:
-        # ``app`` is "Mail" or "Contacts", never text from the model.
-        code, output = await self._run([OSASCRIPT, "-e", f'application "{app}" is running'])
-        return code == 0 and output.strip() == "true"
 
 
 def _records(output: str) -> list[list[str]]:
@@ -419,6 +445,39 @@ class ReplyArgs(Arguments):
     to: SkipJsonSchema[str] = ""
     subject: SkipJsonSchema[str] = ""
     sender: SkipJsonSchema[str] = ""
+
+
+class Pinned(Arguments):
+    """An email pinned for an action: where it is, and how it is said."""
+
+    account: str
+    mailbox: str
+    id: int
+    said: str
+
+
+class TrashArgs(Arguments):
+    """Arguments of ``mail_trash``."""
+
+    numbers: list[int] = Field(
+        min_length=1, max_length=10, description="The emails' numbers in the last list."
+    )
+    # Filled in by Yarvis from the listed emails (never by the model: hidden from it).
+    pinned: SkipJsonSchema[list[Pinned]] = Field(default_factory=list[Pinned])
+
+
+class MarkArgs(Arguments):
+    """Arguments of ``mail_mark``."""
+
+    numbers: list[int] = Field(
+        min_length=1, max_length=MAX_LISTED, description="The emails' numbers in the last list."
+    )
+    starred: bool | None = Field(
+        default=None, description="Star (flag) them, or take the star off. Empty: unchanged."
+    )
+    read: bool | None = Field(
+        default=None, description="Mark them read, or unread. Empty: unchanged."
+    )
 
 
 class _MailTool[A: Arguments](Tool[A]):
@@ -619,14 +678,97 @@ class MailReply(_MailTool[ReplyArgs]):
         return f"reply to {_said(args.to)} about “{args.subject}”: “{_short(args.body)}”"
 
 
+class MailMark(_MailTool[MarkArgs]):
+    """Star or unstar emails, or mark them read or unread."""
+
+    name = "mail_mark"
+    description = (
+        "Star or unstar emails from the last list (a star in Gmail, a flag in Outlook and "
+        "Mail), or mark them read or unread, by their numbers."
+    )
+    tier = Tier.REVERSIBLE  # undone with one more word, and still in the inbox either way
+    Args = MarkArgs
+
+    async def run(self, args: MarkArgs) -> str:
+        """Mark them."""
+        if args.starred is None and args.read is None:
+            msg = "Say whether to star them or mark them read (or the opposite)."
+            raise ToolError(msg)
+        messages = [self._listing.get(number) for number in dict.fromkeys(args.numbers)]
+        for message in messages:
+            if args.starred is not None:
+                await self._mail.mark(message, field="flagged", on=args.starred)
+            if args.read is not None:
+                await self._mail.mark(message, field="read", on=args.read)
+        return f"Done, for {len(messages)} email{'s' if len(messages) > 1 else ''}."
+
+    def describe(self, args: MarkArgs) -> str:
+        """'star email 2' / 'mark emails 1, 3 as read'."""
+        numbers = ", ".join(str(n) for n in dict.fromkeys(args.numbers))
+        emails = f"email{'s' if len(args.numbers) > 1 else ''} {numbers}"
+        done: list[str] = []
+        if args.starred is not None:
+            done.append(f"{'star' if args.starred else 'unstar'} {emails}")
+        if args.read is not None:
+            mark = f"mark {emails}" if not done else "mark them"
+            done.append(f"{mark} as {'read' if args.read else 'unread'}")
+        return " and ".join(done) or f"leave {emails} as they are"
+
+
+class MailTrash(_MailTool[TrashArgs]):
+    """Move emails to the trash (after the user's "yes")."""
+
+    name = "mail_trash"
+    description = (
+        "Move emails from the last list to the trash, by their numbers. The user is asked to "
+        "confirm first."
+    )
+    tier = Tier.EXTERNAL
+    Args = TrashArgs
+
+    async def prepare(self, args: TrashArgs) -> TrashArgs:
+        """Pin the emails, so the "yes" trashes exactly the ones that were named."""
+        pinned: list[Pinned] = []
+        for number in dict.fromkeys(args.numbers):  # each once, in order
+            message = self._listing.get(number)
+            said = f"from {_name(message.sender)}, “{message.subject[:120]}”"
+            pinned.append(Pinned(account=message.account, mailbox=message.mailbox,
+                                 id=message.id, said=said))  # fmt: skip
+        return args.model_copy(update={"pinned": pinned})
+
+    async def run(self, args: TrashArgs) -> str:
+        """Trash them."""
+        if not args.pinned:
+            msg = "The emails to trash were not resolved."
+            raise ToolError(msg)
+        for email in args.pinned:
+            message = Message(email.account, email.mailbox, email.id, "", "", self._mail.now(),
+                              unread=False)  # fmt: skip
+            await self._mail.trash(message)
+        count = len(args.pinned)
+        return f"Moved {count} email{'s' if count > 1 else ''} to the trash."
+
+    def describe(self, args: TrashArgs) -> str:
+        """'move the email from Google, “Security alert”, to the trash'."""
+        if not args.pinned:
+            numbers = ", ".join(str(n) for n in args.numbers)
+            return f"move email {numbers} to the trash"
+        if len(args.pinned) == 1:
+            return f"move the email {args.pinned[0].said}, to the trash"
+        listed = "; ".join(email.said for email in args.pinned)
+        return f"move {len(args.pinned)} emails to the trash: {listed}"
+
+
 def mail_tools(mail: MacMail) -> list[Tool[Any]]:
-    """Listing, reading, sending and replying."""
+    """Listing, reading, sending, replying, starring and trashing."""
     listing = Listing()
     return [
         MailList(mail, listing),
         MailRead(mail, listing),
         MailSend(mail, listing),
         MailReply(mail, listing),
+        MailMark(mail, listing),
+        MailTrash(mail, listing),
     ]
 
 
@@ -640,6 +782,12 @@ def _address_of(entry: str) -> str:
 def _clean(name: str) -> str:
     """A display name with nothing but letters and simple punctuation (it is outside text)."""
     return _NAME_CHARS.sub("", name).strip()[:60]
+
+
+def _name(entry: str) -> str:
+    """'Google': who sent it, by name if there is one (for saying, not for sending)."""
+    name, address = parseaddr(entry)
+    return _clean(name) or address or "an unknown sender"
 
 
 def _said(entry: str) -> str:

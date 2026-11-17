@@ -148,6 +148,7 @@ def test_system_prompt_keeps_confirmations_short() -> None:
     assert "never ask what to do with it" in prompt
     assert "No closing offers or questions" in prompt
     assert "No closing offers or questions" in system_prompt("Yarvis")  # with or without tools
+    assert "Never correct how the user spelled" in system_prompt("Yarvis")  # it was the STT
 
 
 def test_system_prompt_knows_where_the_user_lives_and_how_to_search() -> None:

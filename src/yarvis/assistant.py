@@ -174,6 +174,8 @@ class _Listen:
     """Until then, a follow-up question ("and what about tomorrow?") counts too."""
     quiet: bool = False
     """Keep listening without announcing it again (nothing happened since)."""
+    barged: bool = False
+    """Yarvis was just cut off by "Hey Yarvis": the chime said it is listening; no greeting."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -523,8 +525,12 @@ class Assistant:
         return accept
 
     async def _answer_the_wake_word(self, step: _Listen) -> _Listen | None:
-        """Only "Hey Yarvis" was said: greet back, then listen for the request."""
-        if self._greeter is None:
+        """Only "Hey Yarvis" was said: greet back, then listen for the request.
+
+        Not when it cut Yarvis off: a "Good afternoon" in the middle of a conversation would
+        only be talked over (the chime already said Yarvis is listening).
+        """
+        if self._greeter is None or step.barged:
             logger.info("Heard only the wake word; listening for the request")
             return _Listen(prefix=(), preface=step.preface)  # keep what was said since
         greeting = self._greeter.next()
@@ -589,7 +595,12 @@ class Assistant:
             self._turn.retract(preface)
         if interruption.wake_word:
             await self._turn.chime()  # the cancelled reply has already silenced the speaker
-        return _Listen(prefix=interruption.prefix, woken=interruption.wake_word, preface=preface)
+        return _Listen(
+            prefix=interruption.prefix,
+            woken=interruption.wake_word,
+            preface=preface,
+            barged=interruption.wake_word,
+        )
 
     def _report(self, error: BaseException, *, context: str | None = None) -> None:
         if isinstance(error, LLMError | AudioBackendError):

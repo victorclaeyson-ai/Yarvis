@@ -21,10 +21,14 @@ Your own Jarvis — except it lives on your machine, like a yeti lives off the g
   speakers); say "thanks" when you're done
   ([how it works](docs/adr/0006-wake-word-and-barge-in.md)).
 - **Private by default** — wake word, speech-to-text and text-to-speech run locally (on
-  Apple Silicon, speech recognition uses NVIDIA's Parakeet on the GPU, which mishears far
-  fewer words than small Whisper models). Audio never leaves your machine and is never
-  stored; only the text of your request goes to the language model. A fully offline mode is
-  on the roadmap.
+  speech recognition is NVIDIA's Parakeet, on the GPU of an Apple Silicon Mac and on the
+  processor of any other computer, which mishears far fewer words than small Whisper
+  models). Audio never leaves your machine and is never stored; only the text of your
+  request goes to the language model. Want the best transcripts money can buy? Add an
+  AssemblyAI key and your requests (only those) are transcribed live on its EU servers,
+  with your computer as backup
+  ([how it works](docs/adr/0012-assemblyai-live-speech-recognition.md)). A fully offline
+  mode is on the roadmap.
 - **Actually does things** — reads your calendars and email and sends mail, searches the
   web, checks the weather, sets timers and reminders that speak up, drives apps, websites,
   volume and music; any MCP server next.
@@ -53,8 +57,8 @@ Read the full [design document](docs/DESIGN.md).
 
 ## Try it
 
-Requires macOS 14+ on Apple Silicon, or Linux, plus [uv](https://docs.astral.sh/uv/) and an
-[Anthropic API key](https://console.anthropic.com).
+Requires macOS 14+ on Apple Silicon, Windows 10/11 (early support, see below) or Linux, plus
+[uv](https://docs.astral.sh/uv/) and an [Anthropic API key](https://console.anthropic.com).
 
 ```bash
 git clone https://github.com/victorclaeyson-ai/Yarvis.git && cd Yarvis
@@ -64,12 +68,35 @@ uv run yarvis doctor              # checks audio devices, keychain, models
 uv run yarvis app                 # opens the Yarvis window: say "Hey Yarvis"
 ```
 
-The first run downloads the speech models, verified by SHA-256: the voice (350 MB) and, on
-Apple Silicon, Parakeet speech recognition (2.5 GB; NVIDIA, CC BY 4.0), or Whisper elsewhere
-(500 MB). After that, speech recognition and the voice run fully on your machine; only the
-text of the conversation goes to Claude. While you talk to Yarvis, Spotify and browser
-videos are turned down so it hears you rather than the song (`duck_music = false` turns that
-off), and once Yarvis has started music or a video, say "Hey Yarvis" to talk to it again.
+The first run downloads the speech models, verified by SHA-256: the voice (350 MB) and
+Parakeet speech recognition (2.5 GB; NVIDIA, CC BY 4.0; Whisper, 500 MB, if you decline or
+it cannot load). After that, speech recognition (unless you add AssemblyAI, below) and the
+voice run fully on your machine; only the text of the conversation goes to Claude. While you
+talk to Yarvis, Spotify and browser videos are turned down so it hears you rather than the
+song (`duck_music = false` turns that off), and once Yarvis has started music or a video,
+say "Hey Yarvis" to talk to it again. Music, email and the calendar are handled in the
+background: Spotify and Mail stay behind the app you're in.
+
+**Even better hearing (optional, paid).** Parakeet still mishears some names and short
+requests. [AssemblyAI](https://www.assemblyai.com)'s Universal-3.6 Pro hears almost
+everything, formats it (names, numbers, punctuation) and answers within a tenth of a second.
+Create an account (new accounts get free credit; after that it costs $0.45 per hour of
+talking to Yarvis), then:
+
+```bash
+uv run yarvis key set assemblyai   # paste the key from your AssemblyAI dashboard
+```
+
+From then on, what you say to Yarvis is streamed to AssemblyAI while you say it, and the
+speech recognition on your computer is the backup for any turn the cloud can't handle (no
+internet, a slow answer). Only your requests are sent: from just before you start talking
+until you finish, never while Yarvis waits for "Hey Yarvis" or talks. In the follow-up
+window, talk in the room that turns out not to be for Yarvis is transcribed by AssemblyAI
+too before Yarvis drops it. By default the EU servers are used, whose data AssemblyAI does
+not use for training; for zero retention, email data-opt-out@assemblyai.com from your
+account's address. `cloud_stt = false` in the config switches it off; `yarvis key delete
+assemblyai` removes the key. On the free plan AssemblyAI allows 5 new sessions (requests) a
+minute; adding a payment method raises that to 100.
 
 **About the wake word.** "Hey Yarvis" is detected on your computer by
 [openWakeWord](https://github.com/dscripka/openWakeWord)'s "hey jarvis" model (it hears
@@ -79,11 +106,12 @@ models are free for personal, **non-commercial** use (CC BY-NC-SA 4.0), so Yarvi
 them separately (4 MB) instead of bundling them. Prefer press-to-talk? Set
 `wake_word = false` in the config, or start with `--no-wake-word`.
 
-**No wake word needed for five minutes.** After a request, Yarvis keeps listening for the
-next one, but only acts on what's meant for it: its name, or a command like "open Spotify",
-"turn it up" or "go to YouTube". Talking to someone else in the room is ignored right there
-on your computer (never sent, shown or stored). Say "thanks" or "that's all" to end it
-sooner, or set `stay_open_s` (0 turns it off).
+**Keep talking.** After Yarvis answers, whatever you say in the next 15 seconds goes to it,
+no wake word needed (`follow_up_s`); say "thanks" or "that's all" to end it sooner. After
+that, say "Hey Yarvis" again. If you'd like it to stay open longer, `stay_open_s` keeps it
+listening, but only for what sounds meant for it (its name, or a command like "open
+Spotify"); other talk in the room is dropped on your computer and never reaches Claude. That filter
+can also miss a real request that doesn't sound like one, so it's off by default.
 
 Curious how fast it is on your machine? `yarvis bench` measures each stage (voice, each
 speech recognition engine and what it heard, Claude's first token) and recommends settings.
@@ -95,7 +123,7 @@ vocabulary for names, end-of-turn timing, how long a conversation stays open, wa
 interruptions, and which tools are on).
 
 **Things to try:** "What's on my calendar tomorrow?", "Any new email?", "Read the one from
-Thomas", "Reply that I'll be there at seven", "Put dentist on Thursday at three in my
+Thomas", "Reply that I'll be there at seven", "Star it", "Put the newsletter in the trash", "Put dentist on Thursday at three in my
 calendar", "What's the weather tomorrow?", "Who won the Belgian Grand Prix?",
 "Is the Albert Heijn in Leuven open on Sunday?", "Set a pasta timer for nine minutes", "Remind me at six to call mom",
 "Play Feel What You Want by Kristine W", "Spotify volume to forty", "Turn on shuffle",
@@ -110,8 +138,9 @@ Google or Microsoft developer setup and never sees your passwords. Add your acco
 System Settings → Internet Accounts (Google, Microsoft Exchange for Outlook.com and work or
 school accounts, iCloud) with Mail, Contacts and Calendars turned on, and let the Mail app
 sync once. The first time, macOS asks whether your terminal may see your calendars and
-control Mail and Contacts. Reading is instant; sending an email, replying or adding an event
-always needs your "yes", and Yarvis reads back exactly who it goes to ("Should I email Thomas
+control Mail and Contacts (Mail and Contacts stay hidden in the background). Reading is
+instant; sending an email, replying, trashing one or adding an event always needs your
+"yes", and Yarvis reads back exactly what it will do ("Should I email Thomas
 Peeters (thomas@example.com), from you@gmail.com, …?"). Emails and invitations are written by
 other people, so they are treated like web pages: they can't make Yarvis do anything without
 your "yes", nor quietly open a link that would carry your data away
@@ -142,9 +171,12 @@ redirect URI `http://127.0.0.1:8888/callback`, tick "Web API"), then run
 `uv run yarvis key set spotify` and paste its client ID and secret; they go to the keychain.
 Spotify requires the developer account to have Premium (since February 2026). Without it,
 Yarvis opens the search in Spotify instead; volume, shuffle, repeat, skipping and "what's
-playing?" work either way. For **your own playlists**, run `uv run yarvis spotify login`
-once: Spotify asks you to allow read-only access, and the login stays in the keychain
-(`uv run yarvis key delete spotify-login` disconnects it).
+playing?" work either way. Then run `uv run yarvis spotify login` once: Spotify asks you to
+let Yarvis read your playlists and control playback (never change your library), and the
+login stays in the keychain (`uv run yarvis key delete spotify-login` disconnects it). With
+it, **your own playlists** play by name, and music plays through Spotify's own service: in
+the background, without the Spotify window jumping in front of what you're doing. If
+Spotify isn't open, Yarvis opens it (hidden on a Mac, minimized on Windows) and plays there.
 
 **Typing.** Yarvis pastes text into the app in front, so it works with any keyboard layout.
 Pressing Enter (which sends, in chat apps) always needs your "yes", and Yarvis never types
@@ -154,6 +186,24 @@ lets anything started from that app control the keyboard; turn typing off with
 `[tools] typing = false` if you'd rather not.
 
 On Linux, the app window needs a GUI backend: `uv pip install 'pywebview[qt]'`.
+
+**Windows (early support).** Talking, timers, the weather, web search and Spotify work,
+and Yarvis can open apps from the Start menu, open websites, set the volume, play, pause or
+skip whatever is playing, and quit apps (after your "yes"). Browser control, typing, email
+and the calendar are macOS-only for now. Install
+[Git](https://git-scm.com/download/win) and uv (`winget install --id astral-sh.uv -e`), then
+run the same commands as above in a normal (not administrator) PowerShell. Two Windows
+quirks:
+
+- **Smart App Control** (Windows 11) blocks uv's own Python and the speech libraries, with
+  errors like `0xc0e90002` or "An Application Control policy has blocked this file": it
+  only lets through programs that many other PCs run. Turn it off in Windows Security → App
+  & browser control → Smart App Control (Defender keeps running).
+- Yarvis uses the microphone Windows has as default: Settings → System → Sound → Input.
+
+Speech recognition on Windows is the same Parakeet model as on a Mac, run on the processor
+by [onnx-asr](https://github.com/istupakov/onnx-asr) (no graphics card needed: it is many
+times faster than real time on a desktop CPU).
 
 ## Development
 

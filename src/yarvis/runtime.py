@@ -21,6 +21,7 @@ from yarvis.agent.toolbox import Toolbox
 from yarvis.assistant import Assistant, AssistantControls, TurnTaking
 from yarvis.audio.sounds import chime
 from yarvis.ears import MicrophoneEars, SharedMicrophone, WakeWord, barge_in_mode
+from yarvis.listen import AudioTap
 from yarvis.pipeline import Turn
 from yarvis.security.gate import Gate
 from yarvis.speech.base import AudioSink, SpeechToText, TextToSpeech
@@ -113,7 +114,13 @@ class Backends:
         from yarvis.audio.microphone import Microphone  # noqa: PLC0415
         from yarvis.audio.speaker import Speaker  # noqa: PLC0415
         from yarvis.llm.anthropic import AnthropicProvider  # noqa: PLC0415
-        from yarvis.speech.choice import make_stt, parakeet_available  # noqa: PLC0415
+        from yarvis.security.secrets import SecretStore  # noqa: PLC0415
+        from yarvis.speech.choice import (  # noqa: PLC0415
+            cloud_key,
+            make_stt,
+            parakeet_available,
+            spoken_names,
+        )
         from yarvis.speech.kokoro import KokoroTTS  # noqa: PLC0415
         from yarvis.speech.silero import SileroVAD  # noqa: PLC0415
         from yarvis.speech.wakeword import WakeWordDetector  # noqa: PLC0415
@@ -129,7 +136,11 @@ class Backends:
                 key, model=config.llm.model, web_search=config.tools.web_search
             ),
             stt=lambda config, cache: make_stt(
-                config.voice, cache, parakeet_ok=parakeet_available()
+                config.voice,
+                cache,
+                parakeet_ok=parakeet_available(),
+                cloud=cloud_key(config.voice, SecretStore()),
+                terms=spoken_names(config),
             ),
             tts=lambda config, cache: KokoroTTS(
                 cache_dir=cache, voice=config.voice.voice, speed=config.voice.speech_rate
@@ -263,8 +274,14 @@ async def run_assistant(
                 barge_in_vad=backends.vad() if barge_in == "voice" else None,
                 on_speech_start=speech_started,
                 on_level=ui.level,
+                tap=stt if isinstance(stt, AudioTap) else None,
             )
-            _log_hearing(wake_word=wake_word is not None, barge_in=barge_in, speaker=speaker)
+            _log_hearing(
+                wake_word=wake_word is not None,
+                barge_in=barge_in,
+                speaker=speaker,
+                cloud=isinstance(stt, AudioTap),
+            )
 
         assistant = Assistant(
             turn=turn,
@@ -324,12 +341,14 @@ def _log_failure(task: asyncio.Task[None]) -> None:
         logger.warning("Could not prepare the greetings: %s", error)
 
 
-def _log_hearing(*, wake_word: bool, barge_in: str, speaker: Sink | None) -> None:
+def _log_hearing(*, wake_word: bool, barge_in: str, speaker: Sink | None, cloud: bool) -> None:
     if wake_word:
         logger.info(
             "Wake word on: listening for 'Hey Yarvis' on this device. The microphone stays "
-            "open; audio is never stored or sent."
+            "open; audio is never stored, and nothing is sent until you speak to Yarvis."
         )
+    if cloud:
+        logger.info("Speech recognition: AssemblyAI while you talk, this computer as backup")
     device = speaker.device_name if speaker is not None else None
     logger.info("Barge-in: %s (output device: %s)", barge_in, device or "unknown")
 

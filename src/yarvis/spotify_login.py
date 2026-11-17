@@ -1,8 +1,9 @@
-"""``yarvis spotify login``: let Yarvis see your own playlists (with your consent, once).
+"""``yarvis spotify login``: your playlists and your player (with your consent, once).
 
 Spotify's authorization code flow, run once from the terminal:
 
-1. Your browser opens Spotify's consent page for read-only access to your playlists.
+1. Your browser opens Spotify's consent page: Yarvis asks to read your playlists and to
+   control playback (play, pause, skip, volume). It can never change your playlists.
 2. Spotify sends the browser back to ``http://127.0.0.1:8888/callback`` (the redirect URI
    registered in your Spotify developer app). For those few moments Yarvis listens on that
    loopback address, only for this one answer, and checks it carries the random ``state``
@@ -32,8 +33,13 @@ TOKEN_URL: Final = "https://accounts.spotify.com/api/token"  # noqa: S105 - a UR
 CALLBACK_HOST: Final = "127.0.0.1"
 CALLBACK_PORT: Final = 8888
 REDIRECT_URI: Final = f"http://{CALLBACK_HOST}:{CALLBACK_PORT}/callback"
-SCOPES: Final = ("playlist-read-private", "playlist-read-collaborative")
-"""Read-only: Yarvis can see your playlists, never change them."""
+SCOPES: Final = (
+    "playlist-read-private",
+    "playlist-read-collaborative",
+    "user-read-playback-state",  # which devices there are, what is playing
+    "user-modify-playback-state",  # play, pause, skip, volume: in the background, any device
+)
+"""Reading playlists and controlling playback; never changing the user's library."""
 LOGIN_TIMEOUT_S: Final = 180.0
 
 _DONE_PAGE: Final = (

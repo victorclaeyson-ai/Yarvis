@@ -23,6 +23,8 @@ if TYPE_CHECKING:
     from yarvis.speech.base import AudioArray
 
 VALID_KEY = "sk-ant-test-0123456789abcdefghij"  # gitleaks:allow
+ASSEMBLYAI_KEY = "test" * 8
+"""A well-formed AssemblyAI key that is obviously fake (and no secret scanner's match)."""
 
 
 @dataclass

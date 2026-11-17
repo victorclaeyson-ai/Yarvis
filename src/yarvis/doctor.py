@@ -17,18 +17,23 @@ from yarvis.audio.devices import AudioBackendError, AudioDevice
 from yarvis.config import Config, ConfigError, load_config
 from yarvis.models import (
     KOKORO_FILES,
-    PARAKEET_FILES,
     WAKE_WORD_FILES,
     WHISPER_APPROX_MB,
     kokoro_dir,
     missing,
     parakeet_dir,
+    parakeet_files,
     wake_word_dir,
     whisper_present,
 )
 from yarvis.paths import is_private
 from yarvis.security.secrets import SecretName, SecretSource
-from yarvis.speech.choice import choose_engine, parakeet_supported
+from yarvis.speech.choice import (
+    choose_engine,
+    parakeet_build,
+    parakeet_package,
+    parakeet_supported,
+)
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
@@ -76,6 +81,7 @@ class DoctorContext:
     def current(cls, *, paths: AppPaths, secrets: SecretStore, audio: AudioProbe) -> DoctorContext:
         """Build a context describing the running machine."""
         major, minor, micro = sys.version_info[:3]
+        build = parakeet_build(platform.system(), platform.machine())
         return cls(
             paths=paths,
             secrets=secrets,
@@ -84,7 +90,7 @@ class DoctorContext:
             system=platform.system(),
             machine=platform.machine(),
             mac_version=platform.mac_ver()[0],
-            parakeet_installed=importlib.util.find_spec("parakeet_mlx") is not None,
+            parakeet_installed=importlib.util.find_spec(parakeet_package(build)) is not None,
         )
 
 
@@ -100,6 +106,7 @@ def run_doctor(ctx: DoctorContext) -> list[CheckResult]:
         check_api_key(ctx, config),
         check_audio_input(ctx, config),
         check_audio_output(ctx, config),
+        check_speech_recognition(ctx, config),
         check_models(ctx, config),
     ]
 
@@ -127,7 +134,7 @@ def check_python(ctx: DoctorContext) -> CheckResult:
 
 
 def check_platform(ctx: DoctorContext) -> CheckResult:
-    """MacOS on Apple Silicon and Linux are supported."""
+    """MacOS on Apple Silicon and Linux are supported; Windows is getting there."""
     label = f"{ctx.system} {ctx.machine}"
     if ctx.system == "Darwin":
         if ctx.mac_version:
@@ -149,11 +156,19 @@ def check_platform(ctx: DoctorContext) -> CheckResult:
         )
     if ctx.system == "Linux":
         return CheckResult("Platform", Status.OK, label)
+    if ctx.system == "Windows":
+        return CheckResult(
+            "Platform",
+            Status.WARN,
+            f"{label} (early support)",
+            hint="Talking, timers, the weather, web search, apps, volume and Spotify work; "
+            "mail, the calendar, typing and browser tabs are macOS-only for now.",
+        )
     return CheckResult(
         "Platform",
         Status.FAIL,
         f"{label} is not supported yet",
-        hint="Yarvis supports macOS and Linux. Windows support is planned.",
+        hint="Yarvis supports macOS, Linux and (early) Windows.",
     )
 
 
@@ -172,12 +187,12 @@ def check_config(ctx: DoctorContext) -> tuple[CheckResult, Config]:
         config = load_config(path)
     except ConfigError as exc:
         return CheckResult("Config", Status.FAIL, str(exc)), Config()
-    if not is_private(path):
+    if not is_private(path, windows=_windows(ctx)):
         result = CheckResult(
             "Config",
             Status.WARN,
             f"{path} is readable or writable by other users",
-            hint=f"chmod 600 '{path}'",
+            hint=_keep_private(ctx, f"chmod 600 '{path}'"),
         )
         return result, config
     if relaxations := config.security_relaxations():
@@ -193,16 +208,28 @@ def check_config(ctx: DoctorContext) -> tuple[CheckResult, Config]:
 
 def check_storage(ctx: DoctorContext) -> CheckResult:
     """Existing data directories must be private to the current user."""
-    exposed = [path for path in ctx.paths.all_dirs() if path.exists() and not is_private(path)]
+    folders = dict.fromkeys(ctx.paths.all_dirs())  # on Windows, config and data share one
+    windows = _windows(ctx)
+    exposed = [path for path in folders if path.exists() and not is_private(path, windows=windows)]
     if exposed:
         listed = ", ".join(str(path) for path in exposed)
         return CheckResult(
             "Storage",
             Status.WARN,
             f"accessible by other users: {listed}",
-            hint="chmod 700 each listed directory.",
+            hint=_keep_private(ctx, "chmod 700 each listed directory."),
         )
     return CheckResult("Storage", Status.OK, "private")
+
+
+def _windows(ctx: DoctorContext) -> bool:
+    return ctx.system == "Windows"
+
+
+def _keep_private(ctx: DoctorContext, unix_hint: str) -> str:
+    if _windows(ctx):
+        return "Keep Yarvis's folders inside your user profile (unset YARVIS_HOME)."
+    return unix_hint
 
 
 def check_keychain(ctx: DoctorContext) -> CheckResult:
@@ -267,6 +294,26 @@ def _check_audio(ctx: DoctorContext, wanted: str | int | None, *, kind: str) -> 
     return CheckResult(label, Status.OK, device.name)
 
 
+def check_speech_recognition(ctx: DoctorContext, config: Config) -> CheckResult:
+    """Which engine hears you: AssemblyAI (with a key) or the one on this computer."""
+    label = "Speech recognition"
+    parakeet_ok = parakeet_supported(ctx.system, ctx.machine, installed=ctx.parakeet_installed)
+    engine = choose_engine(config.voice, parakeet_ok=parakeet_ok)
+    local = "Parakeet" if engine == "parakeet" else f"Whisper {config.voice.stt_model}"
+    if not config.voice.cloud_stt:
+        return CheckResult(label, Status.OK, f"{local} on this computer (cloud_stt is off)")
+    resolved = ctx.secrets.get(SecretName.ASSEMBLYAI)
+    if resolved is None:
+        return CheckResult(
+            label,
+            Status.OK,
+            f"{local} on this computer",
+            hint="For the most accurate transcripts: yarvis key set assemblyai",
+        )
+    where = "EU servers" if config.voice.cloud_region == "eu" else "nearest servers"
+    return CheckResult(label, Status.OK, f"AssemblyAI ({where}), {local} as backup")
+
+
 def check_models(ctx: DoctorContext, config: Config) -> CheckResult:
     """Speech models should be downloaded before the first conversation."""
     cache = ctx.paths.cache_dir
@@ -277,7 +324,8 @@ def check_models(ctx: DoctorContext, config: Config) -> CheckResult:
         megabytes += sum(model.size for model in pending) // 1_000_000
     parakeet_ok = parakeet_supported(ctx.system, ctx.machine, installed=ctx.parakeet_installed)
     if choose_engine(config.voice, parakeet_ok=parakeet_ok) == "parakeet":
-        if pending := missing(PARAKEET_FILES, parakeet_dir(cache)):
+        build = parakeet_build(ctx.system, ctx.machine)
+        if pending := missing(parakeet_files(build), parakeet_dir(cache, build)):
             todo.append("Parakeet speech recognition")
             megabytes += sum(model.size for model in pending) // 1_000_000
     elif not whisper_present(cache, config.voice.stt_model):

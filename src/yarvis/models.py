@@ -5,9 +5,10 @@ Every model is pinned:
 * Files Yarvis downloads itself (Kokoro, the wake word) are pinned by URL, size and
   SHA-256. A file is only moved into place after its hash matches, and redirects to
   non-HTTPS URLs are refused.
-* Parakeet (speech recognition on the Apple GPU) is downloaded the same way, from URLs
-  pinned to an exact Hugging Face commit. Its small ``config.json`` lives in git rather
-  than LFS, so Hugging Face only publishes its git object id: it is checked against that.
+* Parakeet (speech recognition) is downloaded the same way, from URLs pinned to an exact
+  Hugging Face commit: the MLX build for the Apple GPU, the ONNX build for every other
+  computer's processor. Small files kept in git rather than LFS only have a published
+  git object id: they are checked against that.
 * Whisper models come from Hugging Face through ``faster-whisper``, pinned to an exact
   git commit, so a changed upstream repository cannot change what we load.
 * The Silero VAD model ships inside the ``faster-whisper`` wheel, which is itself pinned by
@@ -37,6 +38,8 @@ CHUNK_SIZE: Final = 1 << 20  # 1 MiB
 
 
 type HashAlgorithm = Literal["sha256", "git-blob"]
+type ParakeetBuild = Literal["mlx", "onnx"]
+"""Parakeet for the Apple GPU (MLX), or for any processor (ONNX Runtime)."""
 
 
 class _Hasher(Protocol):
@@ -133,6 +136,46 @@ PARAKEET_FILES: Final = (
 )
 """NVIDIA Parakeet TDT 0.6B v2 converted to MLX (CC BY 4.0): English speech recognition."""
 
+_PARAKEET_ONNX_REPO: Final = "https://huggingface.co/istupakov/parakeet-tdt-0.6b-v2-onnx/resolve"
+_PARAKEET_ONNX_COMMIT: Final = "0bbb45a3365852604aef28b538a8f066f4ccaa85"
+
+
+def _onnx(name: str, digest: str, size: int, algorithm: HashAlgorithm = "sha256") -> ModelFile:
+    url = f"{_PARAKEET_ONNX_REPO}/{_PARAKEET_ONNX_COMMIT}/{name}"
+    return ModelFile(name=name, url=url, digest=digest, size=size, algorithm=algorithm)
+
+
+PARAKEET_ONNX_FILES: Final = (
+    _onnx("config.json", "02a773005666393de591dfd55230b778da1653d8", 97, "git-blob"),
+    _onnx("vocab.txt", "f0742785f6073e80b911964c455b05f3609bf23b", 9_384, "git-blob"),
+    _onnx(
+        "decoder_joint-model.onnx",
+        "cbb52a07bd70ab5b67f8439d4b3cd8704b18467b4430bcacb5adabe154b8d191",
+        35_792_059,
+    ),
+    _onnx(
+        "encoder-model.onnx",
+        "3987bcd28175d829d12888a996a84e8f62a0e374d9ffd640662c1515adc679d3",
+        41_770_866,
+    ),
+    _onnx(
+        "encoder-model.onnx.data",
+        "4dab7362d4874d85965045b1e41b2d61dd2cc0fb25671a7f6b3dc47bf120cc41",
+        2_435_420_160,
+    ),
+)
+"""The same model exported to ONNX (full precision) by Ilya Stupakov, for onnx-asr: any CPU.
+
+onnx-asr ships the audio preprocessing itself, so only the model and its vocabulary are
+downloaded.
+"""
+
+
+def parakeet_files(build: ParakeetBuild = "mlx") -> tuple[ModelFile, ...]:
+    """The Parakeet files for one build."""
+    return PARAKEET_FILES if build == "mlx" else PARAKEET_ONNX_FILES
+
+
 WHISPER_REVISIONS: Final[dict[SttModel, str]] = {
     "tiny.en": "0d3d19a32d3338f10357c0889762bd8d64bbdeba",
     "base.en": "3d3d5dee26484f91867d81cb899cfcf72b96be6c",
@@ -165,9 +208,10 @@ def wake_word_dir(cache_dir: Path) -> Path:
     return cache_dir / "models" / "wakeword"
 
 
-def parakeet_dir(cache_dir: Path) -> Path:
-    """Directory holding the Parakeet files."""
-    return cache_dir / "models" / "parakeet-tdt-0.6b-v2"
+def parakeet_dir(cache_dir: Path, build: ParakeetBuild = "mlx") -> Path:
+    """Directory holding the Parakeet files of one build."""
+    name = "parakeet-tdt-0.6b-v2" if build == "mlx" else "parakeet-tdt-0.6b-v2-onnx"
+    return cache_dir / "models" / name
 
 
 def whisper_dir(cache_dir: Path) -> Path:

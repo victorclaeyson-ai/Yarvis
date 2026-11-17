@@ -13,6 +13,9 @@ from __future__ import annotations
 
 import asyncio
 import difflib
+import logging
+import os
+import sys
 from pathlib import Path
 from typing import TYPE_CHECKING, Final, Literal
 from urllib.parse import urlsplit
@@ -22,12 +25,17 @@ from pydantic import Field
 from yarvis.tools.base import Arguments, Tier, Tool, ToolError
 
 if TYPE_CHECKING:
-    from collections.abc import Awaitable, Callable, Iterable, Sequence
+    from collections.abc import Awaitable, Callable, Iterable, Mapping, Sequence
+
+logger = logging.getLogger(__name__)
 
 OPEN: Final = "/usr/bin/open"
 OSASCRIPT: Final = "/usr/bin/osascript"
+PGREP: Final = "/usr/bin/pgrep"
 XDG_OPEN: Final = "/usr/bin/xdg-open"
 COMMAND_TIMEOUT_S: Final = 8.0
+START_PAUSE_S: Final = 0.5
+_START_TRIES: Final = 20
 MAX_OUTPUT_CHARS: Final = 64_000
 """Enough for any answer Yarvis asks for (a page's links, every tab); tool results are
 trimmed again before they reach the model."""
@@ -43,18 +51,45 @@ type Runner = Callable[[Sequence[str]], Awaitable[tuple[int, str]]]
 """Runs a command (argument list) and returns (exit code, output)."""
 
 
+_WINDOWS_ENV: Final = (
+    "SystemRoot", "WINDIR", "SystemDrive", "TEMP", "TMP", "USERPROFILE", "APPDATA",
+    "LOCALAPPDATA", "ProgramData", "ProgramFiles", "ComSpec", "PATHEXT",
+)  # fmt: skip
+_CREATE_NO_WINDOW: Final = 0x08000000
+
+
+def environment(
+    platform: str = sys.platform, environ: Mapping[str, str] = os.environ
+) -> dict[str, str]:
+    """What a command may see: enough to run, and none of the user's secrets (API keys)."""
+    if platform == "win32":
+        env = {name: environ[name] for name in _WINDOWS_ENV if environ.get(name)}
+        env["PATH"] = str(Path(env.get("SystemRoot", r"C:\Windows")) / "System32")
+        return env
+    return {"PATH": "/usr/bin:/bin", "HOME": str(Path.home()), "LANG": "en_US.UTF-8"}
+
+
 async def run_command(
     argv: Sequence[str], *, timeout_s: float = COMMAND_TIMEOUT_S
 ) -> tuple[int, str]:
     """Run a program (no shell) with a minimal environment; return (exit code, output)."""
-    env = {"PATH": "/usr/bin:/bin", "HOME": str(Path.home()), "LANG": "en_US.UTF-8"}
-    process = await asyncio.create_subprocess_exec(
-        *argv,
-        stdin=asyncio.subprocess.DEVNULL,
-        stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.STDOUT,
-        env=env,
-    )
+    if sys.platform == "win32":  # pragma: no cover - no console window flashing up per command
+        process = await asyncio.create_subprocess_exec(
+            *argv,
+            stdin=asyncio.subprocess.DEVNULL,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.STDOUT,
+            env=environment(),
+            creationflags=_CREATE_NO_WINDOW,
+        )
+    else:
+        process = await asyncio.create_subprocess_exec(
+            *argv,
+            stdin=asyncio.subprocess.DEVNULL,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.STDOUT,
+            env=environment(),
+        )
     try:
         async with asyncio.timeout(timeout_s):
             output, _ = await process.communicate()
@@ -63,6 +98,35 @@ async def run_command(
         await process.wait()
         raise
     return process.returncode or 0, output.decode(errors="replace").strip()[:MAX_OUTPUT_CHARS]
+
+
+async def is_running(run: Runner, app: str) -> bool:
+    """Whether the app called ``app`` (exactly) is running."""
+    code, _ = await run([PGREP, "-x", app])
+    return code == 0
+
+
+async def start_hidden(
+    run: Runner, app: str, *, pause: Callable[[float], Awaitable[None]] = asyncio.sleep
+) -> bool:
+    """Start an app hidden and in the background (``open -g -j``), unless it is running.
+
+    AppleScript would start it in plain view, and ``activate`` would bring it in front:
+    this way the user stays in the app they are in. ``app`` is a fixed name ("Mail",
+    "Spotify"), never text from the model.
+
+    Returns:
+        Whether it had to be started (it may need a moment more before it is ready).
+    """
+    if await is_running(run, app):
+        return False
+    logger.info("Starting %s in the background", app)
+    await run([OPEN, "-g", "-j", "-a", app])
+    for _ in range(_START_TRIES):
+        if await is_running(run, app):
+            break
+        await pause(START_PAUSE_S)
+    return True
 
 
 class Apps:
@@ -91,20 +155,31 @@ class Apps:
             ToolError: If there is no such app, or the name is ambiguous.
         """
         apps = self.names()
-        wanted = name.casefold()
-        exact = [app for app in apps if app.casefold() == wanted]
-        partial = [app for app in apps if wanted in app.casefold()]
-        matches = exact or partial
-        if len(matches) == 1:
-            return matches[0], apps[matches[0]]
-        if matches:
-            options = ", ".join(sorted(matches)[:4])
-            msg = f"Several apps match {name!r}: {options}."
-            raise ToolError(msg)
-        close = difflib.get_close_matches(name, list(apps), n=3, cutoff=0.6)
-        hint = f" Did you mean {' or '.join(close)}?" if close else ""
-        msg = f"No app called {name!r} is installed.{hint}"
+        app = pick_app(name, apps)
+        return app, apps[app]
+
+
+def pick_app(name: str, names: Iterable[str], *, what: str = "is installed") -> str:
+    """The one name among ``names`` that ``name`` means ("chrome" → "Google Chrome").
+
+    Raises:
+        ToolError: If there is none (with close guesses), or several.
+    """
+    names = list(names)
+    wanted = name.casefold()
+    exact = [app for app in names if app.casefold() == wanted]
+    partial = [app for app in names if wanted in app.casefold()]
+    matches = exact or partial
+    if len(matches) == 1:
+        return matches[0]
+    if matches:
+        options = ", ".join(sorted(matches)[:4])
+        msg = f"Several apps match {name!r}: {options}."
         raise ToolError(msg)
+    close = difflib.get_close_matches(name, names, n=3, cutoff=0.6)
+    hint = f" Did you mean {' or '.join(close)}?" if close else ""
+    msg = f"No app called {name!r} {what}.{hint}"
+    raise ToolError(msg)
 
 
 class AppArgs(Arguments):

@@ -12,8 +12,10 @@ request said in one breath ("Hey Yarvis what time is it") would otherwise lose i
 words. After a voice barge-in, the speech that triggered it is kept. Anything recorded
 while nobody was reading (such as Yarvis's own voice) is flushed before a fresh start.
 
-Privacy: audio only lives in memory, a few seconds at most. It is never written to disk and
-never sent anywhere; only the transcript of a request goes to the language model.
+Privacy: audio only lives in memory, a few seconds at most, and is never written to disk.
+It is never sent anywhere either, with one exception you opt into: with an AssemblyAI key
+stored, the speech of each request is streamed to AssemblyAI while you say it (see
+``speech.assemblyai``). The language model only ever receives the transcript.
 """
 
 from __future__ import annotations
@@ -35,7 +37,7 @@ if TYPE_CHECKING:
     from types import TracebackType
 
     from yarvis.config.models import BargeIn
-    from yarvis.listen import PauseHooks, Utterance
+    from yarvis.listen import AudioTap, PauseHooks, Utterance
     from yarvis.speech.base import AudioArray, VoiceActivityDetector
     from yarvis.speech.endpointing import EndpointerSettings
 
@@ -211,6 +213,7 @@ class MicrophoneEars:
         barge_in_vad: VoiceActivityDetector | None = None,
         on_speech_start: Callable[[], None] | None = None,
         on_level: Callable[[float], None] | None = None,
+        tap: AudioTap | None = None,
     ) -> None:
         if barge_in == "wake_word" and wake_word is None:
             msg = "wake-word barge-in needs a wake-word detector"
@@ -226,6 +229,7 @@ class MicrophoneEars:
         self._barge_in_vad = barge_in_vad
         self._on_speech_start = on_speech_start
         self._on_level = on_level
+        self._tap = tap
 
     @property
     def wake_word(self) -> bool:
@@ -271,6 +275,7 @@ class MicrophoneEars:
                     on_speech_start=self._on_speech_start,
                     on_level=self._on_level,
                     hooks=hooks,
+                    tap=self._tap,
                 )
 
     async def wake(self) -> tuple[AudioArray, ...]:

@@ -30,3 +30,7 @@ htmlcov/
 *.onnx
 *.safetensors
 models/
+
+# Personal Claude Code settings (the shared ones are CLAUDE.md)
+.claude/settings.local.json
+CLAUDE.local.md

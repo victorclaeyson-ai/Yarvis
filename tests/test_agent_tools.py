@@ -195,6 +195,37 @@ def test_sending_data_out_after_outside_content_needs_a_yes(
     assert gate.check(Link(), tainted=tainted, sends_out=False).verdict is Verdict.ALLOW
 
 
+class OpenSite(Link):
+    """Opens a web address in the user's browser, where the address is seen (ADR 0021)."""
+
+    name = "open_site"
+    opens_links = True
+
+
+@pytest.mark.parametrize(
+    ("tool", "confirm_links", "expected"),
+    [
+        (OpenSite(), True, Verdict.CONFIRM),  # the default: asked, as before
+        (OpenSite(), False, Verdict.ALLOW),  # the user chose not to be asked about links
+        (Link(), False, Verdict.CONFIRM),  # anything else that sends data out still asks
+    ],
+)
+def test_links_after_outside_content_follow_the_users_setting(
+    tool: Tool[Any], confirm_links: bool, expected: Verdict
+) -> None:
+    gate = Gate(confirm_external=False, confirm_links=confirm_links)
+    assert gate.check(tool, tainted=True, sends_out=True).verdict is expected
+
+
+def test_not_asking_about_links_never_skips_an_external_action() -> None:
+    class ExternalLink(OpenSite):
+        name = "external_link"
+        tier = Tier.EXTERNAL
+
+    gate = Gate(confirm_external=False, confirm_links=False)
+    assert gate.check(ExternalLink(), tainted=True, sends_out=True).verdict is Verdict.CONFIRM
+
+
 class Note(Echo):
     """A reversible change that outside content must not make on its own (like memory)."""
 

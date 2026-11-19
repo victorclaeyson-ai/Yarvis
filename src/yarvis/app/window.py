@@ -72,6 +72,7 @@ def run_app(
         user=config.assistant.user_name,
         place=config.assistant.location,
         asks=config.security.confirm_tier2,
+        forget=memory.forget if (memory := backends.memory()) is not None else None,
     )
 
     window = gui.create_window(

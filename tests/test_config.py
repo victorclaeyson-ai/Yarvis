@@ -179,3 +179,8 @@ def test_browser_choice() -> None:
     assert parse_config('[tools]\nbrowser = "Brave Browser"').tools.browser == "Brave Browser"
     with pytest.raises(ConfigError, match="browser"):
         parse_config('[tools]\nbrowser = "Netscape"')
+
+
+def test_links_are_asked_about_by_default() -> None:
+    """ADR 0021: only the user's own config can turn the question about links off."""
+    assert Config().security.confirm_links is True

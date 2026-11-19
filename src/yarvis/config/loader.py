@@ -96,6 +96,7 @@ auto = true                 # also remember lasting facts you mention (it says "
 [security]
 allow_tier3 = false         # dangerous tools (shell, delete, purchases): keep this off
 confirm_tier2 = true        # confirm external actions (send message, create event)
+confirm_links = true        # after reading a page or email, ask before opening a web address
 
 [logging]
 level = "INFO"

@@ -345,6 +345,13 @@ class SecurityConfig(_Section):
         default=True,
         description="Require confirmation for external or hard-to-undo actions.",
     )
+    confirm_links: bool = Field(
+        default=True,
+        description=(
+            "After Yarvis read outside content, ask before opening a web address (the "
+            "address could carry what it read to a stranger's site). ADR 0021."
+        ),
+    )
 
 
 class ConversationConfig(_Section):

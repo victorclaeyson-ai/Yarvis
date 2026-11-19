@@ -65,6 +65,10 @@ class Tool[A: Arguments](ABC):
     asks_when_tainted: ClassVar[bool] = False
     """True if, after the turn read outside content, a call needs the user's "yes" whatever
     the tier: changing what Yarvis remembers about the user (DESIGN.md T7)."""
+    opens_links: ClassVar[bool] = False
+    """True if the data it sends out is a web address opened in the user's browser, where
+    it is seen. ``security.confirm_links`` decides whether such calls ask after outside
+    content (ADR 0021); every other call that sends data out always does."""
     timeout_s: float | None = None
     """How long one call may take; None: the toolbox's default."""
 

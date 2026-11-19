@@ -41,9 +41,16 @@ class Decision:
 class Gate:
     """Decides, per call, whether a tool runs, needs the user's "yes", or is refused."""
 
-    def __init__(self, *, confirm_external: bool = True, allow_dangerous: bool = False) -> None:
+    def __init__(
+        self,
+        *,
+        confirm_external: bool = True,
+        allow_dangerous: bool = False,
+        confirm_links: bool = True,
+    ) -> None:
         self._confirm_external = confirm_external
         self._allow_dangerous = allow_dangerous
+        self._confirm_links = confirm_links
 
     def check(self, tool: Tool[Any], *, tainted: bool, sends_out: bool = False) -> Decision:
         """Decide for one call.
@@ -53,7 +60,10 @@ class Gate:
         carry text to a destination the model chose (``Tool.sends_data_out``).
         """
         asks = tool.asks_when_tainted and tainted
-        decision = self._decide(tool.tier, tainted=tainted, sends_out=sends_out, asks=asks)
+        # The user may choose not to be asked about web addresses (ADR 0021): only those,
+        # never mail, MCP calls or anything external, and only through their own config.
+        asks_out = sends_out and (self._confirm_links or not tool.opens_links)
+        decision = self._decide(tool.tier, tainted=tainted, sends_out=asks_out, asks=asks)
         logger.info(
             "Gate: %s (tier %d%s%s) -> %s",
             tool.name,

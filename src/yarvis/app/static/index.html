@@ -138,6 +138,10 @@
   button#fresh { margin-left: auto; font-family: var(--mono); font-size: 11px; letter-spacing: .12em; color: #6fd6ff; background: transparent; border: 1px solid var(--line-soft); padding: 2px 8px; cursor: pointer; }
   button#fresh:hover { background: rgba(63, 212, 255, .1); }
   button#fresh:disabled { opacity: .4; cursor: default; }
+  button.undo { margin-left: 8px; font-family: var(--mono); font-size: 10px; letter-spacing: .12em; color: #6fd6ff; background: transparent; border: 1px solid var(--line-soft); padding: 0 6px; cursor: pointer; }
+  button.undo:hover { background: rgba(63, 212, 255, .1); }
+  button.undo:focus-visible { outline: 1px solid #6fd6ff; }
+  .line.system q.fact { color: #e3f6ff; }
   .rows { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 6px; }
   .rows li { display: grid; grid-template-columns: 9px 112px minmax(0, 1fr); gap: 9px; align-items: baseline; font-size: 14px; }
   .rows li .dot { align-self: center; }
@@ -782,6 +786,39 @@
     said(e) { finishReply(); addLine("assistant", name.toUpperCase(), String(e.text || "")); },
     alert(e) { finishReply(); ping = 1; glitch(ui.tag); addLine("alert", "ALERT", String(e.text || "")); tick(String(e.text || "")); },
     activity(e) { addSystem(String(e.text || "")); },
+    remembered(e) {
+      // A kept fact, with Undo: a click forgets it in code, the model is not asked (ADR 0021).
+      const fact = String(e.text || "");
+      const id = Number(e.id);
+      const { span } = addLine("system", "", "// remembered: ");
+      span.appendChild(el("q", "fact", fact));   // its own element: a quote in it can't fake a line
+      if (!Number.isInteger(id) || id < 1) return;
+      const undo = el("button", "undo", "UNDO");
+      undo.type = "button";
+      undo.title = "Forget this fact";
+      undo.addEventListener("click", () => {
+        const bridge = window.pywebview && window.pywebview.api;
+        if (!bridge || typeof bridge.forget_fact !== "function") {
+          fail("the window lost its connection to Yarvis. Close it and run yarvis app again.");
+          return;
+        }
+        undo.disabled = true;
+        Promise.resolve(bridge.forget_fact(id)).then((result) => {
+          if (result !== "forgotten" && result !== "gone") {
+            undo.disabled = false;   // still kept: the button stays
+            addSystem("couldn't forget it. Try UNDO again, or run: yarvis memory forget " + id);
+            return;
+          }
+          undo.remove();
+          span.textContent = result === "forgotten" ? "// forgotten: " : "// already forgotten";
+          if (result === "forgotten") span.appendChild(el("q", "fact", fact));
+        }).catch((err) => {
+          undo.disabled = false;
+          fail("Yarvis did not respond: " + ((err && err.message) || err));
+        });
+      });
+      span.after(undo);
+    },
     notice(e) { addLine("system", "", "// " + String(e.text || "").toLowerCase()); },
     speech() { glitch(ui.core); },
     level(e) { levelTarget = Math.min(1, Math.sqrt(Math.max(0, Number(e.value) || 0)) * 3.2); },

@@ -113,6 +113,10 @@ class MemoryBookError(Exception):
     """A memory change did not happen. The message says why, for the user."""
 
 
+class FactNotFoundError(MemoryBookError):
+    """There is no fact with that number (already forgotten, or never kept)."""
+
+
 class Fact(BaseModel):
     """One thing Yarvis knows about the user."""
 
@@ -186,7 +190,7 @@ class MemoryBook:
                 self._cached = self.load()
             except MemoryBookError as exc:
                 logger.warning("Memory is not used: %s", exc)
-                self._cached = ()
+                self._seen, self._cached = None, ()  # tried again next time
         return self._cached
 
     def load(self) -> tuple[Fact, ...]:
@@ -256,14 +260,15 @@ class MemoryBook:
         """Forget one fact and return it.
 
         Raises:
-            MemoryBookError: If there is no such fact, or it cannot be saved.
+            FactNotFoundError: If there is no such fact.
+            MemoryBookError: If it cannot be saved.
         """
         with self._locked():
             record = self._read()
             fact = next((f for f in record.facts if f.id == fact_id), None)
             if fact is None:
                 msg = f"There is no fact {fact_id}."
-                raise MemoryBookError(msg)
+                raise FactNotFoundError(msg)
             kept = tuple(f for f in record.facts if f.id != fact_id)
             self._write(_File(next_id=record.next_id, facts=kept))
         return fact

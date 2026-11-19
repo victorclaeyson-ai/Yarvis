@@ -1,6 +1,6 @@
 # 17. Memory: facts Yarvis learns about the user
 
-- **Status:** Accepted
+- **Status:** Accepted; point 5 changed by ADR 0021 (remembering no longer asks)
 - **Date:** 2026-11-19
 
 ## Context
@@ -104,8 +104,9 @@ Revisit after real use of memory, with the arguments below.
 ## Consequences
 
 - Yarvis knows the user better over time, and the user can see and undo all of it.
-- A page or email can't plant or erase a memory without the user hearing the fact and
-  saying yes, for the rest of that conversation (ADR 0018).
+- A page or email can't erase a memory without the user hearing the fact and saying yes,
+  for the rest of that conversation (ADR 0018). Since ADR 0021 it can add one without a
+  question, but the fact is shown at once with an Undo button.
 - Facts are sent to Claude with every request, like the profile. They are listed in the
   privacy table; `yarvis memory export` shows exactly what is kept.
 - Proactive remembering and `memory.auto = false` rely on Claude following the rule in

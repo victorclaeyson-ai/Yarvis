@@ -61,7 +61,7 @@ def test_healthy_machine_passes(ctx: DoctorContext, fake_keyring: FakeKeyring) -
     install_models(ctx.paths)
     results = run_doctor(ctx)
     assert [result.status for result in results] == [Status.OK] * 14
-    assert results[-1].label == "Memory"  # the newest check (ADR 0017)
+    assert results[-1].name == "Memory"  # the newest check (ADR 0017)
     assert not has_failures(results)
 
 

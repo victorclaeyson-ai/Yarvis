@@ -1,5 +1,9 @@
 """Claude via the official Anthropic SDK, streamed.
 
+The tools and the stable part of the system prompt carry a cache marker, so repeated
+requests read them from Claude's prompt cache at a tenth of the price (ADR 0016). Nothing
+that changes per request may be placed before a marker.
+
 Web search runs on Anthropic's side (the ``web_search`` server tool): Claude decides when
 to search, and the results stay inside the request. Each search is reported to the caller
 as a ``WebSearch`` so the turn can be treated as holding outside content.
@@ -24,10 +28,12 @@ if TYPE_CHECKING:
 
     from anthropic.lib.streaming import AsyncMessageStream
     from anthropic.types import (
+        CacheControlEphemeralParam,
         ContentBlock,
         ContentBlockParam,
         MessageParam,
         TextBlockParam,
+        ToolChoiceNoneParam,
         ToolParam,
         ToolResultBlockParam,
         ToolUnionParam,
@@ -37,7 +43,7 @@ if TYPE_CHECKING:
     from anthropic.types import Message as ApiMessage
     from pydantic import SecretStr
 
-    from yarvis.llm.base import Message, ToolSpec
+    from yarvis.llm.base import Message, SystemPrompt, ToolSpec
     from yarvis.telemetry import Reporter
 
 DEFAULT_MODEL: Final = "claude-haiku-5-5"
@@ -51,6 +57,8 @@ almost every question paid for a fresh TLS handshake (~0.2-0.5 s)."""
 
 WEB_SEARCHES_PER_REQUEST: Final = 3
 """At most this many searches per answer (each costs about a cent)."""
+CACHE_CONTROL: Final[CacheControlEphemeralParam] = {"type": "ephemeral"}
+"""Claude's 5-minute prompt cache; each read keeps the entry alive for another 5 minutes."""
 _MAX_CONTINUATIONS: Final = 3  # a long search can pause the turn; it is resumed this often
 _KEPT_TURNS: Final = 16
 
@@ -103,26 +111,34 @@ class AnthropicProvider:
         self,
         messages: Sequence[Message],
         *,
-        system: str,
+        system: SystemPrompt,
         max_tokens: int,
         tools: Sequence[ToolSpec] = (),
+        allow_tool_calls: bool = True,
     ) -> AsyncGenerator[str | ToolCall | WebSearch]:
         """Yield reply text as it is generated, web searches as they happen, then tool calls."""
         params = [self._to_param(message) for message in messages]
+        last = len(tools) - 1
+        # The marker sits on our own last tool, so the web-search setting does not move it.
         tool_params: list[ToolUnionParam] = [
-            _tool_param(t.name, t.description, dict(t.input_schema)) for t in tools
+            _tool_param(t.name, t.description, dict(t.input_schema), cached=i == last)
+            for i, t in enumerate(tools)
         ]
         if tools and self.web_search:
             tool_params.append(_WEB_SEARCH)
+        system_blocks = _system_blocks(system)
+        # Only the choice changes, not the tool list: that keeps the cached prefix.
+        choice = _NO_TOOL_CALLS if tool_params and not allow_tool_calls else anthropic.omit
         turn: list[ContentBlock] = []
         try:
             for _ in range(_MAX_CONTINUATIONS + 1):
                 async with self._client.messages.stream(
                     model=self.model,
                     max_tokens=max_tokens,
-                    system=system,
+                    system=system_blocks or anthropic.omit,
                     messages=params,
                     tools=tool_params or anthropic.omit,
+                    tool_choice=choice,
                 ) as stream:
                     seen = _Seen()
                     try:
@@ -163,7 +179,7 @@ class AnthropicProvider:
 
     def _report(self, stream: AsyncMessageStream, seen: _Seen) -> None:
         """Count what one request used, even if it was cut off (a dropped draft)."""
-        if self._reporter is None or (snapshot := _snapshot(stream)) is None:
+        if (snapshot := _snapshot(stream)) is None:
             return  # nothing arrived: nothing to count
         usage = snapshot.usage
         output = usage.output_tokens
@@ -171,13 +187,24 @@ class AnthropicProvider:
         if not seen.complete:  # the final counts never came: estimate from what did
             output = max(output, estimated_tokens(seen.chars))
             searches = max(searches, seen.searches)
+        written = usage.cache_creation_input_tokens or 0
+        read = usage.cache_read_input_tokens or 0
+        logger.debug(  # numbers only: shows whether the prompt cache is working
+            "Claude tokens: %d in, %d cache write, %d cache read, %d out",
+            usage.input_tokens,
+            written,
+            read,
+            output,
+        )
+        if self._reporter is None:
+            return
         self._reporter.claude(
             ClaudeUsage(
                 model=snapshot.model or self.model,
                 input_tokens=usage.input_tokens,
                 output_tokens=output,
-                cache_write_tokens=usage.cache_creation_input_tokens or 0,
-                cache_read_tokens=usage.cache_read_input_tokens or 0,
+                cache_write_tokens=written,
+                cache_read_tokens=read,
                 web_searches=searches,
             )
         )
@@ -212,8 +239,23 @@ class _Seen:
     complete: bool = False
 
 
-def _tool_param(name: str, description: str, schema: dict[str, object]) -> ToolParam:
-    return {"name": name, "description": description, "input_schema": schema}
+def _tool_param(
+    name: str, description: str, schema: dict[str, object], *, cached: bool = False
+) -> ToolParam:
+    param: ToolParam = {"name": name, "description": description, "input_schema": schema}
+    if cached:
+        param["cache_control"] = CACHE_CONTROL
+    return param
+
+
+def _system_blocks(system: SystemPrompt) -> list[TextBlockParam]:
+    """The stable part with a cache marker, then the volatile part (never empty blocks)."""
+    blocks: list[TextBlockParam] = []
+    if system.stable:
+        blocks.append({"type": "text", "text": system.stable, "cache_control": CACHE_CONTROL})
+    if system.volatile:
+        blocks.append({"type": "text", "text": system.volatile})
+    return blocks
 
 
 _WEB_SEARCH: Final[WebSearchTool20250305Param] = {
@@ -221,6 +263,9 @@ _WEB_SEARCH: Final[WebSearchTool20250305Param] = {
     "name": "web_search",
     "max_uses": WEB_SEARCHES_PER_REQUEST,
 }
+
+
+_NO_TOOL_CALLS: Final[ToolChoiceNoneParam] = {"type": "none"}
 
 
 def _to_param(message: Message) -> MessageParam:

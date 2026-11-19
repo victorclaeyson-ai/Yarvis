@@ -8,7 +8,7 @@ import pytest
 
 from fakes import FakeLLM, FakeSpeaker, FakeSTT, FakeTTS, RecordingObserver, TickingClock
 from yarvis.agent.conversation import Conversation
-from yarvis.llm.base import LLMError
+from yarvis.llm.base import LLMError, SystemPrompt
 from yarvis.pipeline import Turn, TurnTimings
 
 if TYPE_CHECKING:
@@ -26,7 +26,9 @@ def make_turn(
     speaker: FakeSpeaker | None = None,
 ) -> tuple[Turn, RecordingObserver]:
     observer = RecordingObserver()
-    conversation = Conversation(llm, system_prompt=lambda: "S", max_tokens=64, clock=TickingClock())
+    conversation = Conversation(
+        llm, system_prompt=lambda: SystemPrompt("S"), max_tokens=64, clock=TickingClock()
+    )
     turn = Turn(conversation, stt=stt, tts=tts, speaker=speaker, observer=observer)
     return turn, observer
 
@@ -115,7 +117,7 @@ def test_missing_timestamps_give_none() -> None:
 
 async def test_stopping_a_turn_silences_the_speaker() -> None:
     class SlowLLM(FakeLLM):
-        async def stream(self, messages, *, system, max_tokens, tools=()):  # type: ignore[override]
+        async def stream(self, messages, *, system, max_tokens, tools=(), allow_tool_calls=True):  # type: ignore[override]
             yield "First sentence. "
             await asyncio.sleep(60)
             yield "never"  # pragma: no cover
@@ -257,7 +259,7 @@ async def test_only_the_wake_phrase_means_nothing_to_answer() -> None:
 
 async def test_chime_plays_only_with_a_speaker_and_a_sound() -> None:
     speaker = FakeSpeaker()
-    conversation = Conversation(FakeLLM(), system_prompt=lambda: "S", max_tokens=8)
+    conversation = Conversation(FakeLLM(), system_prompt=lambda: SystemPrompt("S"), max_tokens=8)
     observer = RecordingObserver()
     with_chime = Turn(
         conversation,
@@ -303,9 +305,10 @@ async def test_unanswered_until_the_first_word_is_spoken() -> None:
             self,
             messages: Sequence[Message],
             *,
-            system: str,
+            system: SystemPrompt,
             max_tokens: int,
             tools: Sequence[ToolSpec] = (),
+            allow_tool_calls: bool = True,
         ) -> AsyncGenerator[str | ToolCall]:
             await asyncio.Event().wait()
             yield ""  # pragma: no cover

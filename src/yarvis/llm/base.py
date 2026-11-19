@@ -62,6 +62,24 @@ class Message:
     tool_results: tuple[ToolResult, ...] = field(default=())
 
 
+@dataclass(frozen=True, slots=True)
+class SystemPrompt:
+    """The system prompt in two parts, so a provider can cache the first.
+
+    ``stable`` changes only when the configuration, the tools or the profile do. Anything
+    that changes often (the clock) goes in ``volatile``: inside a cached part it would
+    make every request miss the cache (ADR 0016).
+    """
+
+    stable: str
+    volatile: str = ""
+
+    @property
+    def text(self) -> str:
+        """The whole prompt, for a provider that does not cache."""
+        return self.stable + self.volatile
+
+
 class LLMError(Exception):
     """A language-model request failed. The message is safe to show to the user."""
 
@@ -73,15 +91,20 @@ class LLMProvider(Protocol):
         self,
         messages: Sequence[Message],
         *,
-        system: str,
+        system: SystemPrompt,
         max_tokens: int,
         tools: Sequence[ToolSpec] = (),
+        allow_tool_calls: bool = True,
     ) -> AsyncGenerator[str | ToolCall | WebSearch]:
         """Yield the reply as text fragments as soon as they are generated.
 
         If the model wants to use tools, the ``ToolCall`` objects follow at the end of
         the response; the caller runs them and asks again with the results. A provider
         that searches the web itself reports each search as a ``WebSearch``.
+
+        With ``allow_tool_calls`` false the model must answer in text: ``tools`` are
+        still listed (earlier tool calls in ``messages`` refer to them) but none may be
+        called, not even the provider's own web search.
 
         Raises:
             LLMError: On any failure, with a user-presentable message.

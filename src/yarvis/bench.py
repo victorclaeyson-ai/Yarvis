@@ -15,7 +15,7 @@ from typing import TYPE_CHECKING, Final
 
 import numpy as np
 
-from yarvis.llm.base import Message
+from yarvis.llm.base import Message, SystemPrompt
 from yarvis.speech.base import MIC_SAMPLE_RATE
 
 if TYPE_CHECKING:
@@ -84,7 +84,9 @@ async def first_token_ms(llm: LLMProvider, clock: Callable[[], float] = time.per
     """Time until Claude's first token for a tiny prompt."""
     start = clock()
     messages = [Message("user", "Reply with exactly one word: ok")]
-    async with aclosing(llm.stream(messages, system="Be brief.", max_tokens=5)) as stream:
+    async with aclosing(
+        llm.stream(messages, system=SystemPrompt("Be brief."), max_tokens=5)
+    ) as stream:
         async for _token in stream:
             break
     return (clock() - start) * 1000

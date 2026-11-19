@@ -29,7 +29,7 @@ if TYPE_CHECKING:
     from collections.abc import AsyncGenerator, Callable
 
     from yarvis.agent.toolbox import PendingAction, Toolbox
-    from yarvis.llm.base import LLMProvider
+    from yarvis.llm.base import LLMProvider, SystemPrompt
 
 logger = logging.getLogger(__name__)
 
@@ -78,9 +78,10 @@ class Draft:
             messages[-1] = Message("user", await self._resolve(pending))
         tainted = False
         for round_number in range(MAX_TOOL_ROUNDS + 1):
-            may_use_tools = toolbox is not None and round_number < MAX_TOOL_ROUNDS
-            text, calls = await self._stream(messages, may_use_tools=may_use_tools)
-            if not calls or toolbox is None:
+            # The last round must answer in words: tools stay listed, but none may be called.
+            may_call = round_number < MAX_TOOL_ROUNDS
+            text, calls = await self._stream(messages, allow_tool_calls=may_call)
+            if not calls or toolbox is None or not may_call:
                 return
             await self._live.wait()  # never act on a reply the user may not want
             # Search results read on the provider's side are outside content too.
@@ -97,11 +98,11 @@ class Draft:
                 return
 
     async def _stream(
-        self, messages: list[Message], *, may_use_tools: bool
+        self, messages: list[Message], *, allow_tool_calls: bool
     ) -> tuple[str, list[ToolCall]]:
         conversation = self._conversation
         toolbox = conversation.toolbox
-        specs = toolbox.specs() if toolbox is not None and may_use_tools else ()
+        specs = toolbox.specs() if toolbox is not None else ()
         parts: list[str] = []
         calls: list[ToolCall] = []
         async for event in conversation.llm.stream(
@@ -109,6 +110,7 @@ class Draft:
             system=conversation.system_prompt(),
             max_tokens=conversation.max_tokens,
             tools=specs,
+            allow_tool_calls=allow_tool_calls,
         ):
             if isinstance(event, ToolCall):
                 calls.append(event)
@@ -223,7 +225,7 @@ class Conversation:
         self,
         llm: LLMProvider,
         *,
-        system_prompt: Callable[[], str],
+        system_prompt: Callable[[], SystemPrompt],
         max_tokens: int,
         max_messages: int = DEFAULT_MAX_MESSAGES,
         clock: Callable[[], float] = time.monotonic,

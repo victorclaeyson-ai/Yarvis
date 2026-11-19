@@ -50,7 +50,7 @@ Latency budget (p50, M-series, cloud LLM):
 | TTS time to first audio chunk | 100 ms |
 | **Total** | **800 ms** |
 
-Levers to get under it: start the LLM on a stable partial transcript (speculative turn), prompt caching (done, ADR 0016), streaming TTS sentence-by-sentence, and a system prompt that favours a short first sentence.
+Levers to get under it: start the LLM on a stable partial transcript (speculative turn), prompt caching (done, ADR 0016), streaming TTS sentence-by-sentence, and a system prompt that favours a short first sentence. Hard questions go to a bigger model (Opus 5.5) off this fast path: code speaks a short phrase within about a second, and the answer follows after about five (ADR 0019).
 
 ---
 
@@ -204,7 +204,7 @@ tools listed but forbids calling them: the last tool round must answer in words.
 
 **Untrusted-content wrapping.** Tool results are inserted as clearly delimited data blocks with an explicit note that they are content to analyse, not instructions to follow. This reduces — but does not replace — the gate above.
 
-The gate is a single small module (`yarvis/security/gate.py`) with exhaustive tests; every tool call goes through it, with no bypass path.
+The gate is a single small module (`yarvis/security/gate.py`) with exhaustive tests; every tool call goes through it, with no bypass path. The one call that doesn't is `think_harder` (ADR 0019): it is not an action, it only chooses which model answers, within a daily budget checked in code.
 
 ### 5.4 MCP hardening
 
@@ -244,7 +244,7 @@ The gate is a single small module (`yarvis/security/gate.py`) with exhaustive te
 | Transcripts | Short-term in memory; optional history | Local SQLite | Only the current conversation text, to the configured LLM |
 | Profile (`profile.md`, written by the user) | Yes | Config folder, file mode `0600` | With every request, to the configured LLM (ADR 0014); never used if it looks like it holds a key |
 | Memory (`memory.json`: short facts about the user, never transcripts) | Yes, until forgotten (`yarvis memory forget` / `clear`) | Data folder, file mode `0600` | With every request, to the configured LLM (ADR 0017); a fact that looks like a key is refused |
-| Usage numbers (`usage.json`: tokens, searches, seconds, estimated cost and latency per day; never what was said) | Yes, one year | Data folder, file mode `0600` | No (ADR 0015); `yarvis usage clear` deletes them |
+| Usage numbers (`usage.json`: tokens, searches, seconds, estimated cost and latency per day, the bigger model's share of the cost (`claude_big_usd`, ADR 0019); never what was said) | Yes, one year | Data folder, file mode `0600` | No (ADR 0015); `yarvis usage clear` deletes them |
 | Home town (the config's `location`) | Yes, in the config | Config folder | To Open-Meteo, for the weather: when asked, and twice an hour for the dashboard (ADR 0015) |
 | Config | Yes | `~/.config/yarvis/` (Linux), `~/Library/Application Support/yarvis/` (macOS) | No |
 | Logs | Yes, redacted, rotated | Platform log dir | No telemetry. Ever. |
@@ -331,7 +331,7 @@ yarvis/
 | **0 · Foundations** | Repo, tooling, CI, config, secrets, logging, event bus, `yarvis doctor` | CI green on macOS + Linux; `doctor` checks mic, speaker, models, keys |
 | **1 · Voice loop** | Audio I/O, wake word, VAD, STT, Claude streaming, TTS, barge-in, latency harness | Natural conversation with barge-in; p50 latency measured and published |
 | **2 · Tools & security core** | Permission gate, taint tracking, confirmations, built-in tools, MCP client + pinning, Agent Skills | Injection suite passing; calendar and email work end to end (through the Mac, ADR 0010); MCP client with pinning and skills (ADR 0013) — done |
-| **2.5 · Polish & reach** | One-line install and `yarvis init`, routines and a morning brief, email drafts, a dashboard with every connection, cost and speed (ADR 0015), prompt caching (ADR 0016), memory (ADR 0017), examples, demo video | A stranger installs Yarvis with one command and talks to it within five minutes |
+| **2.5 · Polish & reach** | One-line install and `yarvis init`, routines and a morning brief, email drafts, a dashboard with every connection, cost and speed (ADR 0015), prompt caching (ADR 0016), memory (ADR 0017), smart model switching (ADR 0019), examples, demo video | A stranger installs Yarvis with one command and talks to it within five minutes |
 | **3 · Offline** | Ollama offline mode, Dutch voice (memory moved to Phase 2.5: ADR 0017, forget/export work) | Fully offline demo |
 | **4 · Satellite** | ESP32-S3 firmware, pairing, secure audio streaming, LED states | Satellite pairs in < 1 minute; link passes security review |
 | **5 · Launch** | Demo video, docs site, install polish, launch posts | Public release v1.0 |

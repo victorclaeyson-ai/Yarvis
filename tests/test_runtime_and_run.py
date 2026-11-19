@@ -201,8 +201,9 @@ async def test_full_voice_turn_through_the_real_wiring(tmp_path: Path) -> None:
     assert "reply:It is half past one." in ui.events
     assert fakes.tts.spoken == ["Ready.", "It is half past one."]
     assert fakes.sink.played == 1 and fakes.sink.closed
-    assert fakes.keys == ["k"]
-    assert fakes.llm.warm_ups == 2  # at startup, and again when speech started
+    assert fakes.keys == ["k", "k"]  # the voice model and the bigger one (ADR 0019)
+    # At startup (the voice model and the bigger one share this fake), and when speech started.
+    assert fakes.llm.warm_ups == 3
 
 
 async def test_assemblyai_hears_a_voice_turn_through_the_real_wiring(
@@ -354,7 +355,7 @@ def test_run_text_mode(invoke: Invoke, services: Services, ready: FakeBackends) 
     assert result.exit_code == 0, result.output
     assert "Good afternoon." in result.output
     assert "Bye." in result.output
-    assert ready.keys == [VALID_KEY]
+    assert ready.keys == [VALID_KEY, VALID_KEY]  # the voice model and the bigger one
 
 
 def test_run_voice_mode(invoke: Invoke, services: Services, ready: FakeBackends) -> None:
@@ -665,8 +666,9 @@ async def test_tools_through_the_real_wiring(tmp_path: Path) -> None:
     assert "search the web for anything current" in system  # Claude's own search, on
     assert "search the web instead of guessing" in system
     assert llm.offered[0] == [
-        "set_timer", "set_reminder", "list_timers", "cancel_timer", "weather",
+        "set_timer", "set_reminder", "list_timers", "cancel_timer", "weather", "think_harder",
     ]  # fmt: skip
+    assert "hand questions that need careful reasoning to a bigger model" in system
 
 
 async def test_tools_can_be_switched_off(tmp_path: Path) -> None:
@@ -685,7 +687,7 @@ async def test_tools_can_be_switched_off(tmp_path: Path) -> None:
         voice_input=False,
         voice_output=False,
     )
-    assert llm.offered == [[]]
+    assert llm.offered == [["think_harder"]]  # only the hand-over, which acts on nothing
     assert "You cannot act on the computer yet" in llm.calls[0][1]
 
 
@@ -923,3 +925,26 @@ async def test_no_home_no_weather_watch(tmp_path: Path, monkeypatch: pytest.Monk
         voice_output=False,
         dashboard=RecordingDashboard(),
     )
+
+
+@pytest.mark.parametrize(
+    ("switching", "clients", "offered"), [("off", 1, False), ("asked", 2, False)]
+)
+async def test_model_switching_can_be_limited(
+    tmp_path: Path, switching: str, clients: int, offered: bool
+) -> None:
+    llm = FakeLLM(["Hi."])
+    fakes = FakeBackends(llm)
+    config = Config.model_validate({"llm": {"switching": switching}})
+    await run_assistant(
+        config,
+        api_key=SecretStr("k"),
+        cache_dir=tmp_path,
+        lines=lines("hello", "q"),
+        ui=RecordingUi(),
+        backends=fakes.build(),
+        voice_input=False,
+        voice_output=False,
+    )
+    assert len(fakes.keys) == clients  # "off": no second client at all
+    assert ("think_harder" in llm.offered[0]) is offered

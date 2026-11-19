@@ -10,6 +10,7 @@ over itself (the app's event pump does).
 from __future__ import annotations
 
 import logging
+import math
 import sys
 from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING, Final, Literal, Protocol, runtime_checkable
@@ -112,6 +113,8 @@ class Telemetry:
         today: Callable[[], date] = local_today,
     ) -> None:
         self._book = book or UsageBook(None)
+        self._big_unpriced = False
+        """The bigger model answered at an unknown price: its cap is closed (fail closed)."""
         self._dashboard = dashboard
         self._today = today
         self._links: dict[str, Link] = {}
@@ -144,11 +147,32 @@ class Telemetry:
 
     # ------------------------------------------------------------------ usage
 
-    def claude(self, usage: ClaudeUsage) -> None:
-        """Count a request to Claude."""
+    def claude(self, usage: ClaudeUsage, *, big: bool = False) -> None:
+        """Count a request to Claude (``big``: made by the bigger model's client)."""
         before = self._pending()
-        self._count(before.with_claude(usage))
+        self._count(before.with_claude(usage, big=big))
         self._turn_usd += self._pending().total_usd - before.total_usd
+        if big and usage.token_cost() is None and not self._big_unpriced:
+            self._big_unpriced = True
+            logger.warning(
+                "The bigger model %s has no known price: Yarvis stops using it today. "
+                "Set llm.big_model to a model it knows (see yarvis usage).",
+                usage.model,
+            )
+
+    def for_bigger_model(self) -> Reporter:
+        """What the bigger model's client reports to: its spend counts towards its cap.
+
+        Counted by which client made the request, never by the model name in the answer,
+        so an unusual id can't slip past the cap (ADR 0019).
+        """
+        return _BiggerModel(self)
+
+    def big_model_usd_today(self) -> float:
+        """Today's spend on the bigger model (infinite if its price is unknown: closed)."""
+        if self._big_unpriced:
+            return math.inf
+        return self.today.claude_big_usd
 
     def speech(self, model: str, seconds: float) -> None:
         """Count an AssemblyAI session."""
@@ -329,3 +353,19 @@ def _personal(config: Config, setup: Setup) -> Link:
 def _facts(count: int) -> str:
     """'1 fact', '3 facts'."""
     return f"{count} fact{'' if count == 1 else 's'}"
+
+
+class _BiggerModel:
+    """A ``Reporter`` that marks every Claude request as the bigger model's."""
+
+    def __init__(self, telemetry: Telemetry) -> None:
+        self._telemetry = telemetry
+
+    def claude(self, usage: ClaudeUsage) -> None:
+        self._telemetry.claude(usage, big=True)
+
+    def speech(self, model: str, seconds: float) -> None:
+        self._telemetry.speech(model, seconds)
+
+    def health(self, key: str, state: LinkState, detail: str) -> None:
+        self._telemetry.health(key, state, detail)

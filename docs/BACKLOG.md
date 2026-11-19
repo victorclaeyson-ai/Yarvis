@@ -137,6 +137,10 @@ Prices and limits below were checked against the providers' documentation on
   Done when: both providers pass the mail and calendar tool tests through fakes; tokens
   never leave the keychain; `account remove` is tested.
 
+- [x] **18. Cartesia voice.** (ADR 0020; added at Victor's request)
+  Cartesia's Sonic 3.6 speaks instead of Kokoro, with Kokoro as backup sentence by
+  sentence; only the sentence being spoken leaves the computer.
+
 - [ ] **17. Notes and a to-do list.**
   Add and find notes; add, list and complete to-dos. Stored locally in a private markdown
   file the user can open. Works by voice and with `yarvis todo`. After task 16, optional

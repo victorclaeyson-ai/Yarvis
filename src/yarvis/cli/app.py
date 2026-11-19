@@ -208,6 +208,15 @@ def key_set(
             highlight=False,
         )
         value = typer.prompt("Paste your AssemblyAI API key", hide_input=True)
+    elif name is SecretName.CARTESIA:
+        services.console.print(
+            "Create an API key at https://play.cartesia.ai (API keys). Yarvis then sends each "
+            "sentence Yarvis speaks, and nothing else, to Cartesia (in the US) to be spoken. "
+            "Cartesia may use that text to train its models unless you opt out at "
+            'https://play.cartesia.ai/privacy/data-controls. Then set voice.tts = "cartesia".',
+            highlight=False,
+        )
+        value = typer.prompt("Paste your Cartesia API key", hide_input=True)
     else:
         value = typer.prompt(f"Paste your {name.value} API key", hide_input=True)
     try:

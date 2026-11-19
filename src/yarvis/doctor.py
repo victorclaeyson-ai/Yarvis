@@ -117,6 +117,7 @@ def run_doctor(ctx: DoctorContext) -> list[CheckResult]:
         check_skills(ctx, config),
         check_profile(ctx),
         check_memory(ctx),
+        check_voice(ctx, config),
     ]
 
 
@@ -454,4 +455,27 @@ def check_memory(ctx: DoctorContext) -> CheckResult:
         Status.OK,
         f"{count} {noun}, the newest sent with every request",
         hint="yarvis memory list",
+    )
+
+
+def check_voice(ctx: DoctorContext, config: Config) -> CheckResult:
+    """With Cartesia chosen, its key should be stored (Kokoro speaks otherwise, ADR 0020)."""
+    label = "Voice"
+    if config.voice.tts != "cartesia":
+        return CheckResult(label, Status.OK, "Kokoro, on this computer")
+    if ctx.secrets.get(SecretName.CARTESIA) is None:
+        return CheckResult(
+            label,
+            Status.WARN,
+            "Cartesia chosen, but no key stored: Kokoro speaks",
+            hint="Run: yarvis key set cartesia",
+        )
+    return CheckResult(
+        label,
+        Status.OK,
+        f"Cartesia ({config.voice.cartesia_model}), Kokoro as backup",
+        hint=(
+            "Each sentence spoken is sent to Cartesia. Opt out of training at "
+            "https://play.cartesia.ai/privacy/data-controls"
+        ),
     )

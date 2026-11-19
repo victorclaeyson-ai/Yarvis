@@ -110,7 +110,7 @@ Defaults are chosen on paper; **every row marked ⚖ is benchmarked in Phase 1**
 | Turn detection ⚖ | Silero silence threshold + Smart Turn model | Silence threshold only | Fewer premature cut-offs → can use a shorter silence window |
 | STT ⚖ | Parakeet TDT 0.6B: on the Apple GPU (MLX), elsewhere on the CPU (ONNX); optional AssemblyAI Universal-3.6 Pro streaming, with Parakeet as backup | Whisper (faster-whisper), Moonshine | Most accurate option that is still fast per platform, local by default ([ADR 0008](adr/0008-parakeet-speech-recognition.md), [ADR 0012](adr/0012-assemblyai-live-speech-recognition.md)) |
 | LLM | Anthropic Messages API (streaming, tool use) | Ollama (offline mode) | Best tool use and instruction following; one switch for offline |
-| TTS ⚖ | Kokoro (ONNX) for English | Piper (incl. Dutch `nl_BE` voices) | Natural voice with very low first-chunk latency |
+| TTS ⚖ | Kokoro (ONNX) for English, on this computer; optionally Cartesia Sonic 3.6 in the cloud, with Kokoro as backup (ADR 0020) | Piper (incl. Dutch `nl_BE` voices) | Natural voice with very low first-chunk latency |
 | Tools | Built-ins + official `mcp` Python SDK | — | Standard protocol, huge existing ecosystem |
 | Config | `pydantic` v2 models loaded from TOML | — | Validated, typed, good error messages |
 | Storage | SQLite (`aiosqlite`), `sqlite-vec` for recall | — | Zero-ops, single file, easy to back up and delete |
@@ -242,6 +242,7 @@ The gate is a single small module (`yarvis/security/gate.py`) with exhaustive te
 |---|---|---|---|
 | Raw audio | No (in-memory ring buffer only; opt-in debug recording) | — | Never (except to a paired satellite), unless AssemblyAI is set up: then the speech of each request, streamed for transcription (EU data zone by default) |
 | Transcripts | Short-term in memory; optional history | Local SQLite | Only the current conversation text, to the configured LLM |
+| Spoken replies (only with `voice.tts = "cartesia"`) | No: never logged, audio never written to disk | — | Each sentence Yarvis speaks, to Cartesia (US) to be voiced; Cartesia may keep it and train on it unless the user opted out, and watermarks the audio (ADR 0020) |
 | Profile (`profile.md`, written by the user) | Yes | Config folder, file mode `0600` | With every request, to the configured LLM (ADR 0014); never used if it looks like it holds a key |
 | Memory (`memory.json`: short facts about the user, never transcripts) | Yes, until forgotten (`yarvis memory forget` / `clear`) | Data folder, file mode `0600` | With every request, to the configured LLM (ADR 0017); a fact that looks like a key is refused |
 | Usage numbers (`usage.json`: tokens, searches, seconds, estimated cost and latency per day; never what was said) | Yes, one year | Data folder, file mode `0600` | No (ADR 0015); `yarvis usage clear` deletes them |

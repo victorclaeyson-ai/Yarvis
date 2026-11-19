@@ -40,7 +40,10 @@ stt = "auto"                # On this computer (and backup): Parakeet, or Whispe
 stt_model = "small.en"      # Whisper: "tiny.en" (fastest), "base.en", "small.en" (most accurate)
 stt_device = "cpu"          # Whisper on "mps" = Apple GPU (experimental); see `yarvis bench`
 vocabulary = ["Yarvis"]     # Names to spell right, e.g. ["Yarvis", "Zedelgem", "Leuven"]
-tts = "kokoro"
+tts = "kokoro"              # "kokoro" (on this computer) or "cartesia" (cloud, Kokoro as
+                            # backup; first: yarvis key set cartesia)
+# cartesia_voice = "ef191366-f52f-447a-a398-ed8c0f2943a1"  # Archie (British male)
+# cartesia_usd_per_million_chars = 0  # Free plan; 65 on Pro (for yarvis usage)
 voice = "bm_george"         # British male. Try "af_heart", "am_michael", "bf_emma"
 speech_rate = 1.0
 end_of_turn_ms = 900        # silence that ends a sentence that sounds finished

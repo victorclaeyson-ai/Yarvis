@@ -135,3 +135,14 @@ def test_key_set_spotify_rejects_garbage(invoke: Invoke, fake_keyring: FakeKeyri
     assert result.exit_code == 1
     assert "32 characters" in result.output
     assert fake_keyring.store == {}
+
+
+def test_key_set_cartesia_explains_what_is_sent(invoke: Invoke, fake_keyring: FakeKeyring) -> None:
+    key = "sk_car_" + "x7" * 16
+    result = invoke("key", "set", "cartesia", stdin=f"{key}\n")
+    assert result.exit_code == 0, result.output
+    assert "play.cartesia.ai" in result.output
+    assert "each sentence Yarvis speaks" in result.output
+    assert "data-controls" in result.output  # the training opt-out
+    assert key not in result.output
+    assert fake_keyring.store[(KEYRING_SERVICE, "cartesia")] == key

@@ -87,6 +87,10 @@ class Reporter(Protocol):
         """An AssemblyAI session closed after ``seconds``."""
         ...
 
+    def spoken(self, model: str, characters: int) -> None:
+        """A cloud voice spoke ``characters`` (Cartesia bills per character)."""
+        ...
+
     def health(self, key: str, state: LinkState, detail: str) -> None:
         """How a connection is doing now (``key``: ``CLAUDE`` or ``SPEECH``)."""
         ...
@@ -110,8 +114,11 @@ class Telemetry:
         *,
         dashboard: Dashboard | None = None,
         today: Callable[[], date] = local_today,
+        voice_usd_per_million: float = 0.0,
     ) -> None:
         self._book = book or UsageBook(None)
+        self._voice_usd_per_million = voice_usd_per_million
+        """The cloud voice's price per million characters on the user's plan (0: free)."""
         self._dashboard = dashboard
         self._today = today
         self._links: dict[str, Link] = {}
@@ -154,6 +161,12 @@ class Telemetry:
         """Count an AssemblyAI session."""
         before = self._pending()
         self._count(before.with_speech(model, seconds))
+        self._turn_usd += self._pending().total_usd - before.total_usd
+
+    def spoken(self, model: str, characters: int) -> None:
+        """Count characters spoken by the cloud voice."""
+        before = self._pending()
+        self._count(before.with_voice(characters, self._voice_usd_per_million))
         self._turn_usd += self._pending().total_usd - before.total_usd
 
     def turn_finished(self, timings: TurnTimings) -> None:
@@ -238,6 +251,8 @@ class Setup:
     """Calendar and email tools are on offer (a Mac)."""
     skills: int
     profile: bool
+    cloud_voice: bool = False
+    """Cartesia speaks, with Kokoro as backup (ADR 0020)."""
     memory: int | None = None
     """How many facts Yarvis remembers (None: memory is not on offer)."""
     mcp: Sequence[Link] = ()
@@ -248,7 +263,7 @@ def starting_links(config: Config, setup: Setup) -> list[Link]:
     """Every connection Yarvis has or could have, in the order the dashboard lists them."""
     links = [Link(CLAUDE, "Claude", "ok", short_model(setup.model)), _hearing(config, setup)]
     links.append(
-        Link("voice", "Voice", "ok", f"Kokoro · {setup.voice}")
+        Link("voice", "Voice", "ok", _voice(setup))
         if setup.voice
         else Link("voice", "Voice", "off", "muted")
     )
@@ -329,3 +344,7 @@ def _personal(config: Config, setup: Setup) -> Link:
 def _facts(count: int) -> str:
     """'1 fact', '3 facts'."""
     return f"{count} fact{'' if count == 1 else 's'}"
+
+
+def _voice(setup: Setup) -> str:
+    return "Cartesia · Kokoro as backup" if setup.cloud_voice else f"Kokoro · {setup.voice}"

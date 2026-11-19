@@ -169,6 +169,7 @@ class RecordingReporter:
 
     claude_calls: list[ClaudeUsage] = field(default_factory=list["ClaudeUsage"])
     speech_calls: list[tuple[str, float]] = field(default_factory=list[tuple[str, float]])
+    voice_calls: list[tuple[str, int]] = field(default_factory=list[tuple[str, int]])
     health_calls: list[tuple[str, LinkState, str]] = field(
         default_factory=list[tuple[str, "LinkState", str]]
     )
@@ -178,6 +179,9 @@ class RecordingReporter:
 
     def speech(self, model: str, seconds: float) -> None:
         self.speech_calls.append((model, seconds))
+
+    def spoken(self, model: str, characters: int) -> None:
+        self.voice_calls.append((model, characters))
 
     def health(self, key: str, state: LinkState, detail: str) -> None:
         self.health_calls.append((key, state, detail))

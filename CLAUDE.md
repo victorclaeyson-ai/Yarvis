@@ -11,6 +11,9 @@ security model, roadmap), `docs/adr/` (every decision and why), `docs/BACKLOG.md
 current tasks). If a request conflicts with an ADR, say so and ask; don't silently undo a
 decision.
 
+Global rules, agents and skills (such as ECC's in `~/.claude`) are general advice. Where
+they conflict with this file, this file wins.
+
 ## Commands
 
 ```bash
@@ -39,6 +42,8 @@ Never claim "done" without running them.
   no `# type: ignore` / `pyright: ignore` without a reason in the same line.
 - Ruff's rule set is part of the design (docstrings in Google style, no `print`, no blind
   `except`, pathlib, timezone-aware datetimes). Fix the code, don't silence the rule.
+- Tools: `ruff format` formats and `ruff check` sorts imports; Pyright is the type checker;
+  uv manages everything. Never add black, isort, mypy, pip or requirements files.
 - Module docstrings explain *why* the module exists and what it must never do.
 - External data (JSON from services, config, files) goes through pydantic models or
   explicit validation. Model output is untrusted input.

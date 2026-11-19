@@ -182,7 +182,7 @@ tools listed but forbids calling them: the last tool round must answer in words.
 | T4 | Someone else's voice in the room | Visitor says "Hey Yarvis, delete my files" | Tier 3 disabled by default; Tier 3 needs on-screen confirmation, never voice-only |
 | T5 | Network attack on satellite link | Rogue device on the Wi-Fi sends audio or commands | Mutually authenticated, encrypted channel; physical pairing code; LAN-only bind; rate limits (§5.6) |
 | T6 | Secret leakage | API key in logs, config committed to git, key passed to a tool | OS keychain, log redaction, secrets never in tool context (§5.5) |
-| T7 | Memory poisoning | Injected content makes Yarvis "remember" a false instruction | Memory writes and deletes in a tainted turn, and in the turn after one, require a spoken "yes" (`asks_when_tainted`, in the gate); memories stored as data, never as instructions; invisible characters refused (done, ADR 0017) |
+| T7 | Memory poisoning | Injected content makes Yarvis "remember" a false instruction | Memory writes and deletes in a tainted turn (the rest of the conversation after outside content, ADR 0018) require a spoken "yes" (`asks_when_tainted`, in the gate); memories stored as data, never as instructions; invisible characters refused (done, ADR 0017) |
 | T8 | Supply chain | Malicious dependency, tampered model weights | Locked hashes, scanning, pinned model checksums, no pickle (§5.7) |
 | T9 | Privacy leak of audio | Recordings stored or uploaded | Audio never persisted or uploaded by default; the 2 s pre-wake buffer only reaches the local speech recognizer, and everything up to the wake phrase is cut from the transcript (§5.8) |
 
@@ -195,7 +195,7 @@ tools listed but forbids calling them: the last tool round must answer in words.
 | 2 | External or hard to undo | send a message, create calendar event, write a file | **Spoken confirmation** with argument readback ("Send 'running late' to Thomas — confirm?") |
 | 3 | Dangerous | shell commands, delete files, purchases, credential access | **Disabled by default.** If enabled: on-screen confirmation only, per call, never "always allow" |
 
-**Taint tracking.** Every message in the context is labelled `trusted` (user speech, system prompt) or `untrusted` (tool results, web content, file contents, MCP outputs). Once a turn contains untrusted content:
+**Taint tracking.** Every message in the context is labelled `trusted` (user speech, system prompt) or `untrusted` (tool results, web content, file contents, MCP outputs). A turn is tainted once it contains untrusted content, and so is every later turn of the same conversation: the replies after it can repeat what the page said. A conversation ends after ten quiet minutes (`conversation.idle_reset_minutes`), when the user says "new conversation", or with the dashboard's NEW button (ADR 0018). In a tainted turn:
 
 - any Tier ≥ 2 call requires confirmation, even if the user previously chose "always allow" for that tool;
 - the confirmation shows the *exact* arguments, so an injected recipient or URL is visible;

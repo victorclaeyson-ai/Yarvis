@@ -135,6 +135,9 @@
   .panel > header { display: flex; justify-content: space-between; align-items: center; gap: 10px; padding-bottom: 7px; border-bottom: 1px solid var(--line-soft); }
   .panel h2 { margin: 0; font-size: 12px; font-weight: 700; letter-spacing: .22em; color: #6fd6ff; }
   .panel header .aside { font-family: var(--mono); font-size: 11px; color: var(--dim); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  button#fresh { margin-left: auto; font-family: var(--mono); font-size: 11px; letter-spacing: .12em; color: #6fd6ff; background: transparent; border: 1px solid var(--line-soft); padding: 2px 8px; cursor: pointer; }
+  button#fresh:hover { background: rgba(63, 212, 255, .1); }
+  button#fresh:disabled { opacity: .4; cursor: default; }
   .rows { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 6px; }
   .rows li { display: grid; grid-template-columns: 9px 112px minmax(0, 1fr); gap: 9px; align-items: baseline; font-size: 14px; }
   .rows li .dot { align-self: center; }
@@ -361,7 +364,7 @@
         <div class="cost" id="cost"></div>
       </div>
       <section class="panel conv">
-        <header><h2>CONVERSATION</h2><span class="aside">kept in memory only</span></header>
+        <header><h2>CONVERSATION</h2><span class="aside">kept in memory only</span><button id="fresh" type="button" title="Forget this conversation and start a new one" disabled>NEW</button></header>
         <div class="panelbody">
           <main id="log" aria-live="polite">
             <div class="empty" id="empty">
@@ -435,7 +438,7 @@
     links: $("links"), dots: $("dots"), count: $("count"), linkchip: $("linkchip"),
     linkcount: $("linkcount"), connlist: $("connlist"), conncount: $("conncount"),
     spark: $("spark"), spark2: $("spark2"), p50: $("p50"), cost: $("cost"), panel: $("panel"),
-    close: $("close"), linklist: $("linklist"), today: $("today"), note: $("note"),
+    close: $("close"), fresh: $("fresh"), linklist: $("linklist"), today: $("today"), note: $("note"),
     todaybig: $("todaybig"), todaysub: $("todaysub"), todayrows: $("todayrows"),
     speedbig: $("speedbig"), pctl: $("pctl"), timerlist: $("timerlist"), timercount: $("timercount"),
     wPlace: $("w-place"), wBody: $("w-body"), ticker: $("ticker"), asof: $("asof"),
@@ -577,6 +580,7 @@
     ui.talk.disabled = next === "loading" || (!canStop && !voice);
     ui.text.disabled = next === "loading";
     ui.send.disabled = busy || !ui.text.value.trim();
+    ui.fresh.disabled = busy;
     const keys = voice ? "SPACE talk · ESC stop · ENTER send" : "ENTER send · ESC stop";
     ui.hint.textContent = wake && voice ? "SAY “HEY YARVIS” · " + keys : keys;
     ui.wake.hidden = !(wake && voice);
@@ -881,7 +885,16 @@
     if (call("send", text)) expectReply();
   }
 
+  // Forget this conversation: the same as saying "new conversation" (ADR 0018).
+  function freshStart() {
+    if (busy) return;
+    openPanel(false);
+    setState("thinking");
+    if (call("new_conversation")) expectReply();
+  }
+
   ui.talk.addEventListener("click", toggle);
+  ui.fresh.addEventListener("click", () => { freshStart(); ui.fresh.blur(); });
   // Blur after a click, so Space (talk) never "clicks" the button again.
   ui.links.addEventListener("click", () => { openPanel(!panelOpen()); ui.links.blur(); });
   ui.close.addEventListener("click", () => { openPanel(false); ui.close.blur(); });

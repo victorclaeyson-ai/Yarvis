@@ -436,6 +436,7 @@ def _conversation(
         ),
         max_tokens=config.llm.max_tokens,
         toolbox=Toolbox(tools, gate, on_activity=on_activity) if tools else None,
+        idle_reset_s=config.conversation.idle_reset_minutes * 60,
     )
 
 

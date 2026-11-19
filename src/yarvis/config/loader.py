@@ -79,6 +79,10 @@ skills = true               # Agent Skills you added (yarvis skills add <folder>
 #   read_text_file = 0
 #   write_file = 2
 
+[conversation]
+idle_reset_minutes = 10     # forget the conversation after this much silence; or say
+                            # "new conversation" (also a button in the window)
+
 [memory]
 auto = true                 # also remember lasting facts you mention (it says "I'll remember
                             # that."); false: only when you ask. See: yarvis memory list

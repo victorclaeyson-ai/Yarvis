@@ -45,21 +45,14 @@ class Gate:
         self._confirm_external = confirm_external
         self._allow_dangerous = allow_dangerous
 
-    def check(
-        self,
-        tool: Tool[Any],
-        *,
-        tainted: bool,
-        sends_out: bool = False,
-        tainted_before: bool = False,
-    ) -> Decision:
+    def check(self, tool: Tool[Any], *, tainted: bool, sends_out: bool = False) -> Decision:
         """Decide for one call.
 
-        ``tainted``: the turn has read untrusted content. ``sends_out``: the call can carry
-        text to a destination the model chose (``Tool.sends_data_out``). ``tainted_before``:
-        the previous turn read untrusted content (its reply, now history, may repeat it).
+        ``tainted``: the model's context holds untrusted content: read in this turn, or in
+        a reply still in the conversation's history (ADR 0018). ``sends_out``: the call can
+        carry text to a destination the model chose (``Tool.sends_data_out``).
         """
-        asks = tool.asks_when_tainted and (tainted or tainted_before)
+        asks = tool.asks_when_tainted and tainted
         decision = self._decide(tool.tier, tainted=tainted, sends_out=sends_out, asks=asks)
         logger.info(
             "Gate: %s (tier %d%s%s) -> %s",
@@ -86,8 +79,7 @@ class Gate:
             return Decision(Verdict.CONFIRM, "Sends data out after reading outside content.")
         if asks:
             # Memory poisoning (T7): a page or email must not make Yarvis "remember" a false
-            # instruction, or forget something, without the user hearing it first. That holds
-            # for the turn after it too: the reply that repeated the page is in the history.
+            # instruction, or forget something, without the user hearing it first.
             return Decision(
                 Verdict.CONFIRM, "Changes what Yarvis remembers after reading outside content."
             )

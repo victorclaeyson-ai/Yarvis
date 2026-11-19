@@ -10,6 +10,7 @@ import pytest
 
 from fakes import VALID_KEY, FakeKeyring, Invoke
 from test_runtime_and_run import install_models
+from yarvis.agent.conversation import is_new_conversation
 from yarvis.app.bridge import AppApi, AppUi, CommandQueue, EventPump, script_for
 from yarvis.app.window import AppError, index_html
 from yarvis.assistant import AssistantControls
@@ -193,6 +194,13 @@ def test_page_handles_the_dashboard_events() -> None:
         assert element in html
 
 
+def test_page_has_a_new_conversation_button() -> None:
+    html = index_html()
+    assert 'id="fresh"' in html
+    assert 'call("new_conversation")' in html  # the only thing it does
+    assert "ui.fresh.disabled = busy" in html  # not while Yarvis is answering
+
+
 # --------------------------------------------------------------------------- commands from the page
 
 
@@ -228,6 +236,15 @@ async def test_api_validates_input_and_queues_commands() -> None:
     assert received == ["", "hello there", "x" * 2000]
 
 
+async def test_the_new_conversation_button_sends_the_spoken_command() -> None:
+    commands = CommandQueue()
+    AppApi(commands, AssistantControls(), name="Y", voice=True).new_conversation()
+    commands.close()
+    received = [line async for line in commands.lines()]
+    assert received == ["new conversation"]
+    assert is_new_conversation(received[0])  # handled like saying it
+
+
 async def test_talk_is_ignored_in_text_mode() -> None:
     commands = CommandQueue()
     AppApi(commands, AssistantControls(), name="Y", voice=False).talk()
@@ -243,7 +260,7 @@ async def test_commands_cross_threads() -> None:
 
 def test_api_exposes_only_intended_methods() -> None:
     public = {name for name in dir(AppApi) if not name.startswith("_")}
-    assert public == {"hello", "talk", "send", "stop"}
+    assert public == {"hello", "talk", "send", "stop", "new_conversation"}
 
 
 def test_api_stop_reaches_the_controls() -> None:

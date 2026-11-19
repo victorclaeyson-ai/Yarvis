@@ -17,12 +17,12 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import re
 import time
 from contextlib import aclosing
 from typing import TYPE_CHECKING, Final
 
 from yarvis.agent.confirmation import classify_answer
-from yarvis.agent.toolbox import CONFIRMED_AND_DONE
 from yarvis.llm.base import LLMError, Message, ToolCall, WebSearch
 
 if TYPE_CHECKING:
@@ -35,6 +35,12 @@ logger = logging.getLogger(__name__)
 
 DEFAULT_MAX_MESSAGES = 20
 _EXCHANGE = 2  # a user message plus the assistant's reply
+NEW_CONVERSATION_REPLY: Final = "Okay, a new conversation."
+_NEW_CONVERSATION: Final = re.compile(
+    r"^(?:(?:hey\s+)?\w+[,!.]?\s+)?(?:let'?s\s+|let\s+us\s+)?(?:start\s+)?(?:a\s+)?"
+    r"new\s+conversation(?:,?\s+please)?[.!]*$",
+    re.IGNORECASE,
+)
 MAX_TOOL_ROUNDS: Final = 4
 """Model calls that may use tools in one turn; then it must answer in words."""
 TURN_TIMEOUT_S: Final = 60.0
@@ -56,7 +62,10 @@ class Draft:
         self.searches: list[str] = []
         """Web searches the model made (on the provider's side) for this reply."""
         self.read_outside = False
-        """Whether a tool this reply ran returned outside content."""
+        """Whether this reply's context held outside content: read in this turn, or carried
+        forward from earlier in the conversation (ADR 0018)."""
+        self._fresh_start = False
+        """The user asked for a new conversation: this reply is not remembered."""
         self._task = asyncio.create_task(self._generate())
 
     async def _generate(self) -> None:
@@ -74,12 +83,20 @@ class Draft:
 
     async def _agent_loop(self) -> None:
         conversation = self._conversation
+        if is_new_conversation(self.user_text):
+            await self._live.wait()  # a guess at a pause must never forget anything
+            conversation.reset()
+            self._fresh_start = True
+            self._say(NEW_CONVERSATION_REPLY)
+            return
         toolbox = conversation.toolbox
         messages = conversation.messages_for(self.user_text)
         if (pending := conversation.pending) is not None:
             messages[-1] = Message("user", await self._resolve(pending))
-        tainted = False
-        tainted_before = conversation.tainted_before
+        # Outside content read earlier lives on in the replies after it: the whole
+        # conversation stays tainted until it ends (ADR 0018), and so does this reply.
+        tainted = conversation.holds_outside_content or self.read_outside
+        self.read_outside = tainted
         for round_number in range(MAX_TOOL_ROUNDS + 1):
             # The last round must answer in words: tools stay listed, but none may be called.
             may_call = round_number < MAX_TOOL_ROUNDS
@@ -88,12 +105,10 @@ class Draft:
                 return
             await self._live.wait()  # never act on a reply the user may not want
             # Search results read on the provider's side are outside content too.
-            outcome = await toolbox.run(
-                calls, tainted=tainted or bool(self.searches), tainted_before=tainted_before
-            )
+            outcome = await toolbox.run(calls, tainted=tainted or bool(self.searches))
             self.done += outcome.done
             tainted = outcome.tainted
-            self.read_outside = self.read_outside or tainted
+            self.read_outside = self.read_outside or outcome.read_outside
             messages += [
                 Message("assistant", text, tool_calls=tuple(calls)),
                 Message("user", "", tool_results=outcome.results),
@@ -143,9 +158,12 @@ class Draft:
             note = f"The question about whether to {pending.description} expired; nothing was done."
         elif answer == "yes":
             logger.info("Confirmed by the user: %s", pending.tool.name)
-            note = await toolbox.confirm(pending)
-            if note.startswith(CONFIRMED_AND_DONE):
+            confirmed = await toolbox.confirm(pending)
+            note = confirmed.note
+            if confirmed.done:
                 self.done.append(pending.description)
+            # Its result is outside content like any other: this turn is tainted from here.
+            self.read_outside = self.read_outside or confirmed.read_outside
         elif answer == "no":
             note = f"The user declined, so you did not {pending.description}."
         else:
@@ -211,11 +229,11 @@ class Draft:
                 reply = f"{reply} [Interrupted. Already done: {'; '.join(done)}.]".strip()
             elif done:
                 reply = f"{reply} [Done: {'; '.join(done)}.]".strip()
-            # Outside content can live on in this reply (now history): the next turn may
-            # not change memory without asking either (DESIGN.md T7).
-            self._conversation.tainted_before = self.read_outside or bool(self.searches)
-            if reply:
-                self._conversation.remember(self.user_text, reply)
+            if reply and not self._fresh_start:
+                # Outside content lives on in this reply, also when it was only carried forward
+                # (a word-for-word repeat): the mark stays until the conversation ends.
+                outside = self.read_outside or bool(self.searches)
+                self._conversation.remember(self.user_text, reply, outside=outside)
 
     def discard(self) -> None:
         """Abandon the draft: stop generating and remember nothing."""
@@ -239,6 +257,7 @@ class Conversation:
         max_messages: int = DEFAULT_MAX_MESSAGES,
         clock: Callable[[], float] = time.monotonic,
         toolbox: Toolbox | None = None,
+        idle_reset_s: float | None = None,
     ) -> None:
         if max_messages < _EXCHANGE or max_messages % _EXCHANGE:
             msg = "max_messages must be a positive even number"
@@ -250,10 +269,13 @@ class Conversation:
         self.toolbox = toolbox
         self.pending: PendingAction | None = None
         """An action waiting for the user's "yes" (asked at the end of the last reply)."""
-        self.tainted_before = False
-        """The last reply the user heard was made after reading outside content."""
         self._max_messages = max_messages
         self._history: list[Message] = []
+        self._outside: list[bool] = []
+        """Per exchange in the history: whether its turn held outside content."""
+        self._idle_reset_s = idle_reset_s
+        """After this much silence the conversation ends (None: it never does by itself)."""
+        self._last_reply_at: float | None = None
 
     @property
     def history(self) -> tuple[Message, ...]:
@@ -263,8 +285,18 @@ class Conversation:
     def reset(self) -> None:
         """Forget the conversation."""
         self._history.clear()
+        self._outside.clear()
+        self._last_reply_at = None
         self.pending = None
-        self.tainted_before = False
+
+    @property
+    def holds_outside_content(self) -> bool:
+        """Whether a reply in the history was made after reading outside content.
+
+        Such a reply can repeat what a page or email said, so every turn counts as tainted
+        until the conversation ends (ADR 0018), not only the turn that read it.
+        """
+        return any(self._outside)
 
     def messages_for(self, user_text: str) -> list[Message]:
         """The messages to send for a new user message."""
@@ -272,7 +304,18 @@ class Conversation:
 
     def draft(self, user_text: str) -> Draft:
         """Start generating a reply now; it is remembered only once consumed."""
+        self._end_if_idle()
         return Draft(self, user_text)
+
+    def _end_if_idle(self) -> None:
+        """After ``idle_reset_s`` of silence, the next question starts a new conversation."""
+        if self._idle_reset_s is None or self._last_reply_at is None:
+            return
+        if self.clock() - self._last_reply_at > self._idle_reset_s:
+            logger.info(
+                "The conversation ended after %.0f minutes of silence", self._idle_reset_s / 60
+            )
+            self.reset()
 
     async def respond(self, user_text: str) -> AsyncGenerator[str]:
         """Generate and consume a reply in one go."""
@@ -288,15 +331,27 @@ class Conversation:
         """
         if len(self._history) >= _EXCHANGE and self._history[-_EXCHANGE].text == user_text:
             del self._history[-_EXCHANGE:]
+            del self._outside[-1:]
             return True
         return False
 
-    def remember(self, user_text: str, reply: str) -> None:
-        """Record a finished exchange (the hook point for long-term memory)."""
+    def remember(self, user_text: str, reply: str, *, outside: bool = False) -> None:
+        """Record a finished exchange; ``outside``: its turn read outside content."""
         self._history.extend((Message("user", user_text), Message("assistant", reply)))
+        self._outside.append(outside)
+        self._last_reply_at = self.clock()
         overflow = len(self._history) - self._max_messages
         if overflow > 0:
             del self._history[:overflow]
+            del self._outside[: overflow // _EXCHANGE]
+
+
+def is_new_conversation(text: str) -> bool:
+    """Whether the user asked to start over ("new conversation", "Yarvis, new conversation").
+
+    Decided by code, never by the model, so outside content can't end (or keep) a conversation.
+    """
+    return bool(_NEW_CONVERSATION.match(" ".join(text.split())))
 
 
 def _search_activity(query: str) -> str:

@@ -144,6 +144,10 @@ Prices and limits below were checked against the providers' documentation on
   Done when: works by voice and CLI, with tests; the file still reads correctly after the
   user edits it by hand.
 
+- [x] **18. Cartesia voice.** (ADR 0020; added at Victor's request)
+  Cartesia's Sonic 3.6 speaks instead of Kokoro, with Kokoro as backup sentence by
+  sentence; only the sentence being spoken leaves the computer.
+
 ## Sprint 1: finish Phase 2.5 (until the January exams)
 
 Exit test for the phase: a stranger installs Yarvis with one command and has a

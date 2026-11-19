@@ -23,6 +23,7 @@ MIN_KNOWN_SECRET_LENGTH: Final = 8
 DEFAULT_PATTERNS: Final[tuple[re.Pattern[str], ...]] = (
     re.compile(r"sk-ant-[A-Za-z0-9_\-]{8,}"),  # Anthropic
     re.compile(r"\bsk-[A-Za-z0-9_\-]{20,}"),  # OpenAI-style
+    re.compile(r"\bsk_car_[A-Za-z0-9_\-]{10,}"),  # Cartesia
     re.compile(r"\bgh[pousr]_[A-Za-z0-9]{20,}"),  # GitHub
     re.compile(r"\bxox[abprs]-[A-Za-z0-9\-]{10,}"),  # Slack
     re.compile(r"\bAKIA[0-9A-Z]{16}\b"),  # AWS access key id

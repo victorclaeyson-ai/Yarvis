@@ -133,6 +133,15 @@ costs about one to four cents, and the cap is about $0.50 a day by default
 quickly; when you asked for "think hard", it says so once a day. `switching = "asked"` uses Opus only when you
 ask, `"off"` never ([why, with measurements](docs/adr/0019-smart-model-switching.md)).
 
+**A voice from the cloud, if you like.** Kokoro speaks on your own computer by default.
+To use Cartesia's voice instead (Archie, British male, by default), create a key at
+play.cartesia.ai, store it with `yarvis key set cartesia` and set `[voice] tts =
+"cartesia"`. Each sentence Yarvis speaks, and nothing else, is then sent to Cartesia in
+the US; opt out of their training at play.cartesia.ai/privacy/data-controls. If Cartesia
+can't speak a sentence, Kokoro does, so Yarvis never goes silent. The Free plan's 20,000
+characters a month are counted in `yarvis usage`
+([how it works](docs/adr/0020-cartesia-voice.md)).
+
 **Conversations end.** A conversation is forgotten after ten quiet minutes, or at once
 when you say "new conversation" or click NEW above it in the window. Yarvis then starts
 fresh: after it has read a web page or an email, it keeps asking before acting until

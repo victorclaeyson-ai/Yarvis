@@ -93,3 +93,9 @@ def test_filter_redacts_stack_info(redactor: Redactor) -> None:
     logger, stream = _capture(redactor)
     logger.info("hello super-secret-value", stack_info=True)
     assert "super-secret-value" not in stream.getvalue()
+
+
+def test_cartesia_keys_are_redacted() -> None:
+    key = "sk_car_" + "AbC123xyz" * 3
+    assert key not in Redactor().redact(f"connecting with {key}")
+    assert Redactor().contains_secret(key)

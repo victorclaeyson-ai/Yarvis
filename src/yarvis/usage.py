@@ -188,6 +188,9 @@ class Day(BaseModel):
     """Part of ``claude_usd`` spent on the bigger model: what its daily cap reads (ADR 0019)."""
     search_usd: float = Field(default=0.0, ge=0)
     speech_usd: float = Field(default=0.0, ge=0)
+    voice_chars: int = Field(default=0, ge=0)
+    """Characters spoken by a cloud voice (Cartesia, ADR 0020)."""
+    voice_usd: float = Field(default=0.0, ge=0)
     unpriced: int = Field(default=0, ge=0)
     """Requests to a model (or sessions of a speech model) without a known price."""
     latencies_ms: tuple[int, ...] = ()
@@ -201,7 +204,7 @@ class Day(BaseModel):
     @property
     def total_usd(self) -> float:
         """Claude, web searches and speech together."""
-        return self.claude_usd + self.search_usd + self.speech_usd
+        return self.claude_usd + self.search_usd + self.speech_usd + self.voice_usd
 
     def plus(self, other: Day) -> Day:
         """Both days' numbers added up."""
@@ -216,6 +219,8 @@ class Day(BaseModel):
             claude_big_usd=self.claude_big_usd + other.claude_big_usd,
             search_usd=self.search_usd + other.search_usd,
             speech_usd=self.speech_usd + other.speech_usd,
+            voice_chars=self.voice_chars + other.voice_chars,
+            voice_usd=self.voice_usd + other.voice_usd,
             unpriced=self.unpriced + other.unpriced,
             latencies_ms=(*self.latencies_ms, *other.latencies_ms),
         )
@@ -245,6 +250,13 @@ class Day(BaseModel):
                 speech_usd=cost or 0.0,
                 unpriced=int(cost is None),
             )
+        )
+
+    def with_voice(self, characters: int, usd_per_million: float) -> Day:
+        """This day plus ``characters`` spoken by a cloud voice, at the user's plan price."""
+        characters = max(characters, 0)
+        return self.plus(
+            Day(voice_chars=characters, voice_usd=characters * usd_per_million / 1_000_000)
         )
 
     def with_turn(self, latency_ms: int | None) -> Day:

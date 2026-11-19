@@ -120,8 +120,26 @@ class VoiceConfig(_Section):
             "Names and places to spell correctly (AssemblyAI and Whisper; Parakeet takes no hints)."
         ),
     )
-    tts: Literal["kokoro"] = "kokoro"
+    tts: Literal["kokoro", "cartesia"] = Field(
+        default="kokoro",
+        description=(
+            '"kokoro": the voice on this computer; "cartesia": Cartesia\'s voice in the cloud, '
+            "with Kokoro as backup (yarvis key set cartesia, ADR 0020)."
+        ),
+    )
     voice: str = Field(default="bm_george", pattern=r"^[a-z]{2}_[a-z]+$")
+    cartesia_voice: str = Field(
+        default="ef191366-f52f-447a-a398-ed8c0f2943a1",  # Archie, British English, male
+        pattern=r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
+        description="A Cartesia voice id (pick one at play.cartesia.ai).",
+    )
+    cartesia_model: str = Field(default="sonic-3.6", pattern=r"^sonic-[a-z0-9.-]+$")
+    cartesia_usd_per_million_chars: float = Field(
+        default=0.0,
+        ge=0,
+        le=1000,
+        description="Your Cartesia plan's price per million characters (0: the Free plan).",
+    )
     speech_rate: float = Field(default=1.0, ge=0.5, le=2.0)
     end_of_turn_ms: int = Field(
         default=900,

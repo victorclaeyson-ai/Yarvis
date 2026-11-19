@@ -43,6 +43,8 @@ class SecretName(StrEnum):
     """The user's Spotify refresh token (``yarvis spotify login``: their own playlists)."""
     ASSEMBLYAI = "assemblyai"
     """An AssemblyAI API key: live speech recognition in the cloud (optional)."""
+    CARTESIA = "cartesia"
+    """A Cartesia API key: Yarvis's voice in the cloud (optional, ADR 0020)."""
 
     @property
     def env_var(self) -> str:
@@ -57,6 +59,7 @@ _ENV_VARS: Final[dict[SecretName, str]] = {
     SecretName.SPOTIFY: "YARVIS_SPOTIFY",
     SecretName.SPOTIFY_LOGIN: "YARVIS_SPOTIFY_LOGIN",
     SecretName.ASSEMBLYAI: "ASSEMBLYAI_API_KEY",
+    SecretName.CARTESIA: "CARTESIA_API_KEY",
 }
 
 

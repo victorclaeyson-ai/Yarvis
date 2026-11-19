@@ -27,6 +27,7 @@ from yarvis.llm.anthropic import DEFAULT_MODEL
 from yarvis.pipeline import Turn
 from yarvis.security.gate import Gate
 from yarvis.speech.base import AudioSink, SpeechToText, TextToSpeech
+from yarvis.speech.cartesia import CartesiaTTS, cloud_voice
 from yarvis.speech.choice import describe as describe_stt
 from yarvis.speech.endpointing import EndpointerSettings
 from yarvis.speech.turn_taking import DEFAULT_WAKE_NAMES
@@ -205,8 +206,12 @@ class Backends:
                 cloud=cloud_key(config.voice, SecretStore()),
                 terms=spoken_names(config),
             ),
-            tts=lambda config, cache: KokoroTTS(
-                cache_dir=cache, voice=config.voice.voice, speed=config.voice.speech_rate
+            tts=lambda config, cache: cloud_voice(
+                config.voice,
+                KokoroTTS(
+                    cache_dir=cache, voice=config.voice.voice, speed=config.voice.speech_rate
+                ),
+                SecretStore(),
             ),
             vad=SileroVAD,
             microphone=lambda config: Microphone(device=config.voice.input_device),
@@ -266,7 +271,7 @@ async def run_assistant(
         backends.wake_word(config, cache_dir) if voice_input and config.voice.wake_word else None
     )
 
-    telemetry = _telemetry(backends, dashboard, llm, stt, big_llm=big_llm)
+    telemetry = _telemetry(backends, dashboard, config, llm, stt, tts, big_llm=big_llm)
 
     async with AsyncExitStack() as stack:
         stack.callback(telemetry.close)
@@ -281,6 +286,7 @@ async def run_assistant(
             hearing=describe_stt(config.voice) if stt is not None else None,
             cloud_hearing=isinstance(stt, AudioTap),
             voice=config.voice.voice if tts is not None else None,
+            cloud_voice=isinstance(tts, CartesiaTTS),
             wake_word=wake_word is not None,
             spotify=any(tool.name.startswith("spotify_") for tool in tools),
             spotify_login=spotify is not None and spotify.login is not None,
@@ -527,14 +533,19 @@ def _tools(
 def _telemetry(
     backends: Backends,
     dashboard: Dashboard | None,
-    *parts: LLMProvider | LoadableSTT | None,
+    config: Config,
+    *parts: LLMProvider | LoadableSTT | LoadableTTS | None,
     big_llm: LLMProvider | None = None,
 ) -> Telemetry:
     """Counts the day's usage; the cloud clients among ``parts`` report to it.
 
     The bigger model's client reports apart, so its spend counts towards its cap.
     """
-    telemetry = Telemetry(backends.usage(), dashboard=dashboard)
+    telemetry = Telemetry(
+        backends.usage(),
+        dashboard=dashboard,
+        voice_usd_per_million=config.voice.cartesia_usd_per_million_chars,
+    )
     for part in parts:
         if isinstance(part, Reports):
             part.report_to(telemetry)

@@ -56,8 +56,8 @@ CLAUDE.md rule 5 forbids keeping transcripts.
    the dashboard.
 5. **Asked first after outside content (T7).** A new tool flag, `asks_when_tainted`, makes
    the gate ask for a spoken "yes" whatever the tier. It applies when the turn is tainted:
-   it has read a web page, an email or any other outside content, or a reply that did is
-   still in the conversation's history (ADR 0018; this replaced a first, one-turn rule).
+   it has read a web page, an email or any other outside content, or anything did
+   earlier in the same conversation (ADR 0018; this replaced a first, one-turn rule).
    Remember and forget set the flag, and the question reads the fact out. The rule is in code: no memory text can lower a tier or skip a confirmation. The
    same flag will serve the screenshot tool (backlog task 13).
 6. **Safe to share between the app and the command line.**
@@ -105,7 +105,7 @@ Revisit after real use of memory, with the arguments below.
 
 - Yarvis knows the user better over time, and the user can see and undo all of it.
 - A page or email can't plant or erase a memory without the user hearing the fact and
-  saying yes, for as long as what it said is in the conversation (ADR 0018).
+  saying yes, for the rest of that conversation (ADR 0018).
 - Facts are sent to Claude with every request, like the profile. They are listed in the
   privacy table; `yarvis memory export` shows exactly what is kept.
 - Proactive remembering and `memory.auto = false` rely on Claude following the rule in

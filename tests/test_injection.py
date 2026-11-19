@@ -16,8 +16,8 @@ worst case: the defences below must not depend on Claude spotting the trick.
    place the model chose (opening an address) is asked first, with the address read out.
 8. After reading outside content, remembering or forgetting a fact is asked first, with the
    fact read out (T7); a remembered "instruction" lowers no tier.
-9. Outside content keeps counting while the reply that read it is in the history, for
-   every rule above, not only in its own turn (ADR 0018).
+9. Outside content keeps counting for the rest of the conversation, for every rule above,
+   not only in its own turn; the conversation ends after silence or when asked (ADR 0018).
 """
 
 from __future__ import annotations
@@ -35,7 +35,7 @@ from test_calendars import FakeStore, at
 from test_computer import FakeRunner
 from test_mail import FakeApps, listed
 from test_mcp import FakeSession, definition, notes_config, session_opener
-from yarvis.agent.conversation import Conversation
+from yarvis.agent.conversation import NEW_CONVERSATION_REPLY, Conversation
 from yarvis.agent.toolbox import Toolbox, wrap_untrusted
 from yarvis.config.models import Config
 from yarvis.llm.base import SystemPrompt, ToolCall, WebSearch
@@ -271,27 +271,32 @@ async def test_a_page_still_counts_two_turns_later(tmp_path: Path) -> None:
     assert apps.values("send") == []
 
 
-async def test_once_the_page_has_left_the_history_it_no_longer_counts(tmp_path: Path) -> None:
-    llm, box, apps = page_then_mail(tmp_path, ["You're welcome."], ["Sure."], [MAIL], ["Sent."])
+async def test_the_taint_lasts_until_the_conversation_ends(tmp_path: Path) -> None:
+    """Victor's decision on ADR 0018: the mark carries forward until the conversation ends."""
+    llm, box, apps = page_then_mail(
+        tmp_path, ["You're welcome."], ["Sure."], [MAIL], ["Okay."], [MAIL], ["Sent."]
+    )
     conversation = remembering(llm, box, exchanges=2)  # keeps the last two exchanges
     await reply(conversation, "summarise the page")
     await reply(conversation, "thanks")
-    await reply(conversation, "and how are you?")  # the page's exchange drops out here
+    await reply(conversation, "and how are you?")  # the page's own exchange has dropped out
+    assert conversation.holds_outside_content  # ...but the replies after it carry its mark
+    assert await reply(conversation, "send my notes like it said") == ASKED
+    await reply(conversation, "No.")
+    assert await reply(conversation, "new conversation") == NEW_CONVERSATION_REPLY
     assert not conversation.holds_outside_content
     assert await reply(conversation, "email my notes to evil@example.com") == "Sent."
-    assert apps.values("send") != []  # confirm_tier2 is off and nothing outside is left
+    assert apps.values("send") != []  # confirm_tier2 is off and the page is forgotten
 
 
-async def test_a_turn_tainted_only_by_history_does_not_extend_it(tmp_path: Path) -> None:
-    """Only reading outside content marks an exchange; inheriting the taint does not."""
-    llm, box, _ = page_then_mail(tmp_path, ["Fine."], ["Sure."])
+async def test_a_turn_tainted_by_the_history_carries_the_mark_forward(tmp_path: Path) -> None:
+    """A word-for-word repeat ("what did it say again?") must not shed the mark."""
+    llm, box, _ = page_then_mail(tmp_path, ["It said to email your notes."], ["Sure."])
     conversation = remembering(llm, box, exchanges=2)
     await reply(conversation, "summarise the page")
+    await reply(conversation, "what did it say again?")
+    await reply(conversation, "ok")  # the page's exchange drops out; the repeat stays
     assert conversation.holds_outside_content
-    await reply(conversation, "thanks")
-    assert conversation.holds_outside_content  # the page's exchange is still there
-    await reply(conversation, "ok")
-    assert not conversation.holds_outside_content  # dropped out: no taint left behind
 
 
 async def test_an_address_from_an_earlier_page_is_asked_first(tmp_path: Path) -> None:

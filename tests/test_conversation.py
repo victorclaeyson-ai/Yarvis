@@ -7,7 +7,7 @@ from typing import Any
 import pytest
 
 from fakes import FakeLLM
-from yarvis.agent.conversation import Conversation
+from yarvis.agent.conversation import NEW_CONVERSATION_REPLY, Conversation
 from yarvis.agent.prompts import system_prompt
 from yarvis.llm.base import LLMError, Message, SystemPrompt
 
@@ -220,7 +220,7 @@ def test_the_history_knows_which_exchanges_read_outside_content() -> None:
     assert conversation.retract("thanks")
     assert conversation.holds_outside_content
     conversation.remember("thanks", "You're welcome.")
-    conversation.remember("bye", "Bye.")  # the page's exchange drops out
+    conversation.remember("bye", "Bye.")  # the page's exchange drops out, unmarked ones stay
     assert not conversation.holds_outside_content
     conversation.remember("read it again", "Still hi.", outside=True)
     assert conversation.retract("read it again")  # interrupted before it was heard
@@ -228,3 +228,88 @@ def test_the_history_knows_which_exchanges_read_outside_content() -> None:
     conversation.remember("read it again", "Still hi.", outside=True)
     conversation.reset()
     assert not conversation.holds_outside_content
+
+
+class Clock:
+    """A clock the test moves."""
+
+    def __init__(self) -> None:
+        self.now = 0.0
+
+    def __call__(self) -> float:
+        return self.now
+
+
+async def test_ten_minutes_of_silence_end_the_conversation() -> None:
+    clock = Clock()
+    llm = FakeLLM(["Hi."], ["Still here."], ["Hello again."])
+    conversation = Conversation(
+        llm,
+        system_prompt=lambda: SystemPrompt("S"),
+        max_tokens=8,
+        clock=clock,
+        idle_reset_s=600,
+    )
+    await collect(conversation, "hello")
+    conversation.remember("read the page", "It says hi.", outside=True)
+    clock.now += 599
+    await collect(conversation, "still there?")
+    assert len(conversation.history) == 6
+    clock.now += 601  # silence since the last reply
+    await collect(conversation, "hello")
+    assert [m.text for m in llm.calls[2][0]] == ["hello"]  # it started again
+    assert not conversation.holds_outside_content
+
+
+async def test_without_an_idle_limit_the_conversation_stays() -> None:
+    clock = Clock()
+    conversation = Conversation(
+        FakeLLM(["Hi."], ["Hi."]),
+        system_prompt=lambda: SystemPrompt("S"),
+        max_tokens=8,
+        clock=clock,
+    )
+    await collect(conversation, "hello")
+    clock.now += 86_400
+    await collect(conversation, "hello")
+    assert len(conversation.history) == 4
+
+
+@pytest.mark.parametrize(
+    "said",
+    [
+        "new conversation",
+        "New conversation.",
+        "Yarvis, new conversation",
+        "Hey Yarvis, new conversation!",
+        "let's start a new conversation",
+        "start a new conversation please",
+    ],
+)
+async def test_saying_new_conversation_starts_one(said: str) -> None:
+    llm = FakeLLM(["Hi."])
+    conversation = make(llm)
+    await collect(conversation, "hello")
+    conversation.remember("read the page", "It says hi.", outside=True)
+    assert await collect(conversation, said) == NEW_CONVERSATION_REPLY
+    assert conversation.history == ()
+    assert not conversation.holds_outside_content
+    assert len(llm.calls) == 1  # decided by code; Claude was not asked
+
+
+@pytest.mark.parametrize(
+    "said", ["what makes a good new conversation starter?", "a new conversation about trains"]
+)
+async def test_other_sentences_with_those_words_go_to_claude(said: str) -> None:
+    llm = FakeLLM(["An answer."])
+    assert await collect(make(llm), said) == "An answer."
+
+
+async def test_a_guess_at_a_pause_never_ends_the_conversation() -> None:
+    conversation = make(FakeLLM(["Hi."]))
+    await collect(conversation, "hello")
+    draft = conversation.draft("new conversation")  # the user may still be talking
+    await asyncio.sleep(0.01)
+    draft.discard()
+    await asyncio.sleep(0.01)
+    assert len(conversation.history) == 2

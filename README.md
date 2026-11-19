@@ -124,6 +124,12 @@ counts from your next one ([how it works](docs/adr/0014-about-me-profile.md)). I
 Claude with your requests, so keep it to about a page and never put keys in it;
 `yarvis profile show` prints exactly what is sent.
 
+**Conversations end.** A conversation is forgotten after ten quiet minutes, or at once
+when you say "new conversation" or click NEW above it in the window. Yarvis then starts
+fresh: after it has read a web page or an email, it keeps asking before acting until
+that conversation ends ([why](docs/adr/0018-taint-lasts-for-the-conversation.md)). Set
+`[conversation] idle_reset_minutes` to change the ten minutes.
+
 **It remembers.** Tell Yarvis something lasting about yourself ("my sister is called
 Lotte") and it keeps it as a short fact, saying "I'll remember that." Ask "what do you
 know about me?" or say "forget that" any time. On the command line,

@@ -311,6 +311,20 @@ class SecurityConfig(_Section):
     )
 
 
+class ConversationConfig(_Section):
+    """How long a conversation lasts (ADR 0018)."""
+
+    idle_reset_minutes: float = Field(
+        default=10,
+        ge=1,
+        le=1440,
+        description=(
+            "After this much silence the conversation is forgotten and the next question "
+            'starts a new one. Saying "new conversation" does the same at once.'
+        ),
+    )
+
+
 class MemoryConfig(_Section):
     """What Yarvis keeps about the user (ADR 0017)."""
 
@@ -339,6 +353,7 @@ class Config(_Section):
     tools: ToolsConfig = ToolsConfig()
     mcp: McpConfig = McpConfig()
     security: SecurityConfig = SecurityConfig()
+    conversation: ConversationConfig = ConversationConfig()
     memory: MemoryConfig = MemoryConfig()
     logging: LoggingConfig = LoggingConfig()
 

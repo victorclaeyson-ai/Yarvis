@@ -10,8 +10,8 @@ Threads involved:
 
 Security: everything sent to the page is JSON data (never HTML or code), and the page
 only ever inserts it with ``textContent``; the dashboard gets numbers, and connection
-details already scrubbed of secrets (``telemetry.Link``). The JavaScript API is four small methods
-with validated arguments (``hello``, ``talk``, ``stop``, ``send``).
+details already scrubbed of secrets (``telemetry.Link``). The JavaScript API is five small methods
+with validated arguments (``hello``, ``talk``, ``stop``, ``send``, ``new_conversation``).
 """
 
 from __future__ import annotations
@@ -38,6 +38,8 @@ Event = dict[str, Any]
 
 MAX_MESSAGE_CHARS: Final = 2_000
 MAX_LABEL_CHARS: Final = 60
+NEW_CONVERSATION: Final = "new conversation"
+"""What the dashboard's button sends: handled by code like the spoken command."""
 LEVEL_EVERY_N_FRAMES: Final = 2  # ~15 updates per second is plenty for an animation
 
 
@@ -106,6 +108,10 @@ class AppApi:
     def stop(self) -> None:
         """Stop listening, thinking or speaking."""
         self._controls.stop()
+
+    def new_conversation(self) -> None:
+        """Start a new conversation: the same as saying "new conversation"."""
+        self._commands.put(NEW_CONVERSATION)
 
     def send(self, text: object) -> None:
         """Send a typed message."""

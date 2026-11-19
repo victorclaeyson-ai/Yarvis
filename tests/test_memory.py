@@ -342,6 +342,12 @@ async def test_a_fact_remembered_unasked_is_kept_and_announced(book: MemoryBook)
     assert activity == ['remember that "Has a sister called Lotte."']  # shown on the dashboard
 
 
+def test_a_conversation_ends_after_ten_quiet_minutes_by_default() -> None:
+    assert Config().conversation.idle_reset_minutes == 10
+    custom = Config.model_validate({"conversation": {"idle_reset_minutes": 30}})
+    assert custom.conversation.idle_reset_minutes == 30
+
+
 def test_memory_auto_is_on_by_default_and_can_be_switched_off() -> None:
     assert Config().memory.auto is True
     assert Config.model_validate({"memory": {"auto": False}}).memory.auto is False

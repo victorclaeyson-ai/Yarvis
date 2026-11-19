@@ -213,7 +213,6 @@ conversation within five minutes.
 - Approve (or not) the change to CLAUDE.md security rule 4 for Google's loopback login
   (task 16).
 - Register the Microsoft public client app for task 16 (the PR gives the steps).
-- Decide on opt-in summaries of past conversations (task 9's ADR proposes it).
 
 ## Later (Phase 3 and beyond)
 

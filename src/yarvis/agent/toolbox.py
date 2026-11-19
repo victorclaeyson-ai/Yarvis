@@ -62,6 +62,28 @@ class RoundOutcome:
     pending: PendingAction | None
     done: tuple[str, ...] = ()
     """What was actually done ("play Feel What You Want on Spotify"), in order."""
+    read_outside: bool = False
+    """A result in this batch held outside content (not just inherited taint)."""
+
+
+@dataclass(frozen=True, slots=True)
+class Confirmed:
+    """What happened to an action the user said yes to."""
+
+    note: str
+    """For the model: done or failed, with the result (wrapped if it is outside content)."""
+    done: bool
+    read_outside: bool
+    """The result held outside content: the rest of the turn is tainted (ADR 0018)."""
+
+
+@dataclass(frozen=True, slots=True)
+class _Attempt:
+    """One call, run: its text for the model, whether it worked, whether it read outside."""
+
+    text: str
+    ok: bool
+    untrusted: bool
 
 
 class Toolbox:
@@ -94,44 +116,39 @@ class Toolbox:
         """What the model is offered."""
         return tuple(tool.spec() for tool in self._tools.values())
 
-    async def run(
-        self, calls: Sequence[ToolCall], *, tainted: bool, tainted_before: bool = False
-    ) -> RoundOutcome:
-        """Run one batch of calls (in order). At most one may wait for confirmation.
-
-        ``tainted_before``: the previous turn read outside content, which may live on in the
-        reply that is now part of the history (``Tool.asks_when_tainted``).
-        """
+    async def run(self, calls: Sequence[ToolCall], *, tainted: bool) -> RoundOutcome:
+        """Run one batch of calls (in order). At most one may wait for confirmation."""
         results: list[ToolResult] = []
         done: list[str] = []
         pending: PendingAction | None = None
+        read_outside = False
         for call in calls:
-            result, parked, untrusted, ran = await self._one(
-                call, tainted=tainted, tainted_before=tainted_before, busy=pending
-            )
+            result, parked, untrusted, ran = await self._one(call, tainted=tainted, busy=pending)
             pending = pending or parked
             tainted = tainted or untrusted
+            read_outside = read_outside or untrusted
             results.append(result)
             done += [ran] if ran else []
-        return RoundOutcome(tuple(results), tainted, pending, tuple(done))
+        return RoundOutcome(tuple(results), tainted, pending, tuple(done), read_outside)
 
     def expired(self, action: PendingAction) -> bool:
         """Whether the user answered too late. The deadline was set with this clock."""
         return self._clock() > action.expires
 
-    async def confirm(self, action: PendingAction) -> str:
-        """Run an action the user said yes to. Returns a note for the model."""
-        try:
-            outcome = await self._execute(action.tool, action.args, action.description)
-        except ToolError as exc:
-            return f"The user confirmed, but it failed: {exc}"
-        return CONFIRMED_AND_DONE + outcome
+    async def confirm(self, action: PendingAction) -> Confirmed:
+        """Run an action the user said yes to, treating its result like any other."""
+        attempt = await self._attempt(action.tool, action.args, action.description)
+        if attempt.ok:
+            note = CONFIRMED_AND_DONE + attempt.text
+        else:
+            note = f"The user confirmed, but it failed: {attempt.text}"
+        return Confirmed(note, done=attempt.ok, read_outside=attempt.untrusted)
 
     async def _one(
-        self, call: ToolCall, *, tainted: bool, tainted_before: bool, busy: PendingAction | None
+        self, call: ToolCall, *, tainted: bool, busy: PendingAction | None
     ) -> tuple[ToolResult, PendingAction | None, bool, str | None]:
         """One call: (result, parked action, untrusted result?, what was done if it ran)."""
-        prepared = await self._prepare(call, tainted=tainted, tainted_before=tainted_before)
+        prepared = await self._prepare(call, tainted=tainted)
         if isinstance(prepared, ToolResult):
             return prepared, None, False, None
         tool, args, verdict = prepared
@@ -149,19 +166,30 @@ class Toolbox:
         self, call: ToolCall, tool: Tool[Any], args: Arguments, description: str
     ) -> tuple[ToolResult, bool, str | None]:
         """Run an allowed call: (result, untrusted result?, what was done if it worked)."""
+        attempt = await self._attempt(tool, args, description)
+        result = ToolResult(call.id, attempt.text, is_error=not attempt.ok)
+        return result, attempt.untrusted, description if attempt.ok else None
+
+    async def _attempt(self, tool: Tool[Any], args: Arguments, description: str) -> _Attempt:
+        """Run a call. Outside content in its result, or its error, is wrapped as data."""
         try:
             content = await self._execute(tool, args, description)
         except UntrustedToolError as exc:
-            report = f"{exc}\n{wrap_untrusted(tool.name, exc.content)}"
-            return ToolResult(call.id, report, is_error=True), True, None
+            return _Attempt(
+                f"{exc}\n{wrap_untrusted(tool.name, exc.content)}", ok=False, untrusted=True
+            )
         except ToolError as exc:
-            return _error(call, str(exc)), False, None
+            if tool.untrusted_output:  # its message can quote what it read (a title, a page)
+                return _Attempt(
+                    f"It failed.\n{wrap_untrusted(tool.name, str(exc))}", ok=False, untrusted=True
+                )
+            return _Attempt(str(exc), ok=False, untrusted=False)
         if tool.untrusted_output:
-            return ToolResult(call.id, wrap_untrusted(tool.name, content)), True, description
-        return ToolResult(call.id, content), False, description
+            return _Attempt(wrap_untrusted(tool.name, content), ok=True, untrusted=True)
+        return _Attempt(content, ok=True, untrusted=False)
 
     async def _prepare(
-        self, call: ToolCall, *, tainted: bool, tainted_before: bool = False
+        self, call: ToolCall, *, tainted: bool
     ) -> ToolResult | tuple[Tool[Any], Arguments, Verdict]:
         """Find the tool, validate and resolve the arguments, and ask the gate."""
         tool = self._tools.get(call.name)
@@ -181,12 +209,7 @@ class Toolbox:
             args = await self._resolve(tool, args)
         except ToolError as exc:
             return _error(call, str(exc))
-        decision = self._gate.check(
-            tool,
-            tainted=tainted,
-            sends_out=tool.sends_data_out(args),
-            tainted_before=tainted_before,
-        )
+        decision = self._gate.check(tool, tainted=tainted, sends_out=tool.sends_data_out(args))
         if decision.verdict is Verdict.DENY:
             return _error(call, f"Refused: {decision.reason}")
         return tool, args, decision.verdict

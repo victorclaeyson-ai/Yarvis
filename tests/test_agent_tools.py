@@ -220,12 +220,6 @@ def test_some_changes_need_a_yes_after_outside_content(
         assert "outside content" in decision.reason
 
 
-def test_those_changes_also_need_a_yes_in_the_turn_after() -> None:
-    gate = Gate(confirm_external=False)
-    assert gate.check(Note(), tainted=False, tainted_before=True).verdict is Verdict.CONFIRM
-    assert gate.check(Echo(), tainted=False, tainted_before=True).verdict is Verdict.ALLOW
-
-
 def test_dangerous_tools_stay_refused_even_when_allowed() -> None:
     decision = Gate(allow_dangerous=True).check(Wipe(), tainted=False)
     assert decision.verdict is Verdict.DENY
@@ -321,7 +315,7 @@ async def test_external_actions_wait_for_the_user() -> None:
     assert outcome.pending is not None
     assert outcome.pending.question == "Should I send 'hi' to Thomas?"
     assert Send.sent == [] and activity == []  # nothing happened yet
-    assert "it was done: Sent." in await box.confirm(outcome.pending)
+    assert "it was done: Sent." in (await box.confirm(outcome.pending)).note
     assert Send.sent == [("Thomas", "hi")]
 
 
@@ -349,7 +343,7 @@ async def test_a_failed_confirmed_action_is_reported() -> None:
     failing = type(outcome.pending)(
         Picky(), TextArgs(text="x"), outcome.pending.description, outcome.pending.expires
     )
-    assert "it failed: No app called Sfari." in await box.confirm(failing)
+    assert "it failed: No app called Sfari." in (await box.confirm(failing)).note
 
 
 # --------------------------------------------------------------------------- yes or no

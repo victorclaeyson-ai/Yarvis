@@ -22,7 +22,6 @@ from contextlib import aclosing
 from typing import TYPE_CHECKING, Final
 
 from yarvis.agent.confirmation import classify_answer
-from yarvis.agent.toolbox import CONFIRMED_AND_DONE
 from yarvis.llm.base import LLMError, Message, ToolCall, WebSearch
 
 if TYPE_CHECKING:
@@ -56,7 +55,7 @@ class Draft:
         self.searches: list[str] = []
         """Web searches the model made (on the provider's side) for this reply."""
         self.read_outside = False
-        """Whether a tool this reply ran returned outside content."""
+        """Whether a tool this reply ran returned outside content (inherited taint aside)."""
         self._task = asyncio.create_task(self._generate())
 
     async def _generate(self) -> None:
@@ -78,8 +77,8 @@ class Draft:
         messages = conversation.messages_for(self.user_text)
         if (pending := conversation.pending) is not None:
             messages[-1] = Message("user", await self._resolve(pending))
-        tainted = False
-        tainted_before = conversation.tainted_before
+        # Outside content read earlier lives on in replies still in the history (ADR 0018).
+        tainted = conversation.holds_outside_content or self.read_outside
         for round_number in range(MAX_TOOL_ROUNDS + 1):
             # The last round must answer in words: tools stay listed, but none may be called.
             may_call = round_number < MAX_TOOL_ROUNDS
@@ -88,12 +87,10 @@ class Draft:
                 return
             await self._live.wait()  # never act on a reply the user may not want
             # Search results read on the provider's side are outside content too.
-            outcome = await toolbox.run(
-                calls, tainted=tainted or bool(self.searches), tainted_before=tainted_before
-            )
+            outcome = await toolbox.run(calls, tainted=tainted or bool(self.searches))
             self.done += outcome.done
             tainted = outcome.tainted
-            self.read_outside = self.read_outside or tainted
+            self.read_outside = self.read_outside or outcome.read_outside
             messages += [
                 Message("assistant", text, tool_calls=tuple(calls)),
                 Message("user", "", tool_results=outcome.results),
@@ -143,9 +140,12 @@ class Draft:
             note = f"The question about whether to {pending.description} expired; nothing was done."
         elif answer == "yes":
             logger.info("Confirmed by the user: %s", pending.tool.name)
-            note = await toolbox.confirm(pending)
-            if note.startswith(CONFIRMED_AND_DONE):
+            confirmed = await toolbox.confirm(pending)
+            note = confirmed.note
+            if confirmed.done:
                 self.done.append(pending.description)
+            # Its result is outside content like any other: this turn is tainted from here.
+            self.read_outside = self.read_outside or confirmed.read_outside
         elif answer == "no":
             note = f"The user declined, so you did not {pending.description}."
         else:
@@ -211,11 +211,12 @@ class Draft:
                 reply = f"{reply} [Interrupted. Already done: {'; '.join(done)}.]".strip()
             elif done:
                 reply = f"{reply} [Done: {'; '.join(done)}.]".strip()
-            # Outside content can live on in this reply (now history): the next turn may
-            # not change memory without asking either (DESIGN.md T7).
-            self._conversation.tainted_before = self.read_outside or bool(self.searches)
             if reply:
-                self._conversation.remember(self.user_text, reply)
+                # Outside content can live on in this reply: while it is in the history, later
+                # turns count as tainted too (ADR 0018). Inherited taint does not count here,
+                # or it would never leave.
+                outside = self.read_outside or bool(self.searches)
+                self._conversation.remember(self.user_text, reply, outside=outside)
 
     def discard(self) -> None:
         """Abandon the draft: stop generating and remember nothing."""
@@ -250,10 +251,10 @@ class Conversation:
         self.toolbox = toolbox
         self.pending: PendingAction | None = None
         """An action waiting for the user's "yes" (asked at the end of the last reply)."""
-        self.tainted_before = False
-        """The last reply the user heard was made after reading outside content."""
         self._max_messages = max_messages
         self._history: list[Message] = []
+        self._outside: list[bool] = []
+        """Per exchange in the history: whether its turn read outside content."""
 
     @property
     def history(self) -> tuple[Message, ...]:
@@ -263,8 +264,17 @@ class Conversation:
     def reset(self) -> None:
         """Forget the conversation."""
         self._history.clear()
+        self._outside.clear()
         self.pending = None
-        self.tainted_before = False
+
+    @property
+    def holds_outside_content(self) -> bool:
+        """Whether a reply in the history was made after reading outside content.
+
+        Such a reply can repeat what a page or email said, so every turn counts as tainted
+        while it is there (ADR 0018), not only the turn that read it.
+        """
+        return any(self._outside)
 
     def messages_for(self, user_text: str) -> list[Message]:
         """The messages to send for a new user message."""
@@ -288,15 +298,18 @@ class Conversation:
         """
         if len(self._history) >= _EXCHANGE and self._history[-_EXCHANGE].text == user_text:
             del self._history[-_EXCHANGE:]
+            del self._outside[-1:]
             return True
         return False
 
-    def remember(self, user_text: str, reply: str) -> None:
-        """Record a finished exchange (the hook point for long-term memory)."""
+    def remember(self, user_text: str, reply: str, *, outside: bool = False) -> None:
+        """Record a finished exchange; ``outside``: its turn read outside content."""
         self._history.extend((Message("user", user_text), Message("assistant", reply)))
+        self._outside.append(outside)
         overflow = len(self._history) - self._max_messages
         if overflow > 0:
             del self._history[:overflow]
+            del self._outside[: overflow // _EXCHANGE]
 
 
 def _search_activity(query: str) -> str:

@@ -207,3 +207,24 @@ def test_a_profile_edit_changes_the_cached_part() -> None:
     assert after.stable.endswith("<profile>\nCall me Vic.\n</profile>\n\n")
     assert "Leuven" not in after.stable
     assert before.volatile == after.volatile
+
+
+# --------------------------------------------------------------------------- outside content
+
+
+def test_the_history_knows_which_exchanges_read_outside_content() -> None:
+    conversation = make(FakeLLM(), max_messages=4)
+    conversation.remember("read the page", "It says hi.", outside=True)
+    conversation.remember("thanks", "You're welcome.")
+    assert conversation.holds_outside_content
+    assert conversation.retract("thanks")
+    assert conversation.holds_outside_content
+    conversation.remember("thanks", "You're welcome.")
+    conversation.remember("bye", "Bye.")  # the page's exchange drops out
+    assert not conversation.holds_outside_content
+    conversation.remember("read it again", "Still hi.", outside=True)
+    assert conversation.retract("read it again")  # interrupted before it was heard
+    assert not conversation.holds_outside_content
+    conversation.remember("read it again", "Still hi.", outside=True)
+    conversation.reset()
+    assert not conversation.holds_outside_content

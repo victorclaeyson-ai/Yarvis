@@ -55,11 +55,10 @@ CLAUDE.md rule 5 forbids keeping transcripts.
    gate can't tell an asked-for fact from one Claude picked up. Every write still shows on
    the dashboard.
 5. **Asked first after outside content (T7).** A new tool flag, `asks_when_tainted`, makes
-   the gate ask for a spoken "yes" whatever the tier. It applies when the turn has read a
-   web page, an email or any other outside content, **and in the turn right after one
-   that did**. The reply that repeated the page is part of the history by then, and could
-   steer the next turn. Remember and forget set the flag, and the question reads the fact
-   out. The rule is in code: no memory text can lower a tier or skip a confirmation. The
+   the gate ask for a spoken "yes" whatever the tier. It applies when the turn is tainted:
+   it has read a web page, an email or any other outside content, or a reply that did is
+   still in the conversation's history (ADR 0018; this replaced a first, one-turn rule).
+   Remember and forget set the flag, and the question reads the fact out. The rule is in code: no memory text can lower a tier or skip a confirmation. The
    same flag will serve the screenshot tool (backlog task 13).
 6. **Safe to share between the app and the command line.**
    - `yarvis memory list|add|forget|export|clear` changes the same file while Yarvis runs.
@@ -81,9 +80,10 @@ CLAUDE.md rule 5 forbids keeping transcripts.
    never overwritten: memory reads as empty, `yarvis doctor`, `yarvis memory list` and the
    memory tools say it is damaged, and `yarvis memory clear` starts again.
 
-## Proposal for Victor: summaries of past conversations
+## Proposal: summaries of past conversations (rejected for now)
 
-Not built; this would change CLAUDE.md rule 5, so it is Victor's decision.
+**Decision (Victor, 19 November 2026): no, for now.** CLAUDE.md rule 5 stays as it is.
+Revisit after real use of memory, with the arguments below.
 
 - **What it would be:** opt-in (`memory.summaries = true`, off by default). At the end of
   a conversation, Claude writes two or three sentences of what it was about ("Planned the
@@ -105,7 +105,7 @@ Not built; this would change CLAUDE.md rule 5, so it is Victor's decision.
 
 - Yarvis knows the user better over time, and the user can see and undo all of it.
 - A page or email can't plant or erase a memory without the user hearing the fact and
-  saying yes, in that turn or the next.
+  saying yes, for as long as what it said is in the conversation (ADR 0018).
 - Facts are sent to Claude with every request, like the profile. They are listed in the
   privacy table; `yarvis memory export` shows exactly what is kept.
 - Proactive remembering and `memory.auto = false` rely on Claude following the rule in

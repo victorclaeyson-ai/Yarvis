@@ -286,10 +286,50 @@ async def test_tool_messages_are_sent_as_blocks() -> None:
             ],
         },
     ]
+    assert "tool_choice" not in seen[0]
     mixed = Message("user", "and also", tool_results=(ToolResult("t2", "Nope.", is_error=True),))
     assert list(_to_param(mixed)["content"])[-1] == {"type": "text", "text": "and also"}
     said = Message("assistant", "Sure.", tool_calls=(ToolCall("t3", "x", {}),))
     assert next(iter(_to_param(said)["content"])) == {"type": "text", "text": "Sure."}
+
+
+async def test_a_round_that_may_not_call_tools_still_lists_them() -> None:
+    # The API refuses tool_use/tool_result blocks in a request that defines no tools, so
+    # the last tool round keeps the same tools and forbids calls with tool_choice none.
+    seen: list[dict[str, Any]] = []
+
+    def handler(request: httpx2.Request) -> httpx2.Response:
+        seen.append(json.loads(request.content))
+        return httpx2.Response(
+            200, content=text_stream("Done."), headers={"content-type": "text/event-stream"}
+        )
+
+    spec = ToolSpec("set_timer", "Start a timer.", {"type": "object", "properties": {}})
+    p = provider(handler)
+    p.web_search = True
+    first = [Message("user", "set a timer")]
+    rounds = [
+        *first,
+        Message("assistant", "", tool_calls=(ToolCall("t1", "set_timer", {"minutes": 1}),)),
+        Message("user", "", tool_results=(ToolResult("t1", "Timer 1 set."),)),
+    ]
+    _ = [e async for e in p.stream(first, system="S", max_tokens=50, tools=[spec])]
+    _ = [
+        e
+        async for e in p.stream(
+            rounds, system="S", max_tokens=50, tools=[spec], allow_tool_calls=False
+        )
+    ]
+    normal, last = seen
+    assert "tool_choice" not in normal
+    assert last["tool_choice"] == {"type": "none"}
+    assert last["tools"] == normal["tools"]
+    assert [t["name"] for t in last["tools"]] == ["set_timer", "web_search"]
+    # Apart from the choice and the longer conversation, the request is the same.
+    for body in (normal, last):
+        body.pop("messages")
+        body.pop("tool_choice", None)
+    assert json.dumps(last, sort_keys=True) == json.dumps(normal, sort_keys=True)
 
 
 # --------------------------------------------------------------------------- web search

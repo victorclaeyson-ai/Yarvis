@@ -386,8 +386,18 @@ async def test_a_speculative_draft_never_runs_tools() -> None:
 async def test_the_model_must_answer_after_too_many_tool_rounds() -> None:
     llm = FakeLLM(*[[call("echo", text="again")]] * MAX_TOOL_ROUNDS, ["Enough."])
     assert await reply(make_conversation(llm, toolbox()), "loop") == "Enough."
-    assert llm.offered[-1] == []  # the last call cannot use tools
     assert len(llm.calls) == MAX_TOOL_ROUNDS + 1
+    # The last call still lists the tools (the API refuses tool blocks without them) but
+    # may not call any.
+    assert llm.offered[-1] == llm.offered[0] != []
+    assert llm.allowed == [True] * MAX_TOOL_ROUNDS + [False]
+
+
+async def test_a_tool_call_in_the_last_round_is_not_run() -> None:
+    activity: list[str] = []
+    llm = FakeLLM(*[[call("echo", text="again")]] * (MAX_TOOL_ROUNDS + 1))  # ignores the ban
+    await reply(make_conversation(llm, toolbox(activity=activity)), "loop")
+    assert len(activity) == MAX_TOOL_ROUNDS
 
 
 async def test_a_turn_that_takes_too_long_is_stopped(monkeypatch: pytest.MonkeyPatch) -> None:

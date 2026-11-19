@@ -115,7 +115,7 @@ def test_missing_timestamps_give_none() -> None:
 
 async def test_stopping_a_turn_silences_the_speaker() -> None:
     class SlowLLM(FakeLLM):
-        async def stream(self, messages, *, system, max_tokens, tools=()):  # type: ignore[override]
+        async def stream(self, messages, *, system, max_tokens, tools=(), allow_tool_calls=True):  # type: ignore[override]
             yield "First sentence. "
             await asyncio.sleep(60)
             yield "never"  # pragma: no cover
@@ -306,6 +306,7 @@ async def test_unanswered_until_the_first_word_is_spoken() -> None:
             system: str,
             max_tokens: int,
             tools: Sequence[ToolSpec] = (),
+            allow_tool_calls: bool = True,
         ) -> AsyncGenerator[str | ToolCall]:
             await asyncio.Event().wait()
             yield ""  # pragma: no cover

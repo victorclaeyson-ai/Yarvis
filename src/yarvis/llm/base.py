@@ -76,12 +76,17 @@ class LLMProvider(Protocol):
         system: str,
         max_tokens: int,
         tools: Sequence[ToolSpec] = (),
+        allow_tool_calls: bool = True,
     ) -> AsyncGenerator[str | ToolCall | WebSearch]:
         """Yield the reply as text fragments as soon as they are generated.
 
         If the model wants to use tools, the ``ToolCall`` objects follow at the end of
         the response; the caller runs them and asks again with the results. A provider
         that searches the web itself reports each search as a ``WebSearch``.
+
+        With ``allow_tool_calls`` false the model must answer in text: ``tools`` are
+        still listed (earlier tool calls in ``messages`` refer to them) but none may be
+        called, not even the provider's own web search.
 
         Raises:
             LLMError: On any failure, with a user-presentable message.

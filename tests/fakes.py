@@ -135,6 +135,7 @@ class FakeLLM:
         self.error = error
         self.calls: list[tuple[list[Message], str, int]] = []
         self.offered: list[list[str]] = []  # tool names offered on each call
+        self.allowed: list[bool] = []  # whether each call let the model call tools
         self.warm_ups = 0
 
     async def warm_up(self) -> None:
@@ -147,9 +148,11 @@ class FakeLLM:
         system: str,
         max_tokens: int,
         tools: Sequence[ToolSpec] = (),
+        allow_tool_calls: bool = True,
     ) -> AsyncGenerator[str | ToolCall | WebSearch]:
         self.calls.append((list(messages), system, max_tokens))
         self.offered.append([tool.name for tool in tools])
+        self.allowed.append(allow_tool_calls)
         deltas = self.replies.pop(0) if self.replies else []
         for delta in deltas:
             await asyncio.sleep(0)

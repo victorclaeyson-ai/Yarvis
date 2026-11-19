@@ -28,6 +28,7 @@ if TYPE_CHECKING:
         ContentBlockParam,
         MessageParam,
         TextBlockParam,
+        ToolChoiceNoneParam,
         ToolParam,
         ToolResultBlockParam,
         ToolUnionParam,
@@ -106,6 +107,7 @@ class AnthropicProvider:
         system: str,
         max_tokens: int,
         tools: Sequence[ToolSpec] = (),
+        allow_tool_calls: bool = True,
     ) -> AsyncGenerator[str | ToolCall | WebSearch]:
         """Yield reply text as it is generated, web searches as they happen, then tool calls."""
         params = [self._to_param(message) for message in messages]
@@ -114,6 +116,8 @@ class AnthropicProvider:
         ]
         if tools and self.web_search:
             tool_params.append(_WEB_SEARCH)
+        # Only the choice changes, not the tool list: that keeps the cached prefix.
+        choice = _NO_TOOL_CALLS if tool_params and not allow_tool_calls else anthropic.omit
         turn: list[ContentBlock] = []
         try:
             for _ in range(_MAX_CONTINUATIONS + 1):
@@ -123,6 +127,7 @@ class AnthropicProvider:
                     system=system,
                     messages=params,
                     tools=tool_params or anthropic.omit,
+                    tool_choice=choice,
                 ) as stream:
                     seen = _Seen()
                     try:
@@ -221,6 +226,9 @@ _WEB_SEARCH: Final[WebSearchTool20250305Param] = {
     "name": "web_search",
     "max_uses": WEB_SEARCHES_PER_REQUEST,
 }
+
+
+_NO_TOOL_CALLS: Final[ToolChoiceNoneParam] = {"type": "none"}
 
 
 def _to_param(message: Message) -> MessageParam:

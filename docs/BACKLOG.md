@@ -43,7 +43,7 @@ Prices and limits below were checked against the providers' documentation on
   yes; the ADR proposes whether opt-in short summaries of past conversations are worth it
   (that would change rule 5, so Victor decides).
 
-- [ ] **10. Smart model switching.**
+- [x] **10. Smart model switching.** (ADR 0019)
   Haiku 5.5 stays the voice, for a fast first word; hard requests get a bigger model. The
   ADR compares three ways:
   - Anthropic's advisor tool (beta `advisor_20260301`, header `advisor-tool-2026-03-01`):

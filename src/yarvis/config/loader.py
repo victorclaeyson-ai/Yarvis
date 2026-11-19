@@ -32,6 +32,9 @@ language = "en"
 provider = "anthropic"      # "anthropic" ("ollama" for fully offline arrives in Phase 3)
 # model = "claude-sonnet-5-5"  # default: claude-haiku-5-5, the fastest
 max_tokens = 1024
+big_model = "claude-opus-5-5"  # hard questions, and "think hard: ...", go here
+big_model_daily_usd = 0.50  # most to spend on it per day; then Yarvis answers quickly
+switching = "auto"          # "auto", "asked" (only "think hard") or "off"
 
 [voice]
 cloud_stt = true            # AssemblyAI, if you stored its key (`yarvis key set assemblyai`)

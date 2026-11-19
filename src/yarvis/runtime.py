@@ -17,6 +17,7 @@ import numpy as np
 from yarvis.agent.conversation import Conversation
 from yarvis.agent.greetings import Greeter
 from yarvis.agent.prompts import system_prompt
+from yarvis.agent.switching import THINK_HARDER, Switching
 from yarvis.agent.toolbox import Toolbox
 from yarvis.assistant import Assistant, AssistantControls, TurnTaking
 from yarvis.audio.sounds import chime
@@ -252,7 +253,7 @@ async def run_assistant(
 
     The day's usage is counted and kept whatever the interface; ``dashboard`` shows it.
     """
-    llm = backends.llm(config, api_key)
+    llm, big_llm = _models(config, api_key, backends)
     announcements: asyncio.Queue[str] = asyncio.Queue()
     alarms = (
         Alarms(announcements.put_nowait, on_change=dashboard.timers if dashboard else None)
@@ -265,7 +266,7 @@ async def run_assistant(
         backends.wake_word(config, cache_dir) if voice_input and config.voice.wake_word else None
     )
 
-    telemetry = _telemetry(backends, dashboard, llm, stt)
+    telemetry = _telemetry(backends, dashboard, llm, stt, big_llm=big_llm)
 
     async with AsyncExitStack() as stack:
         stack.callback(telemetry.close)
@@ -298,10 +299,11 @@ async def run_assistant(
             profile=backends.profile,
             memory=memory,
             on_activity=ui.activity,
+            switching=_switching(config, big_llm, telemetry),
         )
         if on_loading is not None:
             on_loading("Warming up…")
-        await warm_up(llm, stt, tts)
+        await warm_up(llm, stt, tts, big_llm)
 
         speaker = None
         if tts is not None:
@@ -417,6 +419,7 @@ def _conversation(
     profile: Callable[[], str],
     memory: MemoryBook | None,
     on_activity: Callable[[str], None],
+    switching: Switching | None = None,
 ) -> Conversation:
     """The conversation with Claude, its tools behind the permission gate."""
     gate = Gate(
@@ -437,6 +440,32 @@ def _conversation(
         max_tokens=config.llm.max_tokens,
         toolbox=Toolbox(tools, gate, on_activity=on_activity) if tools else None,
         idle_reset_s=config.conversation.idle_reset_minutes * 60,
+        switching=switching,
+    )
+
+
+def _models(
+    config: Config, api_key: SecretStr, backends: Backends
+) -> tuple[LLMProvider, LLMProvider | None]:
+    """The voice model, and the bigger model for hard questions (None: switching is off)."""
+    llm = backends.llm(config, api_key)
+    if config.llm.switching == "off":
+        return llm, None
+    big = config.llm.model_copy(update={"model": config.llm.big_model})
+    return llm, backends.llm(config.model_copy(update={"llm": big}), api_key)
+
+
+def _switching(
+    config: Config, big_llm: LLMProvider | None, telemetry: Telemetry
+) -> Switching | None:
+    """How hard questions reach the bigger model, within its daily budget (in code)."""
+    if big_llm is None:
+        return None
+    cap = config.llm.big_model_daily_usd
+    return Switching(
+        big_llm,
+        auto=config.llm.switching == "auto",
+        within_budget=lambda: telemetry.big_model_usd_today() < cap,
     )
 
 
@@ -488,17 +517,29 @@ def _tools(
             "search the web for anything current: news, sports results, prices, opening "
             "hours, facts you are unsure of"
         )
+    if config.llm.switching == "auto" and tools:  # without tools the prompt says it can't act
+        said.append(
+            f"hand questions that need careful reasoning to a bigger model ({THINK_HARDER})"
+        )
     return tools, said
 
 
 def _telemetry(
-    backends: Backends, dashboard: Dashboard | None, *parts: LLMProvider | LoadableSTT | None
+    backends: Backends,
+    dashboard: Dashboard | None,
+    *parts: LLMProvider | LoadableSTT | None,
+    big_llm: LLMProvider | None = None,
 ) -> Telemetry:
-    """Counts the day's usage; the cloud clients among ``parts`` report to it."""
+    """Counts the day's usage; the cloud clients among ``parts`` report to it.
+
+    The bigger model's client reports apart, so its spend counts towards its cap.
+    """
     telemetry = Telemetry(backends.usage(), dashboard=dashboard)
     for part in parts:
         if isinstance(part, Reports):
             part.report_to(telemetry)
+    if isinstance(big_llm, Reports):
+        big_llm.report_to(telemetry.for_bigger_model())
     return telemetry
 
 
@@ -543,13 +584,20 @@ def _log_hearing(*, wake_word: bool, barge_in: str, speaker: Sink | None, cloud:
 WARM_UP_AUDIO_SAMPLES = 8_000  # half a second of silence
 
 
-async def warm_up(llm: LLMProvider, stt: LoadableSTT | None, tts: LoadableTTS | None) -> None:
+async def warm_up(
+    llm: LLMProvider,
+    stt: LoadableSTT | None,
+    tts: LoadableTTS | None,
+    big_llm: LLMProvider | None = None,
+) -> None:
     """Run every engine once so the first real question is as fast as the rest.
 
     The first inference of an ONNX/CTranslate2 model and the first HTTPS request are much
     slower than later ones (memory allocation, kernel selection, TLS handshake).
     """
     jobs: list[Awaitable[object]] = [llm.warm_up()]
+    if big_llm is not None:  # its first answer should not pay for a TLS handshake either
+        jobs.append(big_llm.warm_up())
     if stt is not None:
         jobs.append(stt.transcribe(np.zeros(WARM_UP_AUDIO_SAMPLES, dtype=np.float32)))
     if tts is not None:

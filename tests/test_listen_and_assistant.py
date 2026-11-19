@@ -18,7 +18,7 @@ from yarvis.listen import (
     Utterance,
     listen,
 )
-from yarvis.llm.base import LLMError
+from yarvis.llm.base import LLMError, SystemPrompt
 from yarvis.pipeline import Turn, TurnResult
 from yarvis.speech.endpointing import EndpointerSettings
 from yarvis.speech.silero import SileroVAD
@@ -144,7 +144,9 @@ async def lines(*items: str) -> AsyncIterator[str]:
 
 
 def make_turn(llm: FakeLLM, stt_text: str = "what time is it") -> Turn:
-    conversation = Conversation(llm, system_prompt=lambda: "S", max_tokens=32, clock=TickingClock())
+    conversation = Conversation(
+        llm, system_prompt=lambda: SystemPrompt("S"), max_tokens=32, clock=TickingClock()
+    )
     return Turn(
         conversation,
         stt=FakeSTT(stt_text),

@@ -16,6 +16,7 @@ from yarvis.agent.greetings import Greeter
 from yarvis.assistant import Assistant, AssistantControls, TurnTaking
 from yarvis.ears import Interruption
 from yarvis.listen import MicrophoneSilentError, MicrophoneStalledError
+from yarvis.llm.base import SystemPrompt
 from yarvis.pipeline import Turn
 
 if TYPE_CHECKING:
@@ -88,7 +89,9 @@ class EventUi(RecordingUi):
 
 def make_turn(llm: FakeLLM, stt: ScriptedSTT, ui: EventUi) -> tuple[Turn, PlayingSpeaker]:
     speaker = PlayingSpeaker()
-    conversation = Conversation(llm, system_prompt=lambda: "S", max_tokens=32, clock=TickingClock())
+    conversation = Conversation(
+        llm, system_prompt=lambda: SystemPrompt("S"), max_tokens=32, clock=TickingClock()
+    )
     turn = Turn(
         conversation,
         stt=stt,
@@ -757,7 +760,11 @@ async def test_music_started_by_a_tool_cannot_interrupt_and_ends_the_conversatio
     toolbox = Toolbox([Play()], Gate())
     llm = FakeLLM([ToolCall("1", "play", {"text": "jazz"})], ["Playing jazz."])
     conversation = Conversation(
-        llm, system_prompt=lambda: "S", max_tokens=32, clock=TickingClock(), toolbox=toolbox
+        llm,
+        system_prompt=lambda: SystemPrompt("S"),
+        max_tokens=32,
+        clock=TickingClock(),
+        toolbox=toolbox,
     )
     speaker = PlayingSpeaker()
     speaker.finish.set()  # each reply plays to the end
@@ -827,7 +834,7 @@ async def test_after_acting_an_interruption_is_a_new_request() -> None:
         llm = ThinkingLLM([ToolCall("1", "play", {"text": "jazz"})], ["Playing jazz."])
         conversation = Conversation(
             llm,
-            system_prompt=lambda: "S",
+            system_prompt=lambda: SystemPrompt("S"),
             max_tokens=32,
             clock=TickingClock(),
             toolbox=Toolbox([tool], Gate()),

@@ -131,7 +131,9 @@ permission gate, the weather at home, your timers, and what today cost and how f
 answered (time to the first word, the median, a chart of the latest turns; Claude, web
 searches and AssemblyAI at list prices). Make the window narrow and it turns into a compact
 one, with the connections behind a button. `yarvis usage` shows the last days; only numbers
-are kept, never what was said, and `yarvis usage clear` deletes them. With a `location` in
+are kept, never what was said, and `yarvis usage clear` deletes them. Questions asked
+within five minutes of each other reuse Claude's prompt cache, so the rules and tools cost
+a tenth of the price once they are long enough to cache (they are with tools on) ([why](docs/adr/0016-prompt-caching.md)). With a `location` in
 the config, the dashboard asks Open-Meteo for that town's weather twice an hour
 ([how it works](docs/adr/0015-dashboard-cost-and-speed.md)).
 

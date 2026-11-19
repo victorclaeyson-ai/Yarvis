@@ -55,6 +55,8 @@ class Draft:
         """What this reply has actually done so far ("play … on Spotify")."""
         self.searches: list[str] = []
         """Web searches the model made (on the provider's side) for this reply."""
+        self.read_outside = False
+        """Whether a tool this reply ran returned outside content."""
         self._task = asyncio.create_task(self._generate())
 
     async def _generate(self) -> None:
@@ -77,6 +79,7 @@ class Draft:
         if (pending := conversation.pending) is not None:
             messages[-1] = Message("user", await self._resolve(pending))
         tainted = False
+        tainted_before = conversation.tainted_before
         for round_number in range(MAX_TOOL_ROUNDS + 1):
             # The last round must answer in words: tools stay listed, but none may be called.
             may_call = round_number < MAX_TOOL_ROUNDS
@@ -85,9 +88,12 @@ class Draft:
                 return
             await self._live.wait()  # never act on a reply the user may not want
             # Search results read on the provider's side are outside content too.
-            outcome = await toolbox.run(calls, tainted=tainted or bool(self.searches))
+            outcome = await toolbox.run(
+                calls, tainted=tainted or bool(self.searches), tainted_before=tainted_before
+            )
             self.done += outcome.done
             tainted = outcome.tainted
+            self.read_outside = self.read_outside or tainted
             messages += [
                 Message("assistant", text, tool_calls=tuple(calls)),
                 Message("user", "", tool_results=outcome.results),
@@ -205,6 +211,9 @@ class Draft:
                 reply = f"{reply} [Interrupted. Already done: {'; '.join(done)}.]".strip()
             elif done:
                 reply = f"{reply} [Done: {'; '.join(done)}.]".strip()
+            # Outside content can live on in this reply (now history): the next turn may
+            # not change memory without asking either (DESIGN.md T7).
+            self._conversation.tainted_before = self.read_outside or bool(self.searches)
             if reply:
                 self._conversation.remember(self.user_text, reply)
 
@@ -241,6 +250,8 @@ class Conversation:
         self.toolbox = toolbox
         self.pending: PendingAction | None = None
         """An action waiting for the user's "yes" (asked at the end of the last reply)."""
+        self.tainted_before = False
+        """The last reply the user heard was made after reading outside content."""
         self._max_messages = max_messages
         self._history: list[Message] = []
 
@@ -253,6 +264,7 @@ class Conversation:
         """Forget the conversation."""
         self._history.clear()
         self.pending = None
+        self.tainted_before = False
 
     def messages_for(self, user_text: str) -> list[Message]:
         """The messages to send for a new user message."""

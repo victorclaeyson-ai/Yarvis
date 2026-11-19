@@ -30,7 +30,7 @@ Rules for every new tool in this sprint:
 Prices and limits below were checked against the providers' documentation on
 19 November 2026.
 
-- [ ] **9. Memory.**
+- [x] **9. Memory.** (ADR 0017)
   Yarvis learns facts about the user and keeps them. They can be seen, edited and forgotten
   by voice ("what do you know about me?", "forget that") and on the command line
   (`yarvis memory list|add|forget|export|clear`). Facts only, in a private file in the

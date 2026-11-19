@@ -195,6 +195,37 @@ def test_sending_data_out_after_outside_content_needs_a_yes(
     assert gate.check(Link(), tainted=tainted, sends_out=False).verdict is Verdict.ALLOW
 
 
+class Note(Echo):
+    """A reversible change that outside content must not make on its own (like memory)."""
+
+    name = "note"
+    tier = Tier.REVERSIBLE
+    asks_when_tainted = True
+
+
+@pytest.mark.parametrize(
+    ("tool", "tainted", "expected"),
+    [
+        (Note(), False, Verdict.ALLOW),
+        (Note(), True, Verdict.CONFIRM),
+        (Echo(), True, Verdict.ALLOW),  # other tools are unchanged
+    ],
+)
+def test_some_changes_need_a_yes_after_outside_content(
+    tool: Tool[Any], tainted: bool, expected: Verdict
+) -> None:
+    decision = Gate(confirm_external=False).check(tool, tainted=tainted)
+    assert decision.verdict is expected
+    if expected is Verdict.CONFIRM:
+        assert "outside content" in decision.reason
+
+
+def test_those_changes_also_need_a_yes_in_the_turn_after() -> None:
+    gate = Gate(confirm_external=False)
+    assert gate.check(Note(), tainted=False, tainted_before=True).verdict is Verdict.CONFIRM
+    assert gate.check(Echo(), tainted=False, tainted_before=True).verdict is Verdict.ALLOW
+
+
 def test_dangerous_tools_stay_refused_even_when_allowed() -> None:
     decision = Gate(allow_dangerous=True).check(Wipe(), tainted=False)
     assert decision.verdict is Verdict.DENY

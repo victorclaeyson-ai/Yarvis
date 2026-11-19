@@ -8,8 +8,8 @@ Your own Jarvis — except it lives on your machine, like a yeti lives off the g
 > "Hey Yarvis", ask, interrupt it mid-sentence. It can now read your calendars and email
 > (and send, after your "yes"), look things up on the web, tell you the weather, set timers
 > and reminders, drive your browser (tabs, pages, links, videos), play any song or your own
-> playlists on Spotify, type into apps, and control apps and volume on your Mac. Memory and
-> an offline mode are next. Star or watch the repo to follow along.
+> playlists on Spotify, type into apps, control apps and volume on your Mac, and remember
+> what you tell it about yourself. An offline mode is next. Star or watch the repo to follow along.
 
 ## Why Yarvis
 
@@ -32,7 +32,7 @@ Your own Jarvis — except it lives on your machine, like a yeti lives off the g
   mode is on the roadmap.
 - **Actually does things** — reads your calendars and email and sends mail, searches the
   web, checks the weather, sets timers and reminders that speak up, drives apps, websites,
-  volume and music; and anything you add: MCP servers and Agent Skills, each tool approved
+  volume and music, remembers facts about you; and anything you add: MCP servers and Agent Skills, each tool approved
   by you ([how it works](docs/adr/0013-mcp-servers-and-agent-skills.md)).
 - **Safe to give power to** — a security model that assumes the AI *will* be manipulated:
   every action passes a permission gate in code, consequential ones need your spoken "yes"
@@ -42,7 +42,7 @@ Your own Jarvis — except it lives on your machine, like a yeti lives off the g
   [prompt-injection test suite](docs/adr/0009-web-search-weather-and-injection-tests.md)
   plants the same attack in every page, tab title, song title, place name, search result,
   email, calendar invitation, MCP tool result and skill, and checks that it never gets
-  through.
+  through, nor plants or erases a memory.
 - **Has a body** — an optional ESP32 desk satellite with mic, speaker and LED ring.
 
 Read the full [design document](docs/DESIGN.md).
@@ -54,8 +54,8 @@ Read the full [design document](docs/DESIGN.md).
 | 0 | Foundations: tooling, CI, config, secrets, event bus, `yarvis doctor` | ✅ done |
 | 1 | Voice loop: wake word, streaming STT, Claude, streaming TTS, barge-in | ✅ done |
 | 2 | Tools and the security core: permission gate, MCP, skills | ✅ done |
-| 2.5 | Polish and reach: the HUD dashboard with cost and speed (done), one-line install, routines, demo | in progress |
-| 3 | Memory and fully offline mode | planned |
+| 2.5 | Polish and reach: the HUD dashboard with cost and speed (done), memory (done), one-line install, routines, demo | in progress |
+| 3 | Fully offline mode | planned |
 | 4 | ESP32 desk satellite | planned |
 | 5 | v1.0 launch | planned |
 
@@ -123,6 +123,16 @@ an email back to me before sending it"). Yarvis knows it at every question, and 
 counts from your next one ([how it works](docs/adr/0014-about-me-profile.md)). It is sent to
 Claude with your requests, so keep it to about a page and never put keys in it;
 `yarvis profile show` prints exactly what is sent.
+
+**It remembers.** Tell Yarvis something lasting about yourself ("my sister is called
+Lotte") and it keeps it as a short fact, saying "I'll remember that." Ask "what do you
+know about me?" or say "forget that" any time. On the command line,
+`yarvis memory list|add|forget|export|clear` shows and changes the same facts. Only facts
+are kept, never what you said, in a private file; they are sent to Claude with your
+requests like the profile. After Yarvis has read a web page or an email, it asks before it
+remembers or forgets anything, so outside content can't plant a memory. Set
+`[memory] auto = false` to have it remember only when you ask
+([how it works](docs/adr/0017-memory.md)).
 
 **The dashboard.** The window is a heads-up display: Yarvis's core in the middle, your
 conversation under it, and around it every connection (Claude, speech recognition, Spotify,

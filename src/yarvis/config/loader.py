@@ -79,6 +79,10 @@ skills = true               # Agent Skills you added (yarvis skills add <folder>
 #   read_text_file = 0
 #   write_file = 2
 
+[memory]
+auto = true                 # also remember lasting facts you mention (it says "I'll remember
+                            # that."); false: only when you ask. See: yarvis memory list
+
 [security]
 allow_tier3 = false         # dangerous tools (shell, delete, purchases): keep this off
 confirm_tier2 = true        # confirm external actions (send message, create event)

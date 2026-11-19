@@ -238,6 +238,8 @@ class Setup:
     """Calendar and email tools are on offer (a Mac)."""
     skills: int
     profile: bool
+    memory: int | None = None
+    """How many facts Yarvis remembers (None: memory is not on offer)."""
     mcp: Sequence[Link] = ()
     platform: str = sys.platform
 
@@ -277,6 +279,12 @@ def starting_links(config: Config, setup: Setup) -> list[Link]:
         if setup.profile
         else Link("profile", "Profile", "off", "empty (yarvis profile edit)")
     )
+    if setup.memory is not None:
+        links.append(
+            Link("memory", "Memory", "ok", f"{_facts(setup.memory)}, read before every question")
+            if setup.memory
+            else Link("memory", "Memory", "off", "nothing remembered yet")
+        )
     links += setup.mcp
     return links
 
@@ -316,3 +324,8 @@ def _personal(config: Config, setup: Setup) -> Link:
     if not (config.tools.calendar or config.tools.mail):
         return Link("accounts", "Calendar & mail", "off", "off in the config")
     return Link("accounts", "Calendar & mail", "off", "not available")
+
+
+def _facts(count: int) -> str:
+    """'1 fact', '3 facts'."""
+    return f"{count} fact{'' if count == 1 else 's'}"

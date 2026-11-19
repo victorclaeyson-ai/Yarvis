@@ -43,7 +43,7 @@ Prices and limits below were checked against the providers' documentation on
   yes; the ADR proposes whether opt-in short summaries of past conversations are worth it
   (that would change rule 5, so Victor decides).
 
-- [ ] **10. Smart model switching.**
+- [x] **10. Smart model switching.** (ADR 0019)
   Haiku 5.5 stays the voice, for a fast first word; hard requests get a bigger model. The
   ADR compares three ways:
   - Anthropic's advisor tool (beta `advisor_20260301`, header `advisor-tool-2026-03-01`):
@@ -137,16 +137,16 @@ Prices and limits below were checked against the providers' documentation on
   Done when: both providers pass the mail and calendar tool tests through fakes; tokens
   never leave the keychain; `account remove` is tested.
 
-- [x] **18. Cartesia voice.** (ADR 0020; added at Victor's request)
-  Cartesia's Sonic 3.6 speaks instead of Kokoro, with Kokoro as backup sentence by
-  sentence; only the sentence being spoken leaves the computer.
-
 - [ ] **17. Notes and a to-do list.**
   Add and find notes; add, list and complete to-dos. Stored locally in a private markdown
   file the user can open. Works by voice and with `yarvis todo`. After task 16, optional
   sync with Microsoft To Do and Google Tasks.
   Done when: works by voice and CLI, with tests; the file still reads correctly after the
   user edits it by hand.
+
+- [x] **18. Cartesia voice.** (ADR 0020; added at Victor's request)
+  Cartesia's Sonic 3.6 speaks instead of Kokoro, with Kokoro as backup sentence by
+  sentence; only the sentence being spoken leaves the computer.
 
 ## Sprint 1: finish Phase 2.5 (until the January exams)
 

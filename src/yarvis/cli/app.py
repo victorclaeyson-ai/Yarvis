@@ -7,6 +7,7 @@ import contextlib
 import logging
 import platform
 import re
+from pathlib import Path  # noqa: TC003 - typer reads the annotations at runtime
 from typing import TYPE_CHECKING, Annotated
 
 import httpx2
@@ -16,7 +17,7 @@ from rich.markup import escape
 from rich.progress import BarColumn, DownloadColumn, Progress, TextColumn, TransferSpeedColumn
 from rich.table import Table
 
-from yarvis import __version__, spotify_login
+from yarvis import __version__, model_bench, spotify_login
 from yarvis.bench import SttCandidate, recommendation, run_bench
 from yarvis.cli.extensions import mcp_app, skills_app
 from yarvis.cli.memory import memory_app
@@ -27,6 +28,7 @@ from yarvis.cli.usage import usage_app
 from yarvis.config import Config, ConfigError, load_config, write_default_config
 from yarvis.doctor import CheckResult, DoctorContext, Status, has_failures, run_doctor
 from yarvis.log import configure_logging
+from yarvis.model_bench import Budget, ModelBench
 from yarvis.models import (
     KOKORO_FILES,
     WAKE_WORD_FILES,
@@ -56,7 +58,6 @@ from yarvis.tools.spotify import SpotifyKeys
 
 if TYPE_CHECKING:
     from collections.abc import Callable
-    from pathlib import Path
 
     from yarvis.speech.whisper import SttDevice
 
@@ -360,6 +361,27 @@ def app_command(
         )
 
 
+def _bench_switching(services: Services, folder: Path, budget_usd: float) -> None:
+    """``yarvis bench --switching`` (ADR 0019): real requests within ``budget_usd``."""
+    _config, key = _prepare(
+        services, voice_input=False, voice_output=False, assume_yes=False, wake_word=False
+    )
+    services.console.print(
+        f"Comparing ways to a bigger model: real requests, at most ${budget_usd:.2f}."
+    )
+    budget = Budget(budget_usd)
+    runner = ModelBench(model_bench.client_for(key.value), budget=budget)
+    runs = asyncio.run(
+        runner.run(on_progress=lambda line: services.console.print(f"[dim]{escape(line)}[/]"))
+    )
+    numbers, answers = model_bench.save(runs, budget.spent_usd, folder)
+    services.console.print(
+        f"Spent ${budget.spent_usd:.2f} on {len(runs)} runs. Answers: {escape(str(answers))}; "
+        f"numbers: {escape(str(numbers))}",
+        highlight=False,
+    )
+
+
 def _prepare(
     services: Services,
     *,
@@ -472,13 +494,30 @@ def spotify_login_command(ctx: typer.Context) -> None:
 @app.command()
 def bench(
     ctx: typer.Context,
+    *,
     rounds: Annotated[int, typer.Option(min=1, max=20, help="Measurements per component.")] = 3,
     claude: Annotated[
         bool, typer.Option("--claude/--no-claude", help="Also measure Claude (a few tokens).")
     ] = True,
+    switching: Annotated[
+        bool,
+        typer.Option(
+            "--switching",
+            help="Instead: compare ways of reaching a bigger model (real requests, costs money).",
+        ),
+    ] = False,
+    out: Annotated[
+        Path | None, typer.Option(help="With --switching: folder for the answers and numbers.")
+    ] = None,
+    budget: Annotated[
+        float, typer.Option(min=0.2, max=10.0, help="With --switching: most to spend, in USD.")
+    ] = 3.0,
 ) -> None:
     """Measure each stage on this machine and recommend the fastest settings."""
     services = services_of(ctx)
+    if switching:
+        _bench_switching(services, out or services.paths.cache_dir / "model-bench", budget)
+        return
     config, key = _prepare(services, voice_input=True, voice_output=True, assume_yes=False)
     backends = services.backends()
     cache = services.paths.cache_dir

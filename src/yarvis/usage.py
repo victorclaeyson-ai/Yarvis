@@ -34,7 +34,7 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-PRICES_AS_OF: Final = "17 November 2026"
+PRICES_AS_OF: Final = "19 November 2026"
 USAGE_FILE: Final = "usage.json"
 KEEP_DAYS: Final = 366
 MAX_LATENCIES: Final = 500
@@ -184,6 +184,8 @@ class Day(BaseModel):
     web_searches: int = Field(default=0, ge=0)
     speech_seconds: float = Field(default=0.0, ge=0)
     claude_usd: float = Field(default=0.0, ge=0)
+    claude_big_usd: float = Field(default=0.0, ge=0)
+    """Part of ``claude_usd`` spent on the bigger model: what its daily cap reads (ADR 0019)."""
     search_usd: float = Field(default=0.0, ge=0)
     speech_usd: float = Field(default=0.0, ge=0)
     voice_chars: int = Field(default=0, ge=0)
@@ -214,6 +216,7 @@ class Day(BaseModel):
             web_searches=self.web_searches + other.web_searches,
             speech_seconds=self.speech_seconds + other.speech_seconds,
             claude_usd=self.claude_usd + other.claude_usd,
+            claude_big_usd=self.claude_big_usd + other.claude_big_usd,
             search_usd=self.search_usd + other.search_usd,
             speech_usd=self.speech_usd + other.speech_usd,
             voice_chars=self.voice_chars + other.voice_chars,
@@ -222,8 +225,8 @@ class Day(BaseModel):
             latencies_ms=(*self.latencies_ms, *other.latencies_ms),
         )
 
-    def with_claude(self, usage: ClaudeUsage) -> Day:
-        """This day plus one request to Claude."""
+    def with_claude(self, usage: ClaudeUsage, *, big: bool = False) -> Day:
+        """This day plus one request to Claude (``big``: to the bigger model, ADR 0019)."""
         cost = usage.token_cost()
         return self.plus(
             Day(
@@ -232,6 +235,7 @@ class Day(BaseModel):
                 output_tokens=usage.output_tokens,
                 web_searches=usage.web_searches,
                 claude_usd=cost or 0.0,
+                claude_big_usd=(cost or 0.0) if big else 0.0,
                 search_usd=usage.search_cost(),
                 unpriced=int(cost is None),
             )

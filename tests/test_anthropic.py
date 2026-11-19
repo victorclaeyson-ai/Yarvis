@@ -807,3 +807,156 @@ async def test_empty_parts_send_no_empty_blocks() -> None:
     await send(p, SystemPrompt(""), [])
     assert seen[0]["system"] == [{"type": "text", "text": "Context: 13:05"}]  # nothing to cache
     assert "system" not in seen[1]
+
+
+# --------------------------------------------------------------------------- thinking blocks
+
+
+THINKING = {"type": "thinking", "thinking": "The user wants a plan.", "signature": "sig-abc123"}
+
+
+def thinking_then(*blocks: dict[str, Any], reason: str = "tool_use") -> bytes:
+    """Opus thinks (a signed block), then sends ``blocks`` (text or a tool call)."""
+    events: list[dict[str, Any]] = [
+        message_start(),
+        {
+            "type": "content_block_start",
+            "index": 0,
+            "content_block": {"type": "thinking", "thinking": "", "signature": ""},
+        },
+        {
+            "type": "content_block_delta",
+            "index": 0,
+            "delta": {"type": "thinking_delta", "thinking": THINKING["thinking"]},
+        },
+        {
+            "type": "content_block_delta",
+            "index": 0,
+            "delta": {"type": "signature_delta", "signature": THINKING["signature"]},
+        },
+        {"type": "content_block_stop", "index": 0},
+    ]
+    for index, block in enumerate(blocks, start=1):
+        if block["type"] in {"tool_use", "server_tool_use"}:
+            events += [
+                {"type": "content_block_start", "index": index, "content_block": block},
+                {"type": "content_block_stop", "index": index},
+            ]
+        else:
+            events += text_block(index, block["text"])
+    return sse(*events, *end(reason))
+
+
+class StrictApi:
+    """Rejects, like the real API, an assistant turn sent back without its thinking."""
+
+    def __init__(self, *bodies: bytes) -> None:
+        self.bodies = list(bodies)
+        self.seen: list[dict[str, Any]] = []
+
+    def __call__(self, request: httpx2.Request) -> httpx2.Response:
+        body = json.loads(request.content)
+        self.seen.append(body)
+        for message in body["messages"]:
+            content = message["content"]
+            if message["role"] != "assistant" or isinstance(content, str):
+                continue
+            calls = any(block["type"] in {"tool_use", "server_tool_use"} for block in content)
+            if calls and content[0] != THINKING:
+                error = {
+                    "type": "error",
+                    "error": {
+                        "type": "invalid_request_error",
+                        "message": "messages: the thinking blocks of this turn are missing",
+                    },
+                }
+                return httpx2.Response(400, json=error)
+        return httpx2.Response(
+            200, content=self.bodies.pop(0), headers={"content-type": "text/event-stream"}
+        )
+
+
+async def test_thinking_goes_back_with_the_tool_results() -> None:
+    use: dict[str, Any] = {
+        "type": "tool_use",
+        "id": "toolu_7",
+        "name": "set_timer",
+        "input": {"minutes": 5},
+    }
+    api = StrictApi(
+        thinking_then(use), thinking_then({"type": "text", "text": "Done."}, reason="end_turn")
+    )
+    p = provider(api)
+    question = [Message("user", "think hard: timer for my tea")]
+    first = [
+        e
+        async for e in p.stream(question, system=SystemPrompt("S"), max_tokens=4096, tools=[TIMER])
+    ]
+    (tool_call,) = [e for e in first if isinstance(e, ToolCall)]
+    rounds = [
+        *question,
+        Message("assistant", "", tool_calls=(tool_call,)),  # the conversation keeps no thinking
+        Message("user", "", tool_results=(ToolResult("toolu_7", "Timer set."),)),
+    ]
+    events = [
+        e async for e in p.stream(rounds, system=SystemPrompt("S"), max_tokens=4096, tools=[TIMER])
+    ]
+    assert events == ["Done."]  # accepted: the provider sent the turn back exactly
+    sent = api.seen[1]["messages"][1]["content"]
+    assert sent[0] == THINKING  # signed, unchanged, first
+    assert sent[1]["type"] == "tool_use"
+    assert sent[1]["id"] == "toolu_7"
+
+
+async def test_thinking_goes_back_on_a_paused_turn() -> None:
+    search = {
+        "type": "server_tool_use",
+        "id": "srv_1",
+        "name": "web_search",
+        "input": {"query": "x"},
+    }
+    api = StrictApi(
+        thinking_then(search, reason="pause_turn"),
+        sse(message_start(), *text_block(0, "Found it."), *end("end_turn")),
+    )
+    p = searching(api)
+    events = [
+        e
+        async for e in p.stream(
+            [Message("user", "news?")], system=SystemPrompt("S"), max_tokens=4096, tools=[TIMER]
+        )
+    ]
+    assert "Found it." in events
+    assert api.seen[1]["messages"][-1]["content"][0] == THINKING
+
+
+async def test_thinking_works_with_the_last_round_s_tool_choice_none() -> None:
+    use: dict[str, Any] = {"type": "tool_use", "id": "toolu_8", "name": "set_timer", "input": {}}
+    api = StrictApi(
+        thinking_then(use), thinking_then({"type": "text", "text": "All set."}, reason="end_turn")
+    )
+    p = provider(api)
+    question = [Message("user", "timer")]
+    first = [
+        e
+        async for e in p.stream(question, system=SystemPrompt("S"), max_tokens=4096, tools=[TIMER])
+    ]
+    (tool_call,) = [e for e in first if isinstance(e, ToolCall)]
+    rounds = [
+        *question,
+        Message("assistant", "", tool_calls=(tool_call,)),
+        Message("user", "", tool_results=(ToolResult("toolu_8", "Timer set."),)),
+    ]
+    last = [
+        e
+        async for e in p.stream(
+            rounds,
+            system=SystemPrompt("S"),
+            max_tokens=4096,
+            tools=[TIMER],
+            allow_tool_calls=False,
+        )
+    ]
+    assert last == ["All set."]
+    assert api.seen[1]["tool_choice"] == {"type": "none"}  # allowed with thinking (not "any")
+    assert api.seen[1]["messages"][1]["content"][0] == THINKING

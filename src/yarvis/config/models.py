@@ -52,6 +52,24 @@ class LLMConfig(_Section):
         description="Model id; None selects the provider's recommended default.",
     )
     max_tokens: int = Field(default=1024, ge=1, le=8192)
+    big_model: str = Field(
+        default="claude-opus-5-5",
+        min_length=1,
+        description="The model hard questions go to (ADR 0019).",
+    )
+    big_model_daily_usd: float = Field(
+        default=0.50,
+        ge=0,
+        le=50,
+        description="Most to spend on the bigger model per day, in US dollars.",
+    )
+    switching: Literal["auto", "asked", "off"] = Field(
+        default="auto",
+        description=(
+            '"auto": Yarvis hands hard questions over itself, and "think hard" always does; '
+            '"asked": only when you say "think hard"; "off": never.'
+        ),
+    )
     ollama_url: str = Field(default="http://127.0.0.1:11434", pattern=r"^https?://")
 
 

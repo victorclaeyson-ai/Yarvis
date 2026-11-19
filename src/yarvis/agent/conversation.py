@@ -23,11 +23,20 @@ from contextlib import aclosing
 from typing import TYPE_CHECKING, Final
 
 from yarvis.agent.confirmation import classify_answer
-from yarvis.llm.base import LLMError, Message, ToolCall, WebSearch
+from yarvis.agent.switching import (
+    ANSWER_YOURSELF,
+    DECLINED,
+    NOT_ALONE,
+    THINK_HARDER,
+    THINK_HARDER_SPEC,
+    is_think_hard,
+)
+from yarvis.llm.base import LLMError, Message, ToolCall, ToolResult, WebSearch
 
 if TYPE_CHECKING:
     from collections.abc import AsyncGenerator, Callable
 
+    from yarvis.agent.switching import Switching
     from yarvis.agent.toolbox import PendingAction, Toolbox
     from yarvis.llm.base import LLMProvider, SystemPrompt
 
@@ -66,6 +75,13 @@ class Draft:
         forward from earlier in the conversation (ADR 0018)."""
         self._fresh_start = False
         """The user asked for a new conversation: this reply is not remembered."""
+        self._llm = conversation.llm
+        """The model answering: Haiku, or the bigger model once switched (ADR 0019)."""
+        self._switched = False
+        self._big_failed = False
+        """The bigger model failed this turn: Haiku answers, and no hand-over is offered."""
+        self._round_spoke = False
+        """Text from the model has gone out in the current round."""
         self._task = asyncio.create_task(self._generate())
 
     async def _generate(self) -> None:
@@ -97,26 +113,82 @@ class Draft:
         # conversation stays tainted until it ends (ADR 0018), and so does this reply.
         tainted = conversation.holds_outside_content or self.read_outside
         self.read_outside = tainted
+        switching = conversation.switching
+        if switching is not None and is_think_hard(self.user_text):
+            await self._live.wait()  # the bigger model costs money: only for a real request
+            if switching.within_budget():
+                self._switch(switching, spoke=False)
+            elif (note := switching.budget_note()) is not None:
+                self._say(note)
         for round_number in range(MAX_TOOL_ROUNDS + 1):
             # The last round must answer in words: tools stay listed, but none may be called.
             may_call = round_number < MAX_TOOL_ROUNDS
-            text, calls = await self._stream(messages, allow_tool_calls=may_call)
+            try:
+                text, calls = await self._stream(messages, allow_tool_calls=may_call)
+            except LLMError:
+                if not self._switched or self._round_spoke:
+                    raise
+                self._fall_back()  # the bigger model failed before a word: Haiku answers
+                continue
+            if switching is not None and (handover := self._handover(calls)) is not None:
+                await self._live.wait()  # never switch for a guess made at a pause
+                if switching.within_budget():
+                    self._switch(switching, spoke=self._round_spoke)  # this round again
+                    continue
+                declined = ToolResult(handover.id, DECLINED, is_error=True)
+                messages += [
+                    Message("assistant", text, tool_calls=(handover,)),
+                    Message("user", "", tool_results=(declined,)),
+                ]
+                continue
             if not calls or toolbox is None or not may_call:
                 return
             await self._live.wait()  # never act on a reply the user may not want
+            # A hand-over mixed with other calls is not one: those run, it is answered.
+            later = [call for call in calls if call.name == THINK_HARDER]
+            now = [call for call in calls if call.name != THINK_HARDER]
             # Search results read on the provider's side are outside content too.
-            outcome = await toolbox.run(calls, tainted=tainted or bool(self.searches))
+            outcome = await toolbox.run(now, tainted=tainted or bool(self.searches))
             self.done += outcome.done
             tainted = outcome.tainted
             self.read_outside = self.read_outside or outcome.read_outside
+            why = ANSWER_YOURSELF if self._switched else NOT_ALONE  # Opus has no one to ask
+            not_alone = tuple(ToolResult(call.id, why, is_error=True) for call in later)
             messages += [
                 Message("assistant", text, tool_calls=tuple(calls)),
-                Message("user", "", tool_results=outcome.results),
+                Message("user", "", tool_results=(*outcome.results, *not_alone)),
             ]
             if outcome.pending is not None:
                 conversation.pending = outcome.pending
                 self._say(outcome.pending.question)  # asked by code, not by the model
                 return
+
+    def _offers_handover(self) -> bool:
+        switching = self._conversation.switching
+        return (
+            switching is not None and switching.auto and not self._switched and not self._big_failed
+        )
+
+    def _handover(self, calls: list[ToolCall]) -> ToolCall | None:
+        """Haiku's call to ``think_harder``, if it is the only call (and Haiku may hand over)."""
+        if not self._offers_handover() or len(calls) != 1 or calls[0].name != THINK_HARDER:
+            return None
+        return calls[0]
+
+    def _switch(self, switching: Switching, *, spoke: bool) -> None:
+        """From here on the bigger model answers; code says so first, unless Haiku spoke."""
+        logger.info("Switched to the bigger model for this turn")
+        self._llm = switching.big
+        self._switched = True
+        if not spoke:
+            self._say(switching.fillers.next())
+
+    def _fall_back(self) -> None:
+        """The bigger model failed before saying anything: Haiku answers this turn."""
+        logger.warning("The bigger model failed; Haiku answers instead")
+        self._llm = self._conversation.llm
+        self._switched = False
+        self._big_failed = True
 
     async def _stream(
         self, messages: list[Message], *, allow_tool_calls: bool
@@ -124,12 +196,19 @@ class Draft:
         conversation = self._conversation
         toolbox = conversation.toolbox
         specs = toolbox.specs() if toolbox is not None else ()
+        if self._offers_handover():  # offered every turn, so the prompt cache stays warm
+            specs = (*specs, THINK_HARDER_SPEC)
         parts: list[str] = []
         calls: list[ToolCall] = []
-        async for event in conversation.llm.stream(
+        self._round_spoke = False
+        switching = conversation.switching
+        max_tokens = (
+            switching.max_tokens if self._switched and switching else conversation.max_tokens
+        )
+        async for event in self._llm.stream(
             messages,
             system=conversation.system_prompt(),
-            max_tokens=conversation.max_tokens,
+            max_tokens=max_tokens,
             tools=specs,
             allow_tool_calls=allow_tool_calls,
         ):
@@ -142,6 +221,7 @@ class Draft:
             if self.first_token_at is None:
                 self.first_token_at = conversation.clock()
             parts.append(event)
+            self._round_spoke = True
             self._emit(event, new_round=not parts[:-1])
         return "".join(parts), calls
 
@@ -258,6 +338,7 @@ class Conversation:
         clock: Callable[[], float] = time.monotonic,
         toolbox: Toolbox | None = None,
         idle_reset_s: float | None = None,
+        switching: Switching | None = None,
     ) -> None:
         if max_messages < _EXCHANGE or max_messages % _EXCHANGE:
             msg = "max_messages must be a positive even number"
@@ -273,6 +354,8 @@ class Conversation:
         self._history: list[Message] = []
         self._outside: list[bool] = []
         """Per exchange in the history: whether its turn held outside content."""
+        self.switching = switching
+        """How hard questions reach the bigger model (None: they don't, ADR 0019)."""
         self._idle_reset_s = idle_reset_s
         """After this much silence the conversation ends (None: it never does by itself)."""
         self._last_reply_at: float | None = None

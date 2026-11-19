@@ -54,7 +54,7 @@ Read the full [design document](docs/DESIGN.md).
 | 0 | Foundations: tooling, CI, config, secrets, event bus, `yarvis doctor` | ✅ done |
 | 1 | Voice loop: wake word, streaming STT, Claude, streaming TTS, barge-in | ✅ done |
 | 2 | Tools and the security core: permission gate, MCP, skills | ✅ done |
-| 2.5 | Polish and reach: the HUD dashboard with cost and speed (done), memory (done), one-line install, routines, demo | in progress |
+| 2.5 | Polish and reach: the HUD dashboard with cost and speed (done), memory (done), smart model switching (done), one-line install, routines, demo | in progress |
 | 3 | Fully offline mode | planned |
 | 4 | ESP32 desk satellite | planned |
 | 5 | v1.0 launch | planned |
@@ -123,6 +123,15 @@ an email back to me before sending it"). Yarvis knows it at every question, and 
 counts from your next one ([how it works](docs/adr/0014-about-me-profile.md)). It is sent to
 Claude with your requests, so keep it to about a page and never put keys in it;
 `yarvis profile show` prints exactly what is sent.
+
+**Hard questions get a bigger model.** Haiku 5.5 answers fast; when a question needs
+careful reasoning (a study plan, a comparison, a calculation in several steps) it hands
+it to Opus 5.5, and Yarvis says a short phrase ("One moment.") while Opus works. Start
+with "think hard" to ask for Opus yourself. A daily cap keeps it cheap: an Opus answer
+costs about one to four cents, and the cap is about $0.50 a day by default
+(`[llm] big_model_daily_usd`), roughly 12 to 45 hard questions. After that Yarvis answers
+quickly; when you asked for "think hard", it says so once a day. `switching = "asked"` uses Opus only when you
+ask, `"off"` never ([why, with measurements](docs/adr/0019-smart-model-switching.md)).
 
 **A voice from the cloud, if you like.** Kokoro speaks on your own computer by default.
 To use Cartesia's voice instead (Archie, British male, by default), create a key at

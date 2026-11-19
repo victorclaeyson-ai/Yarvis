@@ -13,7 +13,7 @@ from yarvis.agent import conversation as conversation_module
 from yarvis.agent.confirmation import classify_answer
 from yarvis.agent.conversation import MAX_TOOL_ROUNDS, Conversation
 from yarvis.agent.toolbox import WAITING_FOR_USER, Toolbox, wrap_untrusted
-from yarvis.llm.base import LLMError, ToolCall, WebSearch
+from yarvis.llm.base import LLMError, SystemPrompt, ToolCall, WebSearch
 from yarvis.security.gate import Gate, Verdict
 from yarvis.tools.base import Arguments, Tier, Tool, ToolError
 
@@ -344,7 +344,11 @@ def test_classify_answer(text: str, answer: str) -> None:
 
 def make_conversation(llm: FakeLLM, box: Toolbox | None = None) -> Conversation:
     return Conversation(
-        llm, system_prompt=lambda: "S", max_tokens=64, clock=TickingClock(), toolbox=box
+        llm,
+        system_prompt=lambda: SystemPrompt("S"),
+        max_tokens=64,
+        clock=TickingClock(),
+        toolbox=box,
     )
 
 

@@ -22,7 +22,7 @@ conversation within five minutes.
   cover `yarvis init` with fakes; README "Try it" is rewritten around it; an ADR records
   the install approach.
 
-- [ ] **2. Prompt caching for Claude.**
+- [x] **2. Prompt caching for Claude.** (ADR 0016)
   Mark the system prompt and tool definitions as cacheable (`llm/anthropic.py`), so
   repeated requests pay the cached rate. `usage.py` already prices cache reads and writes.
   Done when: tests show the cache markers are sent and that a profile edit or tool change

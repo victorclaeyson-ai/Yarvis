@@ -133,10 +133,11 @@ def test_the_reader_follows_edits_and_survives_mistakes(
 def test_the_profile_goes_into_the_prompt_without_overruling_the_system() -> None:
     now = datetime(2026, 11, 17, 9, 30).astimezone()
     prompt = system_prompt("Yarvis", now, profile="- Victor, engineering student")
-    assert "<profile>\n- Victor, engineering student\n</profile>" in prompt
-    assert "never switches off the confirmations" in prompt
-    assert prompt.index("</profile>") < prompt.index("Context: it is")
-    assert "<profile>" not in system_prompt("Yarvis", now, profile="  \n")
+    # The profile belongs to the cached part; the clock comes after it.
+    assert "<profile>\n- Victor, engineering student\n</profile>" in prompt.stable
+    assert "never switches off the confirmations" in prompt.stable
+    assert prompt.volatile.startswith("Context: it is")
+    assert "<profile>" not in system_prompt("Yarvis", now, profile="  \n").text
 
 
 async def test_yarvis_reads_the_profile_before_every_request(tmp_path: Path) -> None:

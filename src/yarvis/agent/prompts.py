@@ -1,14 +1,20 @@
-"""System prompt for spoken conversation."""
+"""System prompt for spoken conversation.
+
+It is built in two parts: rules, abilities and profile first (Claude caches them), then
+the clock. Nothing that changes from minute to minute may go in the first part.
+"""
 
 from __future__ import annotations
 
 from datetime import datetime
 from typing import TYPE_CHECKING, Final
 
+from yarvis.llm.base import SystemPrompt
+
 if TYPE_CHECKING:
     from collections.abc import Sequence
 
-_TEMPLATE: Final = """\
+_STABLE: Final = """\
 You are {name}, a voice assistant that runs on the user's own computer. Everything you \
 write is spoken aloud by a text-to-speech voice, so write for the ear.
 
@@ -35,7 +41,11 @@ the speech recognition's, not theirs.
 
 {abilities}
 
-{profile}Context: it is {now} local time.{user}"""
+{profile}"""
+"""Everything up to the profile: the same on every request, so Claude can cache it."""
+
+_CONTEXT: Final = "Context: it is {now} local time.{user}"
+"""Changes every minute, so it comes after the cached part."""
 
 _PROFILE: Final = """\
 About the user, in their own words. Use it to answer as someone who knows them, and \
@@ -94,12 +104,13 @@ def system_prompt(
     abilities: Sequence[str] = (),
     web_search: bool = False,
     profile: str = "",
-) -> str:
+) -> SystemPrompt:
     """Build the system prompt. ``now`` defaults to the current local time.
 
     ``abilities`` describes the enabled tools in plain words ("set timers and reminders");
     ``web_search`` adds how to use the model's own web search; ``profile`` is what the
-    user wrote about themselves (``yarvis profile edit``).
+    user wrote about themselves (``yarvis profile edit``). The clock and who the user is
+    go in the volatile part, after everything that can be cached.
     """
     moment = now or datetime.now().astimezone()
     stamp = moment.strftime("%A %d %B %Y, %H:%M")
@@ -116,4 +127,7 @@ def system_prompt(
     if abilities:
         can += "\n" + (_WEB_SEARCH if web_search else _NO_WEB_SEARCH)
     about = _PROFILE.format(text=profile.strip()) if profile.strip() else ""
-    return _TEMPLATE.format(name=name, now=stamp, user=user, abilities=can, profile=about)
+    return SystemPrompt(
+        stable=_STABLE.format(name=name, abilities=can, profile=about),
+        volatile=_CONTEXT.format(now=stamp, user=user),
+    )

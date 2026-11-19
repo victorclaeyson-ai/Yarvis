@@ -74,6 +74,41 @@ def test_every_kind_of_token_is_priced() -> None:
     assert usage.token_cost() == pytest.approx((2 + 10 + 2.5 + 0.10) / 1_000)
 
 
+@pytest.mark.parametrize("model", ["claude-haiku-5-5", "claude-sonnet-5-5", "claude-opus-5-5"])
+def test_a_cache_write_costs_more_and_a_read_much_less_than_input(model: str) -> None:
+    prices = model_prices(model)
+    assert prices is not None
+    assert prices.base.cache_write == pytest.approx(1.25 * prices.base.input)  # 5-minute cache
+    assert prices.base.cache_read <= 0.1 * prices.base.input
+
+
+def day_of(*requests: ClaudeUsage) -> Day:
+    day = Day()
+    for usage in requests:
+        day = day.with_claude(usage)
+    return day
+
+
+def test_cached_requests_cost_less() -> None:
+    # Ten questions within five minutes, each with a 4,000-token prompt (tools + rules).
+    uncached = day_of(*[ClaudeUsage("claude-haiku-5-5", input_tokens=4_000)] * 10)
+    cached = day_of(
+        ClaudeUsage("claude-haiku-5-5", cache_write_tokens=4_000),
+        *[ClaudeUsage("claude-haiku-5-5", cache_read_tokens=4_000)] * 9,
+    )
+    assert uncached.claude_usd == pytest.approx(0.0040)
+    assert cached.claude_usd == pytest.approx(0.0005 + 0.00036)
+    assert cached.input_tokens == uncached.input_tokens  # same prompt, cheaper
+
+
+def test_a_lone_cached_question_costs_a_little_more() -> None:
+    # After more than five minutes of silence the cache is gone: one write, never read.
+    write = ClaudeUsage("claude-haiku-5-5", cache_write_tokens=4_000).token_cost()
+    plain = ClaudeUsage("claude-haiku-5-5", input_tokens=4_000).token_cost()
+    assert write == pytest.approx(0.0005)
+    assert plain == pytest.approx(0.0004)
+
+
 @pytest.mark.parametrize(
     ("model", "known"),
     [

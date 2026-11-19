@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import json
+import logging
+from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
 
 import anthropic
@@ -9,13 +11,22 @@ import pytest
 from pydantic import SecretStr
 
 from fakes import RecordingReporter
+from yarvis.agent.prompts import system_prompt
 from yarvis.llm.anthropic import (
     DEFAULT_MODEL,
     AnthropicProvider,
     _to_param,  # pyright: ignore[reportPrivateUsage]
 )
 from yarvis.llm.anthropic import _explain as explain  # pyright: ignore[reportPrivateUsage]
-from yarvis.llm.base import LLMError, Message, ToolCall, ToolResult, ToolSpec, WebSearch
+from yarvis.llm.base import (
+    LLMError,
+    Message,
+    SystemPrompt,
+    ToolCall,
+    ToolResult,
+    ToolSpec,
+    WebSearch,
+)
 from yarvis.usage import ClaudeUsage
 
 if TYPE_CHECKING:
@@ -69,7 +80,7 @@ def provider(handler: Callable[[httpx2.Request], httpx2.Response]) -> AnthropicP
 
 
 async def collect(p: AnthropicProvider, messages: list[Message]) -> str:
-    events = [e async for e in p.stream(messages, system="Be brief.", max_tokens=50)]
+    events = [e async for e in p.stream(messages, system=SystemPrompt("Be brief."), max_tokens=50)]
     return "".join(e for e in events if isinstance(e, str))
 
 
@@ -88,7 +99,11 @@ async def test_streams_text_and_sends_the_right_request() -> None:
     assert await collect(provider(handler), messages) == "Hello, Victor."
     body = seen[0]
     assert body["model"] == DEFAULT_MODEL
-    assert body["system"] == "Be brief."
+    # Nothing volatile: one cached block, no empty second block.
+    assert body["system"] == [
+        {"type": "text", "text": "Be brief.", "cache_control": {"type": "ephemeral"}}
+    ]
+    assert "tools" not in body
     assert body["max_tokens"] == 50
     assert body["stream"] is True
     assert body["messages"] == [
@@ -242,12 +257,17 @@ async def test_tools_are_offered_and_tool_calls_come_back() -> None:
     events = [
         e
         async for e in provider(handler).stream(
-            [Message("user", "timer")], system="S", max_tokens=50, tools=[spec]
+            [Message("user", "timer")], system=SystemPrompt("S"), max_tokens=50, tools=[spec]
         )
     ]
     assert events == ["On it.", ToolCall("toolu_1", "set_timer", {"minutes": 10})]
     assert seen[0]["tools"] == [
-        {"name": "set_timer", "description": "Start a timer.", "input_schema": spec.input_schema}
+        {
+            "name": "set_timer",
+            "description": "Start a timer.",
+            "input_schema": spec.input_schema,
+            "cache_control": {"type": "ephemeral"},
+        }
     ]
 
 
@@ -313,11 +333,11 @@ async def test_a_round_that_may_not_call_tools_still_lists_them() -> None:
         Message("assistant", "", tool_calls=(ToolCall("t1", "set_timer", {"minutes": 1}),)),
         Message("user", "", tool_results=(ToolResult("t1", "Timer 1 set."),)),
     ]
-    _ = [e async for e in p.stream(first, system="S", max_tokens=50, tools=[spec])]
+    _ = [e async for e in p.stream(first, system=SystemPrompt("S"), max_tokens=50, tools=[spec])]
     _ = [
         e
         async for e in p.stream(
-            rounds, system="S", max_tokens=50, tools=[spec], allow_tool_calls=False
+            rounds, system=SystemPrompt("S"), max_tokens=50, tools=[spec], allow_tool_calls=False
         )
     ]
     normal, last = seen
@@ -443,7 +463,10 @@ async def test_claude_searches_the_web_and_says_so() -> None:
     events = [
         e
         async for e in searching(handler).stream(
-            [Message("user", "how did Brugge do")], system="S", max_tokens=50, tools=[TIMER]
+            [Message("user", "how did Brugge do")],
+            system=SystemPrompt("S"),
+            max_tokens=50,
+            tools=[TIMER],
         )
     ]
     assert events == ["Let me check. ", WebSearch("Club Brugge score"), "Club Brugge won two one."]
@@ -457,11 +480,16 @@ async def test_claude_searches_the_web_and_says_so() -> None:
 async def test_no_web_search_without_tools_or_when_off() -> None:
     handler, seen = streaming(text_stream("Hi."), text_stream("Hi."))
     p = searching(handler)
-    assert [e async for e in p.stream([Message("user", "x")], system="S", max_tokens=5)] == ["Hi."]
-    assert "tools" not in seen[0]  # the last round, without tools: no search either
+    assert [
+        e async for e in p.stream([Message("user", "x")], system=SystemPrompt("S"), max_tokens=5)
+    ] == ["Hi."]
+    assert "tools" not in seen[0]  # no tools offered: no search either
     off = provider(handler)
     events = [
-        e async for e in off.stream([Message("user", "x")], system="S", max_tokens=5, tools=[TIMER])
+        e
+        async for e in off.stream(
+            [Message("user", "x")], system=SystemPrompt("S"), max_tokens=5, tools=[TIMER]
+        )
     ]
     assert events == ["Hi."]
     assert [tool["name"] for tool in seen[1]["tools"]] == ["set_timer"]
@@ -476,7 +504,7 @@ async def test_a_paused_search_is_resumed() -> None:
     events = [
         e
         async for e in searching(handler).stream(
-            [Message("user", "news?")], system="S", max_tokens=50, tools=[TIMER]
+            [Message("user", "news?")], system=SystemPrompt("S"), max_tokens=50, tools=[TIMER]
         )
     ]
     assert events == [WebSearch("news Leuven"), "Quiet day in Leuven."]
@@ -502,7 +530,10 @@ async def test_a_search_before_a_tool_call_is_sent_back_exactly() -> None:
     handler, seen = streaming(first, text_stream("Done."))
     p = searching(handler)
     events = [
-        e async for e in p.stream([Message("user", "x")], system="S", max_tokens=50, tools=[TIMER])
+        e
+        async for e in p.stream(
+            [Message("user", "x")], system=SystemPrompt("S"), max_tokens=50, tools=[TIMER]
+        )
     ]
     call = ToolCall("toolu_9", "set_timer", {"minutes": 90})
     assert events == [WebSearch("match length"), call]
@@ -561,7 +592,10 @@ async def test_searches_and_cached_tokens_are_counted() -> None:
     p, reporter = reporting(handler)
     p.web_search = True
     _ = [
-        e async for e in p.stream([Message("user", "x")], system="S", max_tokens=50, tools=[TIMER])
+        e
+        async for e in p.stream(
+            [Message("user", "x")], system=SystemPrompt("S"), max_tokens=50, tools=[TIMER]
+        )
     ]
     (usage,) = reporter.claude_calls
     assert (usage.cache_write_tokens, usage.cache_read_tokens) == (100, 50)
@@ -581,7 +615,9 @@ async def test_a_reply_cut_off_is_still_counted() -> None:
     handler, _ = streaming(body)
     p, reporter = reporting(handler)
     p.web_search = True
-    stream = p.stream([Message("user", "x")], system="S", max_tokens=50, tools=[TIMER])
+    stream = p.stream(
+        [Message("user", "x")], system=SystemPrompt("S"), max_tokens=50, tools=[TIMER]
+    )
     assert isinstance(await anext(stream), WebSearch)
     assert isinstance(await anext(stream), str)
     await stream.aclose()
@@ -623,3 +659,151 @@ async def test_a_stream_that_fails_before_it_starts_counts_nothing() -> None:
         await collect(p, [Message("user", "Hi")])
     assert reporter.claude_calls == []
     assert reporter.health_calls[0][:2] == ("claude", "error")
+
+
+# --------------------------------------------------------------------------- prompt caching
+
+CACHED = {"type": "ephemeral"}
+WEATHER = ToolSpec("weather", "The forecast.", {"type": "object", "properties": {}})
+WEB_SEARCH_TOOL = {"type": "web_search_20250305", "name": "web_search", "max_uses": 3}
+
+
+def markers(body: dict[str, Any]) -> int:
+    """How many cache_control markers a request carries (the API allows four)."""
+    return json.dumps(body).count('"cache_control"')
+
+
+async def send(
+    p: AnthropicProvider, system: SystemPrompt, tools: list[ToolSpec], question: str = "hi"
+) -> None:
+    _ = [
+        e
+        async for e in p.stream(
+            [Message("user", question)], system=system, max_tokens=50, tools=tools
+        )
+    ]
+
+
+async def test_system_prompt_is_sent_as_a_cached_block_and_a_live_tail() -> None:
+    handler, seen = streaming(text_stream("Hi."))
+    await send(provider(handler), SystemPrompt("RULES\n\n", "Context: 13:05"), [])
+    assert seen[0]["system"] == [
+        {"type": "text", "text": "RULES\n\n", "cache_control": CACHED},
+        {"type": "text", "text": "Context: 13:05"},  # after the marker: never cached
+    ]
+    assert "tools" not in seen[0]
+    assert markers(seen[0]) == 1
+
+
+async def test_the_last_own_tool_carries_the_cache_marker() -> None:
+    handler, seen = streaming(text_stream("Hi."), text_stream("Hi."))
+    p = searching(handler)
+    await send(p, SystemPrompt("S"), [TIMER, WEATHER])
+    await send(p, SystemPrompt("S"), [TIMER, WEATHER])
+    for body in seen:
+        names = [tool["name"] for tool in body["tools"]]
+        assert names == ["set_timer", "weather", "web_search"]
+        assert "cache_control" not in body["tools"][0]
+        assert body["tools"][1]["cache_control"] == CACHED
+        # Web search comes after the marker and is sent exactly as defined, every time.
+        assert body["tools"][2] == WEB_SEARCH_TOOL
+        assert markers(body) == 2
+
+
+async def test_a_tool_change_reaches_claude() -> None:
+    handler, seen = streaming(text_stream("Hi."), text_stream("Hi."))
+    p = provider(handler)
+    await send(p, SystemPrompt("S"), [TIMER])
+    await send(p, SystemPrompt("S"), [TIMER, WEATHER])
+    assert [tool["name"] for tool in seen[1]["tools"]] == ["set_timer", "weather"]
+    assert "cache_control" not in seen[1]["tools"][0]  # the marker moved to the new last tool
+    assert seen[1]["tools"][1]["cache_control"] == CACHED
+
+
+async def test_a_profile_edit_reaches_claude_in_the_cached_block() -> None:
+    moment = datetime(2026, 11, 14, 13, 5, tzinfo=UTC)
+    handler, seen = streaming(text_stream("Hi."), text_stream("Hi."))
+    p = provider(handler)
+    await send(p, system_prompt("Yarvis", moment, profile="I study in Leuven."), [TIMER])
+    await send(p, system_prompt("Yarvis", moment, profile="Call me Vic."), [TIMER])
+    cached = seen[1]["system"][0]
+    assert cached["cache_control"] == CACHED
+    assert "<profile>\nCall me Vic.\n</profile>" in cached["text"]
+    assert "Leuven" not in cached["text"]
+
+
+async def test_two_turns_send_a_byte_identical_cached_prefix() -> None:
+    handler, seen = streaming(text_stream("Hi."), text_stream("Hi."))
+    p = searching(handler)
+    for minute, question in ((5, "set a timer"), (6, "what's the weather")):
+        moment = datetime(2026, 11, 14, 13, minute, tzinfo=UTC)
+        prompt = system_prompt(
+            "Yarvis", moment, user_name="Victor", abilities=["set timers"], web_search=True
+        )
+        await send(p, prompt, [TIMER, WEATHER], question)
+    first, second = seen
+    assert json.dumps(first["tools"]) == json.dumps(second["tools"])
+    assert json.dumps(first["system"][0]) == json.dumps(second["system"][0])
+    assert first["system"][1] != second["system"][1]  # only the clock moved
+
+
+async def test_a_paused_turn_resends_the_same_cached_prefix() -> None:
+    first = sse(
+        message_start(), *search_blocks(0, "news Leuven", with_result=False), *end("pause_turn")
+    )
+    second = sse(message_start(), *text_block(0, "Quiet day in Leuven."), *end("end_turn"))
+    handler, seen = streaming(first, second)
+    await send(searching(handler), SystemPrompt("S", "Context: 13:05"), [TIMER], "news?")
+    assert seen[0]["system"] == seen[1]["system"]
+    assert seen[0]["tools"] == seen[1]["tools"]
+    assert markers(seen[1]) == 2
+
+
+async def test_the_last_tool_round_keeps_the_cache_markers() -> None:
+    handler, seen = streaming(text_stream("Hi."), text_stream("Done."))
+    p = searching(handler)
+    question = [Message("user", "set a timer")]
+    rounds = [
+        *question,
+        Message("assistant", "", tool_calls=(ToolCall("t1", "set_timer", {}),)),
+        Message("user", "", tool_results=(ToolResult("t1", "Timer set."),)),
+    ]
+    system = SystemPrompt("S", "Context: 13:05")
+    _ = [e async for e in p.stream(question, system=system, max_tokens=50, tools=[TIMER])]
+    _ = [
+        e
+        async for e in p.stream(
+            rounds, system=system, max_tokens=50, tools=[TIMER], allow_tool_calls=False
+        )
+    ]
+    normal, last = seen
+    assert last["tool_choice"] == {"type": "none"}
+    assert last["tools"] == normal["tools"]
+    assert last["system"] == normal["system"]
+    assert markers(last) == markers(normal) == 2
+
+
+async def test_cache_use_is_logged_as_numbers_only(caplog: pytest.LogCaptureFixture) -> None:
+    start = message_start()
+    start["message"]["usage"] = {
+        "input_tokens": 40,
+        "output_tokens": 1,
+        "cache_creation_input_tokens": 0,
+        "cache_read_input_tokens": 3000,
+    }
+    handler, _ = streaming(sse(start, *text_block(0, "Hi."), *end("end_turn")))
+    p = provider(handler)  # no reporter: the log shows the cache also in `yarvis bench`
+    with caplog.at_level(logging.DEBUG, logger="yarvis.llm.anthropic"):
+        await send(p, SystemPrompt("secret rules"), [], "my private question")
+    logged = [r.getMessage() for r in caplog.records if "cache" in r.getMessage()]
+    # Input and cache counts come from message_start, output from end()'s message_delta.
+    assert logged == ["Claude tokens: 40 in, 0 cache write, 3000 cache read, 9 out"]
+
+
+async def test_empty_parts_send_no_empty_blocks() -> None:
+    handler, seen = streaming(text_stream("Hi."), text_stream("Hi."))
+    p = provider(handler)
+    await send(p, SystemPrompt("", "Context: 13:05"), [])
+    await send(p, SystemPrompt(""), [])
+    assert seen[0]["system"] == [{"type": "text", "text": "Context: 13:05"}]  # nothing to cache
+    assert "system" not in seen[1]

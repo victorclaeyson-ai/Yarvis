@@ -29,7 +29,7 @@ if TYPE_CHECKING:
     from collections.abc import AsyncGenerator, Callable
 
     from yarvis.agent.toolbox import PendingAction, Toolbox
-    from yarvis.llm.base import LLMProvider
+    from yarvis.llm.base import LLMProvider, SystemPrompt
 
 logger = logging.getLogger(__name__)
 
@@ -225,7 +225,7 @@ class Conversation:
         self,
         llm: LLMProvider,
         *,
-        system_prompt: Callable[[], str],
+        system_prompt: Callable[[], SystemPrompt],
         max_tokens: int,
         max_messages: int = DEFAULT_MAX_MESSAGES,
         clock: Callable[[], float] = time.monotonic,

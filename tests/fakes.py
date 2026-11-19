@@ -23,7 +23,7 @@ if TYPE_CHECKING:
 
     from yarvis.ears import Interruption
     from yarvis.listen import PauseHooks, Utterance
-    from yarvis.llm.base import Message, ToolCall, ToolSpec, WebSearch
+    from yarvis.llm.base import Message, SystemPrompt, ToolCall, ToolSpec, WebSearch
     from yarvis.speech.base import AudioArray
     from yarvis.telemetry import LinkState
     from yarvis.usage import ClaudeUsage
@@ -136,6 +136,7 @@ class FakeLLM:
         self.calls: list[tuple[list[Message], str, int]] = []
         self.offered: list[list[str]] = []  # tool names offered on each call
         self.allowed: list[bool] = []  # whether each call let the model call tools
+        self.systems: list[SystemPrompt] = []  # the system prompt of each call, in its parts
         self.warm_ups = 0
 
     async def warm_up(self) -> None:
@@ -145,12 +146,13 @@ class FakeLLM:
         self,
         messages: Sequence[Message],
         *,
-        system: str,
+        system: SystemPrompt,
         max_tokens: int,
         tools: Sequence[ToolSpec] = (),
         allow_tool_calls: bool = True,
     ) -> AsyncGenerator[str | ToolCall | WebSearch]:
-        self.calls.append((list(messages), system, max_tokens))
+        self.calls.append((list(messages), system.text, max_tokens))
+        self.systems.append(system)
         self.offered.append([tool.name for tool in tools])
         self.allowed.append(allow_tool_calls)
         deltas = self.replies.pop(0) if self.replies else []

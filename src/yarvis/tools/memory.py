@@ -3,15 +3,17 @@
 Why it exists: so "what do you know about me?" and "forget that" work by voice, and so
 Yarvis can keep a lasting fact the user mentions in passing (``memory.auto``).
 
-What it must never do: change memory without the user hearing it. Remembering and
-forgetting are tier 1 and shown on the dashboard; after the turn read outside content they
-need a spoken "yes" (``asks_when_tainted``, decided by the gate in code, DESIGN.md T7).
-Results are the user's own facts, not outside content.
+What it must never do: change memory out of the user's sight. Remembering and forgetting
+are tier 1. A kept fact is shown in the window with an Undo button (``on_kept``), so it
+needs no question, even after outside content (ADR 0021). Forgetting after outside content
+still needs a spoken "yes" (``asks_when_tainted``, decided by the gate in code, DESIGN.md
+T7). Results are the user's own facts, not outside content.
 """
 
 from __future__ import annotations
 
 import asyncio
+import logging
 from typing import TYPE_CHECKING, Any, Final
 
 from pydantic import Field
@@ -20,7 +22,11 @@ from yarvis.memory import MAX_FACT_CHARS, MemoryBookError
 from yarvis.tools.base import Arguments, Tier, Tool, ToolError
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
+
     from yarvis.memory import Fact, MemoryBook
+
+logger = logging.getLogger(__name__)
 
 ANNOUNCE: Final = "I'll remember that."
 
@@ -143,18 +149,28 @@ class MemoryRemember(Tool[RememberArgs]):
     name = "memory_remember"
     tier = Tier.REVERSIBLE
     Args = RememberArgs
-    asks_when_tainted = True
+    # No question, even after outside content: the fact is shown with Undo (ADR 0021).
 
-    def __init__(self, book: MemoryBook, *, auto: bool) -> None:
+    def __init__(
+        self, book: MemoryBook, *, auto: bool, on_kept: Callable[[Fact], None] | None = None
+    ) -> None:
         self._book = book
+        self._on_kept = on_kept
         self.description = _REMEMBER_AUTO if auto else _REMEMBER_ASKED
 
     async def run(self, args: RememberArgs) -> str:
-        """Keep it."""
+        """Keep it, and show it so the user can undo it."""
         try:
             fact = await asyncio.to_thread(self._book.add, args.text, source="voice")
         except MemoryBookError as exc:
             raise ToolError(str(exc)) from exc
+        if self._on_kept is not None:
+            try:
+                self._on_kept(fact)
+            except Exception:
+                # Kept but not shown: say so, so the model doesn't think it failed and retry.
+                logger.exception("A kept fact could not be shown")
+                return f"Remembered as fact {fact.id}, but the window could not show it."
         return f"Remembered as fact {fact.id}."
 
     def describe(self, args: RememberArgs) -> str:
@@ -195,11 +211,16 @@ class MemoryForget(Tool[ForgetArgs]):
         return f'forget "{fact.text}"' if fact is not None else f"forget fact {args.id}"
 
 
-def memory_tools(book: MemoryBook, *, auto: bool) -> list[Tool[Any]]:
-    """Every memory tool, sharing ``book``; ``auto`` lets Yarvis keep facts unasked."""
+def memory_tools(
+    book: MemoryBook, *, auto: bool, on_kept: Callable[[Fact], None] | None = None
+) -> list[Tool[Any]]:
+    """Every memory tool, sharing ``book``.
+
+    ``auto`` lets Yarvis keep facts unasked; ``on_kept`` shows each kept fact (with Undo).
+    """
     return [
         MemoryList(book),
         MemorySearch(book),
-        MemoryRemember(book, auto=auto),
+        MemoryRemember(book, auto=auto, on_kept=on_kept),
         MemoryForget(book),
     ]

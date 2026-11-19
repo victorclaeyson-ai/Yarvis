@@ -317,6 +317,7 @@ class RecordingDashboard:
         self.usage_updates: list[UsageUpdate] = []
         self.timer_updates: list[list[str]] = []
         self.outlooks: list[Outlook] = []
+        self.remembered_facts: list[tuple[int, str]] = []
 
     def links(self, links: Sequence[Link]) -> None:
         self.link_updates.append(tuple(links))
@@ -329,6 +330,9 @@ class RecordingDashboard:
 
     def weather(self, outlook: Outlook) -> None:
         self.outlooks.append(outlook)
+
+    def remembered(self, fact_id: int, text: str) -> None:
+        self.remembered_facts.append((fact_id, text))
 
 
 def spoken(ms: int) -> TurnTimings:

@@ -76,6 +76,10 @@ class Dashboard(Protocol):
         """The weather at home, refreshed."""
         ...
 
+    def remembered(self, fact_id: int, text: str) -> None:
+        """Yarvis kept a fact: show it, with Undo (ADR 0021)."""
+        ...
+
 
 class Reporter(Protocol):
     """What a cloud client tells the dashboard."""

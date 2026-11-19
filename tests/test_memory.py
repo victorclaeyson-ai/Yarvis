@@ -242,7 +242,7 @@ def test_memory_tools_and_their_tiers(book: MemoryBook) -> None:
         "memory_remember": Tier.REVERSIBLE,
         "memory_forget": Tier.REVERSIBLE,
     }
-    assert tools["memory_remember"].asks_when_tainted
+    assert not tools["memory_remember"].asks_when_tainted  # shown with Undo instead (ADR 0021)
     assert tools["memory_forget"].asks_when_tainted
     assert not tools["memory_list"].asks_when_tainted
     assert not any(tool.untrusted_output for tool in tools.values())  # the user's own facts
@@ -267,6 +267,21 @@ async def test_remember_list_search_and_forget_by_voice(book: MemoryBook) -> Non
     assert "1: Studies engineering at KU Leuven." in listed
     assert await reply(conversation, "forget that") == "Forgotten."
     assert book.facts() == ()
+
+
+async def test_a_kept_fact_is_shown_so_it_can_be_undone(book: MemoryBook) -> None:
+    shown: list[tuple[int, str]] = []
+    tools = memory_tools(book, auto=True, on_kept=lambda f: shown.append((f.id, f.text)))
+    llm = FakeLLM(
+        [call("memory_remember", "r1", text="Has a cat called Mies.")],
+        ["I'll remember that."],
+        [call("memory_remember", "r2", text="has a cat called mies")],  # already known
+        ["I know."],
+    )
+    conversation = make_conversation(llm, Toolbox(tools, Gate()))
+    await reply(conversation, "my cat is called Mies")
+    await reply(conversation, "did I tell you about Mies?")
+    assert shown == [(1, "Has a cat called Mies.")]  # once: the second added nothing
 
 
 async def test_what_the_user_sees_for_each_memory_action(book: MemoryBook) -> None:
@@ -590,3 +605,68 @@ async def test_a_damaged_memory_is_reported_not_taken_for_empty(book: MemoryBook
     assert result.is_error
     assert "damaged" in result.content
     assert "yarvis memory clear" in result.content
+
+
+async def test_the_dashboard_shows_what_was_remembered(tmp_path: Path) -> None:
+    from test_usage import RecordingDashboard  # noqa: PLC0415
+
+    book = MemoryBook(tmp_path / MEMORY_FILE)
+    llm = FakeLLM([call("memory_remember", "r1", text="Has a cat called Mies.")], ["Noted."])
+    dashboard = RecordingDashboard()
+    await run_assistant(
+        Config(),
+        api_key=SecretStr("k"),
+        cache_dir=tmp_path,
+        lines=_lines("my cat is called Mies", "q"),
+        ui=RecordingUi(),
+        backends=replace(FakeBackends(llm).build(), memory=lambda: book),
+        voice_input=False,
+        voice_output=False,
+        dashboard=dashboard,
+    )
+    assert dashboard.remembered_facts == [(1, "Has a cat called Mies.")]
+
+
+async def _lines(*items: str) -> AsyncIterator[str]:
+    for item in items:
+        yield item
+
+
+async def test_a_fact_that_could_not_be_shown_is_still_reported(book: MemoryBook) -> None:
+    def broken(fact: object) -> None:
+        msg = "the window is gone"
+        raise RuntimeError(msg)
+
+    llm = FakeLLM([call("memory_remember", "r1", text="Has a cat.")], ["Noted."])
+    tools = memory_tools(book, auto=True, on_kept=broken)
+    await reply(make_conversation(llm, Toolbox(tools, Gate())), "I have a cat")
+    result = llm.calls[1][0][-1].tool_results[0].content
+    assert result == "Remembered as fact 1, but the window could not show it."
+    assert [f.text for f in book.facts()] == ["Has a cat."]
+
+
+def test_a_failed_read_is_tried_again(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A read that fails once (a save replacing the file on Windows) doesn't hide memory."""
+    book = MemoryBook(tmp_path / MEMORY_FILE)
+    MemoryBook(tmp_path / MEMORY_FILE).add("Has a cat.", source="cli")
+    real_load = MemoryBook.load
+    calls = 0
+
+    def flaky(self: MemoryBook) -> tuple[object, ...]:
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            msg = "busy"
+            raise MemoryBookError(msg)
+        return real_load(self)
+
+    monkeypatch.setattr(MemoryBook, "load", flaky)
+    assert book.facts() == ()
+    assert [f.text for f in book.facts()] == ["Has a cat."]
+
+
+def test_forgetting_a_missing_fact_says_it_is_not_there(book: MemoryBook) -> None:
+    from yarvis.memory import FactNotFoundError  # noqa: PLC0415
+
+    with pytest.raises(FactNotFoundError, match="There is no fact 7"):
+        book.forget(7)

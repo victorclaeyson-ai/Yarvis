@@ -1,6 +1,6 @@
 # 10. Calendar and email through the Mac's own accounts
 
-- **Status:** Accepted
+- **Status:** Accepted; its link rule can be turned off by the user since ADR 0021 (`security.confirm_links`)
 - **Date:** 2026-11-15
 
 ## Context

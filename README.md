@@ -153,10 +153,19 @@ Lotte") and it keeps it as a short fact, saying "I'll remember that." Ask "what 
 know about me?" or say "forget that" any time. On the command line,
 `yarvis memory list|add|forget|export|clear` shows and changes the same facts. Only facts
 are kept, never what you said, in a private file; they are sent to Claude with your
-requests like the profile. After Yarvis has read a web page or an email, it asks before it
-remembers or forgets anything, so outside content can't plant a memory. Set
+requests like the profile. Every fact it keeps shows in the window with an UNDO button,
+so it doesn't have to ask. After Yarvis has read a web page or an email, it still asks
+before it forgets anything ([why](docs/adr/0021-fewer-questions.md)). Set
 `[memory] auto = false` to have it remember only when you ask
 ([how it works](docs/adr/0017-memory.md)).
+
+**Fewer questions, if you like.** Yarvis asks before anything that leaves your computer,
+and after it read a web page, an email or a song title it asks more. Two settings in
+`[security]` turn some of that off: `confirm_tier2 = false` stops the questions until
+outside content was read, and `confirm_links = false` lets it open web addresses without
+asking even then. The window shows the address it opens (its first 60 characters), but an
+email could then make Yarvis open an address that carries what it read. Sending mail and MCP calls still ask
+([why](docs/adr/0021-fewer-questions.md)).
 
 **The dashboard.** The window is a heads-up display: Yarvis's core in the middle, your
 conversation under it, and around it every connection (Claude, speech recognition, Spotify,

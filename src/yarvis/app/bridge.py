@@ -17,11 +17,13 @@ with validated arguments (``hello``, ``talk``, ``stop``, ``send``, ``new_convers
 from __future__ import annotations
 
 import json
+import logging
 import queue
 import threading
 from typing import TYPE_CHECKING, Any, Final, Protocol
 
 from yarvis.cli.ui import format_timings
+from yarvis.memory import FactNotFoundError, MemoryBookError
 from yarvis.telemetry import RECENT_TURNS
 from yarvis.usage import PRICES_AS_OF, percentile
 
@@ -38,6 +40,10 @@ Event = dict[str, Any]
 
 MAX_MESSAGE_CHARS: Final = 2_000
 MAX_LABEL_CHARS: Final = 60
+logger = logging.getLogger(__name__)
+
+MAX_FACT_ID: Final = 1_000_000
+"""Fact numbers are small; anything larger from the page is not one."""
 NEW_CONVERSATION: Final = "new conversation"
 """What the dashboard's button sends: handled by code like the spoken command."""
 LEVEL_EVERY_N_FRAMES: Final = 2  # ~15 updates per second is plenty for an animation
@@ -78,8 +84,10 @@ class AppApi:
         user: str | None = None,
         place: str | None = None,
         asks: bool = True,
+        forget: Callable[[int], object] | None = None,
     ) -> None:
         self._commands = commands
+        self._forget = forget
         self._controls = controls
         self._name = name
         self._voice = voice
@@ -112,6 +120,24 @@ class AppApi:
     def new_conversation(self) -> None:
         """Start a new conversation: the same as saying "new conversation"."""
         self._commands.put(NEW_CONVERSATION)
+
+    def forget_fact(self, fact_id: object) -> str:
+        """Undo a kept fact (its Undo button): "forgotten", "gone" or "failed".
+
+        A click by the user, so no question; the model is not involved (ADR 0021).
+        "failed" means the fact may still be kept: the page keeps its Undo button.
+        """
+        if self._forget is None or type(fact_id) is not int or not 0 < fact_id <= MAX_FACT_ID:
+            return "failed"
+        try:
+            self._forget(fact_id)
+        except FactNotFoundError:
+            return "gone"
+        except MemoryBookError as exc:
+            logger.warning("Undo could not forget fact %d: %s", fact_id, exc)
+            return "failed"
+        logger.info("Fact %d forgotten from the window", fact_id)
+        return "forgotten"
 
     def send(self, text: object) -> None:
         """Send a typed message."""
@@ -261,6 +287,10 @@ class AppUi:
     def activity(self, text: str) -> None:
         """Yarvis is doing something."""
         self._emit({"type": "activity", "text": text})
+
+    def remembered(self, fact_id: int, text: str) -> None:
+        """Yarvis kept a fact: the page shows it with Undo."""
+        self._emit({"type": "remembered", "id": fact_id, "text": text})
 
     def nothing_heard(self) -> None:
         """No speech detected."""

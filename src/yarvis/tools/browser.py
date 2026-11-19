@@ -597,6 +597,7 @@ class BrowserOpen(_BrowserTool[OpenArgs]):
     )
     tier = Tier.REVERSIBLE
     Args = OpenArgs
+    opens_links = True
 
     async def run(self, args: OpenArgs) -> str:
         """Open it."""

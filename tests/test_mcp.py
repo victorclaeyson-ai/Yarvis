@@ -678,3 +678,15 @@ def test_approved_definitions_live_in_the_data_folder(tmp_path: Path) -> None:
     approvals = Approvals.of(AppPaths.under(tmp_path))
     approvals.approve("notes", [RemoteTool("a", "b", {})])
     assert json.loads((tmp_path / "data" / "mcp-approved.json").read_text())["notes"]["a"]
+
+
+async def test_an_mcp_call_after_outside_content_asks_even_without_link_questions() -> None:
+    """ADR 0021: ``confirm_links`` covers web addresses only, never MCP calls."""
+    from yarvis.security.gate import Gate  # noqa: PLC0415
+
+    session = FakeSession([definition("add_note", properties={"text": {"type": "string"}})])
+    tool, _ = await connected_tool(session, Tier.REVERSIBLE)
+    args = tool.parse({"text": "the user's notes"})
+    gate = Gate(confirm_external=False, confirm_links=False)
+    verdict = gate.check(tool, tainted=True, sends_out=tool.sends_data_out(args)).verdict
+    assert verdict.value == "confirm"

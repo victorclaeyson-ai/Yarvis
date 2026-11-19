@@ -362,6 +362,7 @@ class OpenWebsite(_Command[UrlArgs]):
     description = "Open an https:// website in the default browser."
     tier = Tier.REVERSIBLE
     Args = UrlArgs
+    opens_links = True
 
     def __init__(self, run: Runner, *, opener: str = OPEN) -> None:
         super().__init__(run)

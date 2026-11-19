@@ -52,7 +52,7 @@ if TYPE_CHECKING:
     from yarvis.config.models import Config
     from yarvis.ears import FrameSource
     from yarvis.llm.base import LLMProvider
-    from yarvis.memory import MemoryBook
+    from yarvis.memory import Fact, MemoryBook
     from yarvis.speech.base import VoiceActivityDetector
     from yarvis.telemetry import Dashboard, Link
     from yarvis.tools.base import Tool
@@ -280,7 +280,15 @@ async def run_assistant(
         engines = [engine for engine in (stt, tts, wake_word) if engine is not None]
         mcp = await _load(stack, engines, backends.mcp(config), on_loading)
         memory = backends.memory()
-        tools, abilities = _tools(config, alarms, backends, spotify, mcp, memory=memory)
+        tools, abilities = _tools(
+            config,
+            alarms,
+            backends,
+            spotify,
+            mcp,
+            memory=memory,
+            on_kept=(lambda f: dashboard.remembered(f.id, f.text)) if dashboard else None,
+        )
         setup = Setup(
             model=config.llm.model or DEFAULT_MODEL,
             hearing=describe_stt(config.voice) if stt is not None else None,
@@ -431,6 +439,7 @@ def _conversation(
     gate = Gate(
         confirm_external=config.security.confirm_tier2,
         allow_dangerous=config.security.allow_tier3,
+        confirm_links=config.security.confirm_links,
     )
     return Conversation(
         llm,
@@ -490,6 +499,7 @@ def _tools(
     mcp: McpTools,
     *,
     memory: MemoryBook | None = None,
+    on_kept: Callable[[Fact], None] | None = None,
 ) -> tuple[list[Tool[Any]], list[str]]:
     """The enabled tools, and what they let Yarvis do (in words, for the system prompt)."""
     tools: list[Tool[Any]] = []
@@ -504,7 +514,7 @@ def _tools(
         tools += personal
         said += abilities(personal)
     if memory is not None:
-        tools += memory_tools(memory, auto=config.memory.auto)
+        tools += memory_tools(memory, auto=config.memory.auto, on_kept=on_kept)
         said.append(memory_ability(auto=config.memory.auto))
     if config.tools.weather:
         tools.append(Weather(config.assistant.location))

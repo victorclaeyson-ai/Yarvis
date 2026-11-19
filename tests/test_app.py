@@ -14,6 +14,7 @@ from yarvis.agent.conversation import is_new_conversation
 from yarvis.app.bridge import AppApi, AppUi, CommandQueue, EventPump, script_for
 from yarvis.app.window import AppError, index_html
 from yarvis.assistant import AssistantControls
+from yarvis.memory import FactNotFoundError, MemoryBookError
 from yarvis.pipeline import TurnResult, TurnTimings
 from yarvis.security.secrets import KEYRING_SERVICE
 from yarvis.telemetry import Link, UsageUpdate
@@ -23,6 +24,8 @@ from yarvis.tools.weather import Outlook
 from yarvis.usage import PRICES_AS_OF, Day
 
 if TYPE_CHECKING:
+    from pathlib import Path
+
     from yarvis.cli.services import Services
     from yarvis.paths import AppPaths
 
@@ -260,7 +263,64 @@ async def test_commands_cross_threads() -> None:
 
 def test_api_exposes_only_intended_methods() -> None:
     public = {name for name in dir(AppApi) if not name.startswith("_")}
-    assert public == {"hello", "talk", "send", "stop", "new_conversation"}
+    assert public == {"hello", "talk", "send", "stop", "new_conversation", "forget_fact"}
+
+
+def test_a_remembered_fact_reaches_the_page() -> None:
+    events: list[dict[str, Any]] = []
+    AppUi(events.append).remembered(3, "Has a cat called Mies.")
+    assert events == [{"type": "remembered", "id": 3, "text": "Has a cat called Mies."}]
+
+
+def test_undo_forgets_only_a_real_fact_number() -> None:
+    forgotten: list[int] = []
+
+    def forget(fact_id: int) -> None:
+        if fact_id == 9:
+            msg = "There is no fact 9."
+            raise FactNotFoundError(msg)
+        if fact_id == 5:
+            msg = "Memory is busy (another Yarvis is saving). Try again."
+            raise MemoryBookError(msg)
+        forgotten.append(fact_id)
+
+    api = AppApi(CommandQueue(), AssistantControls(), name="Y", voice=True, forget=forget)
+    assert api.forget_fact(3) == "forgotten"
+    assert api.forget_fact(9) == "gone"  # already forgotten: nothing left to undo
+    assert api.forget_fact(5) == "failed"  # still kept: the page keeps its Undo button
+    for wrong in ("3", 3.0, True, None, 0, -1, 10**9, [3]):
+        assert api.forget_fact(wrong) == "failed"
+    assert forgotten == [3]
+    without = AppApi(CommandQueue(), AssistantControls(), name="Y", voice=True)
+    assert without.forget_fact(1) == "failed"  # memory is off
+
+
+def test_undo_through_a_second_book_on_the_same_file(tmp_path: Path) -> None:
+    """The window's book and the assistant's book share one file (and its lock)."""
+    from yarvis.memory import MemoryBook  # noqa: PLC0415
+
+    assistant = MemoryBook(tmp_path / "memory.json")
+    fact = assistant.add("Pre-approved all emails.", source="voice")
+    window = MemoryBook(tmp_path / "memory.json")
+    api = AppApi(CommandQueue(), AssistantControls(), name="Y", voice=True, forget=window.forget)
+    assert api.forget_fact(fact.id) == "forgotten"
+    assert assistant.facts() == ()
+    assert api.forget_fact(fact.id) == "gone"
+
+
+def test_the_page_offers_undo_for_a_remembered_fact() -> None:
+    page = index_html()
+    assert "remembered(e)" in page
+    assert "bridge.forget_fact(id)" in page
+    # Only these two remove the button; anything else ("failed", nothing) keeps it.
+    assert 'result !== "forgotten" && result !== "gone"' in page
+
+
+def test_the_page_never_turns_text_into_markup() -> None:
+    """Fact text, replies and page titles reach the page as text only (L3)."""
+    page = index_html()
+    for sink in ("innerHTML", "outerHTML", "insertAdjacentHTML", "document.write", "eval("):
+        assert sink not in page
 
 
 def test_api_stop_reaches_the_controls() -> None:

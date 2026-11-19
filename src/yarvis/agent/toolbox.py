@@ -94,13 +94,21 @@ class Toolbox:
         """What the model is offered."""
         return tuple(tool.spec() for tool in self._tools.values())
 
-    async def run(self, calls: Sequence[ToolCall], *, tainted: bool) -> RoundOutcome:
-        """Run one batch of calls (in order). At most one may wait for confirmation."""
+    async def run(
+        self, calls: Sequence[ToolCall], *, tainted: bool, tainted_before: bool = False
+    ) -> RoundOutcome:
+        """Run one batch of calls (in order). At most one may wait for confirmation.
+
+        ``tainted_before``: the previous turn read outside content, which may live on in the
+        reply that is now part of the history (``Tool.asks_when_tainted``).
+        """
         results: list[ToolResult] = []
         done: list[str] = []
         pending: PendingAction | None = None
         for call in calls:
-            result, parked, untrusted, ran = await self._one(call, tainted=tainted, busy=pending)
+            result, parked, untrusted, ran = await self._one(
+                call, tainted=tainted, tainted_before=tainted_before, busy=pending
+            )
             pending = pending or parked
             tainted = tainted or untrusted
             results.append(result)
@@ -120,10 +128,10 @@ class Toolbox:
         return CONFIRMED_AND_DONE + outcome
 
     async def _one(
-        self, call: ToolCall, *, tainted: bool, busy: PendingAction | None
+        self, call: ToolCall, *, tainted: bool, tainted_before: bool, busy: PendingAction | None
     ) -> tuple[ToolResult, PendingAction | None, bool, str | None]:
         """One call: (result, parked action, untrusted result?, what was done if it ran)."""
-        prepared = await self._prepare(call, tainted=tainted)
+        prepared = await self._prepare(call, tainted=tainted, tainted_before=tainted_before)
         if isinstance(prepared, ToolResult):
             return prepared, None, False, None
         tool, args, verdict = prepared
@@ -153,7 +161,7 @@ class Toolbox:
         return ToolResult(call.id, content), False, description
 
     async def _prepare(
-        self, call: ToolCall, *, tainted: bool
+        self, call: ToolCall, *, tainted: bool, tainted_before: bool = False
     ) -> ToolResult | tuple[Tool[Any], Arguments, Verdict]:
         """Find the tool, validate and resolve the arguments, and ask the gate."""
         tool = self._tools.get(call.name)
@@ -173,7 +181,12 @@ class Toolbox:
             args = await self._resolve(tool, args)
         except ToolError as exc:
             return _error(call, str(exc))
-        decision = self._gate.check(tool, tainted=tainted, sends_out=tool.sends_data_out(args))
+        decision = self._gate.check(
+            tool,
+            tainted=tainted,
+            sends_out=tool.sends_data_out(args),
+            tainted_before=tainted_before,
+        )
         if decision.verdict is Verdict.DENY:
             return _error(call, f"Refused: {decision.reason}")
         return tool, args, decision.verdict

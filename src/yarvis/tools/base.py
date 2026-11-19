@@ -62,6 +62,9 @@ class Tool[A: Arguments](ABC):
     Args: ClassVar[type[Arguments]]
     untrusted_output: ClassVar[bool] = False
     """True if results contain outside content (web pages, messages): the turn is tainted."""
+    asks_when_tainted: ClassVar[bool] = False
+    """True if, after the turn read outside content, a call needs the user's "yes" whatever
+    the tier: changing what Yarvis remembers about the user (DESIGN.md T7)."""
     timeout_s: float | None = None
     """How long one call may take; None: the toolbox's default."""
 

@@ -311,6 +311,18 @@ class SecurityConfig(_Section):
     )
 
 
+class MemoryConfig(_Section):
+    """What Yarvis keeps about the user (ADR 0017)."""
+
+    auto: bool = Field(
+        default=True,
+        description=(
+            "Also remember lasting facts the user states about themselves without being "
+            "asked (it always says so); false: only when asked."
+        ),
+    )
+
+
 class LoggingConfig(_Section):
     """Log verbosity and destinations."""
 
@@ -327,6 +339,7 @@ class Config(_Section):
     tools: ToolsConfig = ToolsConfig()
     mcp: McpConfig = McpConfig()
     security: SecurityConfig = SecurityConfig()
+    memory: MemoryConfig = MemoryConfig()
     logging: LoggingConfig = LoggingConfig()
 
     def security_relaxations(self) -> list[str]:

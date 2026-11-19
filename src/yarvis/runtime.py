@@ -31,6 +31,7 @@ from yarvis.speech.endpointing import EndpointerSettings
 from yarvis.speech.turn_taking import DEFAULT_WAKE_NAMES
 from yarvis.telemetry import Reports, Setup, Telemetry, starting_links
 from yarvis.tools.desktop import abilities
+from yarvis.tools.memory import memory_ability, memory_tools
 from yarvis.tools.skills import UseSkill
 from yarvis.tools.timers import Alarms, timer_tools
 from yarvis.tools.weather import Weather, watch_weather
@@ -49,6 +50,7 @@ if TYPE_CHECKING:
     from yarvis.config.models import Config
     from yarvis.ears import FrameSource
     from yarvis.llm.base import LLMProvider
+    from yarvis.memory import MemoryBook
     from yarvis.speech.base import VoiceActivityDetector
     from yarvis.telemetry import Dashboard, Link
     from yarvis.tools.base import Tool
@@ -152,6 +154,8 @@ class Backends:
     """The Agent Skills the user added."""
     profile: Callable[[], str] = lambda: ""
     """What the user wrote about themselves, read again before every request."""
+    memory: Callable[[], MemoryBook | None] = lambda: None
+    """The facts Yarvis remembers about the user (None: no memory)."""
     usage: Callable[[], UsageBook | None] = lambda: None
     """Where the day's numbers are kept (None: in memory only)."""
 
@@ -161,6 +165,7 @@ class Backends:
         from yarvis.audio.microphone import Microphone  # noqa: PLC0415
         from yarvis.audio.speaker import Speaker  # noqa: PLC0415
         from yarvis.llm.anthropic import AnthropicProvider  # noqa: PLC0415
+        from yarvis.memory import MemoryBook  # noqa: PLC0415
         from yarvis.paths import AppPaths  # noqa: PLC0415
         from yarvis.profile import ProfileReader, profile_path  # noqa: PLC0415
         from yarvis.security.secrets import SecretStore  # noqa: PLC0415
@@ -217,6 +222,7 @@ class Backends:
                 user_skills(SkillLibrary.of(paths)) if config.tools.skills else []
             ),
             profile=ProfileReader(profile_path(paths)),
+            memory=lambda: MemoryBook.of(paths),
             usage=lambda: UsageBook.of(paths),
             computer=lambda config, spotify: computer_tools(
                 browser=config.tools.browser,
@@ -267,7 +273,8 @@ async def run_assistant(
             stack.callback(alarms.close)
         engines = [engine for engine in (stt, tts, wake_word) if engine is not None]
         mcp = await _load(stack, engines, backends.mcp(config), on_loading)
-        tools, abilities = _tools(config, alarms, backends, spotify, mcp)
+        memory = backends.memory()
+        tools, abilities = _tools(config, alarms, backends, spotify, mcp, memory=memory)
         setup = Setup(
             model=config.llm.model or DEFAULT_MODEL,
             hearing=describe_stt(config.voice) if stt is not None else None,
@@ -279,11 +286,18 @@ async def run_assistant(
             personal=any(tool.name.startswith(("calendar_", "mail_")) for tool in tools),
             skills=sum(len(t.skill_names) for t in tools if isinstance(t, UseSkill)),
             profile=bool(backends.profile()),
+            memory=len(memory.facts()) if memory is not None else None,
             mcp=mcp.links,
         )
         _show_dashboard(stack, telemetry, starting_links(config, setup), tools, dashboard)
         conversation = _conversation(
-            config, llm, tools, abilities, profile=backends.profile, on_activity=ui.activity
+            config,
+            llm,
+            tools,
+            abilities,
+            profile=backends.profile,
+            memory=memory,
+            on_activity=ui.activity,
         )
         if on_loading is not None:
             on_loading("Warming up…")
@@ -401,6 +415,7 @@ def _conversation(
     abilities: list[str],
     *,
     profile: Callable[[], str],
+    memory: MemoryBook | None,
     on_activity: Callable[[str], None],
 ) -> Conversation:
     """The conversation with Claude, its tools behind the permission gate."""
@@ -417,10 +432,18 @@ def _conversation(
             abilities=abilities,
             web_search=_web_search(config) and bool(tools),
             profile=profile(),
+            memory=_remembered(memory),
         ),
         max_tokens=config.llm.max_tokens,
         toolbox=Toolbox(tools, gate, on_activity=on_activity) if tools else None,
     )
+
+
+def _remembered(memory: MemoryBook | None) -> list[tuple[int, str]]:
+    """The facts for the system prompt, newest first (read again only after a change)."""
+    if memory is None:
+        return []
+    return [(fact.id, fact.text) for fact in reversed(memory.facts())]
 
 
 def _tools(
@@ -429,6 +452,8 @@ def _tools(
     backends: Backends,
     spotify: SpotifyKeys | None,
     mcp: McpTools,
+    *,
+    memory: MemoryBook | None = None,
 ) -> tuple[list[Tool[Any]], list[str]]:
     """The enabled tools, and what they let Yarvis do (in words, for the system prompt)."""
     tools: list[Tool[Any]] = []
@@ -442,6 +467,9 @@ def _tools(
     if personal := backends.personal(config):
         tools += personal
         said += abilities(personal)
+    if memory is not None:
+        tools += memory_tools(memory, auto=config.memory.auto)
+        said.append(memory_ability(auto=config.memory.auto))
     if config.tools.weather:
         tools.append(Weather(config.assistant.location))
         said.append("tell the weather, now and for the coming week")

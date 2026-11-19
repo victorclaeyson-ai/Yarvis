@@ -182,7 +182,7 @@ tools listed but forbids calling them: the last tool round must answer in words.
 | T4 | Someone else's voice in the room | Visitor says "Hey Yarvis, delete my files" | Tier 3 disabled by default; Tier 3 needs on-screen confirmation, never voice-only |
 | T5 | Network attack on satellite link | Rogue device on the Wi-Fi sends audio or commands | Mutually authenticated, encrypted channel; physical pairing code; LAN-only bind; rate limits (§5.6) |
 | T6 | Secret leakage | API key in logs, config committed to git, key passed to a tool | OS keychain, log redaction, secrets never in tool context (§5.5) |
-| T7 | Memory poisoning | Injected content makes Yarvis "remember" a false instruction | Memory writes from tainted turns require confirmation; memories stored as data, never as instructions |
+| T7 | Memory poisoning | Injected content makes Yarvis "remember" a false instruction | Memory writes and deletes in a tainted turn, and in the turn after one, require a spoken "yes" (`asks_when_tainted`, in the gate); memories stored as data, never as instructions; invisible characters refused (done, ADR 0017) |
 | T8 | Supply chain | Malicious dependency, tampered model weights | Locked hashes, scanning, pinned model checksums, no pickle (§5.7) |
 | T9 | Privacy leak of audio | Recordings stored or uploaded | Audio never persisted or uploaded by default; the 2 s pre-wake buffer only reaches the local speech recognizer, and everything up to the wake phrase is cut from the transcript (§5.8) |
 
@@ -242,8 +242,8 @@ The gate is a single small module (`yarvis/security/gate.py`) with exhaustive te
 |---|---|---|---|
 | Raw audio | No (in-memory ring buffer only; opt-in debug recording) | — | Never (except to a paired satellite), unless AssemblyAI is set up: then the speech of each request, streamed for transcription (EU data zone by default) |
 | Transcripts | Short-term in memory; optional history | Local SQLite | Only the current conversation text, to the configured LLM |
-| Memories | Yes, if enabled | Local SQLite, file mode `0600` | Relevant snippets in LLM context |
 | Profile (`profile.md`, written by the user) | Yes | Config folder, file mode `0600` | With every request, to the configured LLM (ADR 0014); never used if it looks like it holds a key |
+| Memory (`memory.json`: short facts about the user, never transcripts) | Yes, until forgotten (`yarvis memory forget` / `clear`) | Data folder, file mode `0600` | With every request, to the configured LLM (ADR 0017); a fact that looks like a key is refused |
 | Usage numbers (`usage.json`: tokens, searches, seconds, estimated cost and latency per day; never what was said) | Yes, one year | Data folder, file mode `0600` | No (ADR 0015); `yarvis usage clear` deletes them |
 | Home town (the config's `location`) | Yes, in the config | Config folder | To Open-Meteo, for the weather: when asked, and twice an hour for the dashboard (ADR 0015) |
 | Config | Yes | `~/.config/yarvis/` (Linux), `~/Library/Application Support/yarvis/` (macOS) | No |
@@ -301,7 +301,7 @@ yarvis/
 │   ├── agent/       # agent loop, context building, prompts
 │   ├── tools/       # registry, built-ins, mcp/
 │   ├── security/    # gate, taint, secrets, redaction
-│   ├── memory/
+│   ├── memory.py    # facts about the user (tools/memory.py, cli/memory.py)
 │   ├── config/
 │   └── cli/
 ├── tests/           # unit + integration, mirrors src/
@@ -331,8 +331,8 @@ yarvis/
 | **0 · Foundations** | Repo, tooling, CI, config, secrets, logging, event bus, `yarvis doctor` | CI green on macOS + Linux; `doctor` checks mic, speaker, models, keys |
 | **1 · Voice loop** | Audio I/O, wake word, VAD, STT, Claude streaming, TTS, barge-in, latency harness | Natural conversation with barge-in; p50 latency measured and published |
 | **2 · Tools & security core** | Permission gate, taint tracking, confirmations, built-in tools, MCP client + pinning, Agent Skills | Injection suite passing; calendar and email work end to end (through the Mac, ADR 0010); MCP client with pinning and skills (ADR 0013) — done |
-| **2.5 · Polish & reach** | One-line install and `yarvis init`, routines and a morning brief, email drafts, a dashboard with every connection, cost and speed (ADR 0015), prompt caching (ADR 0016), examples, demo video | A stranger installs Yarvis with one command and talks to it within five minutes |
-| **3 · Memory & offline** | Memory store, recall, Ollama offline mode, Dutch voice | Fully offline demo; memory forget/export works |
+| **2.5 · Polish & reach** | One-line install and `yarvis init`, routines and a morning brief, email drafts, a dashboard with every connection, cost and speed (ADR 0015), prompt caching (ADR 0016), memory (ADR 0017), examples, demo video | A stranger installs Yarvis with one command and talks to it within five minutes |
+| **3 · Offline** | Ollama offline mode, Dutch voice (memory moved to Phase 2.5: ADR 0017, forget/export work) | Fully offline demo |
 | **4 · Satellite** | ESP32-S3 firmware, pairing, secure audio streaming, LED states | Satellite pairs in < 1 minute; link passes security review |
 | **5 · Launch** | Demo video, docs site, install polish, launch posts | Public release v1.0 |
 | Later | Windows, speaker verification, more languages, plugin gallery; **communication**: phone calls and SMS from Yarvis's own number (telephony API), and reading who called or messaged you (see §10) | — |

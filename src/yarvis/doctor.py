@@ -15,6 +15,7 @@ from typing import TYPE_CHECKING
 
 from yarvis.audio.devices import AudioBackendError, AudioDevice
 from yarvis.config import Config, ConfigError, load_config
+from yarvis.memory import MemoryBook, MemoryBookError
 from yarvis.models import (
     KOKORO_FILES,
     WAKE_WORD_FILES,
@@ -115,6 +116,7 @@ def run_doctor(ctx: DoctorContext) -> list[CheckResult]:
         check_mcp(ctx, config),
         check_skills(ctx, config),
         check_profile(ctx),
+        check_memory(ctx),
     ]
 
 
@@ -434,3 +436,22 @@ def check_profile(ctx: DoctorContext) -> CheckResult:
             hint="Tell Yarvis about yourself: yarvis profile edit",
         )
     return CheckResult(label, Status.OK, f"{len(text):,} characters, sent with every request")
+
+
+def check_memory(ctx: DoctorContext) -> CheckResult:
+    """The facts Yarvis remembers should be readable (ADR 0017)."""
+    label = "Memory"
+    try:
+        facts = MemoryBook.of(ctx.paths).load()
+    except MemoryBookError as exc:
+        return CheckResult(label, Status.WARN, str(exc), hint="See them: yarvis memory list")
+    if not facts:
+        return CheckResult(label, Status.OK, "nothing remembered yet")
+    count = len(facts)
+    noun = "fact" if count == 1 else "facts"
+    return CheckResult(
+        label,
+        Status.OK,
+        f"{count} {noun}, the newest sent with every request",
+        hint="yarvis memory list",
+    )

@@ -45,13 +45,22 @@ class Gate:
         self._confirm_external = confirm_external
         self._allow_dangerous = allow_dangerous
 
-    def check(self, tool: Tool[Any], *, tainted: bool, sends_out: bool = False) -> Decision:
+    def check(
+        self,
+        tool: Tool[Any],
+        *,
+        tainted: bool,
+        sends_out: bool = False,
+        tainted_before: bool = False,
+    ) -> Decision:
         """Decide for one call.
 
         ``tainted``: the turn has read untrusted content. ``sends_out``: the call can carry
-        text to a destination the model chose (``Tool.sends_data_out``).
+        text to a destination the model chose (``Tool.sends_data_out``). ``tainted_before``:
+        the previous turn read untrusted content (its reply, now history, may repeat it).
         """
-        decision = self._decide(tool.tier, tainted=tainted, sends_out=sends_out)
+        asks = tool.asks_when_tainted and (tainted or tainted_before)
+        decision = self._decide(tool.tier, tainted=tainted, sends_out=sends_out, asks=asks)
         logger.info(
             "Gate: %s (tier %d%s%s) -> %s",
             tool.name,
@@ -62,7 +71,7 @@ class Gate:
         )
         return decision
 
-    def _decide(self, tier: Tier, *, tainted: bool, sends_out: bool) -> Decision:
+    def _decide(self, tier: Tier, *, tainted: bool, sends_out: bool, asks: bool) -> Decision:
         if tier >= Tier.DANGEROUS:
             if self._allow_dangerous:
                 # Design doc §5.3: dangerous actions need an on-screen confirmation per
@@ -75,4 +84,11 @@ class Gate:
             # Outside content (an email, a page) may be steering the model into sending what
             # it has read somewhere: the user hears where it would go and decides.
             return Decision(Verdict.CONFIRM, "Sends data out after reading outside content.")
+        if asks:
+            # Memory poisoning (T7): a page or email must not make Yarvis "remember" a false
+            # instruction, or forget something, without the user hearing it first. That holds
+            # for the turn after it too: the reply that repeated the page is in the history.
+            return Decision(
+                Verdict.CONFIRM, "Changes what Yarvis remembers after reading outside content."
+            )
         return Decision(Verdict.ALLOW, "Allowed.")
